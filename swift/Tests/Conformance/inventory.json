@@ -89,7 +89,7 @@
       "upstream": "sdk/tests/test-agent-ultrafast-options.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "partial: supported-model configuration and provider routing assertions passed; file stops on missing runtime.exit diagnostics; omitted-model and remaining scenarios are not qualified"
+      "status": "passed: complete unchanged upstream native file through Swift; kernel-selected default models, ultrafast routing, pricing eligibility, mode precedence, warnings and rejection; adapter reports actual Swift driver process exit after runtime use"
     },
     {
       "upstream": "sdk/tests/test-backend-info.mjs",

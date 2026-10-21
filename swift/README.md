@@ -43,6 +43,8 @@ Read a turn's events once. Await `result` to observe its completion. Call `cance
 
 Cancelling a Swift task that awaits `turn.result` cancels the turn and makes that waiter throw `CancellationError`.
 
+Omit `model` in a Gateway configuration to use the core's default model. To set options on that choice, pass `FxModel(ultrafast: false)` or another option combination with a nil `id`. Checkpoints and snapshots record the model selected by the core. An empty ID is invalid. Custom providers and subscriptions require an explicit model.
+
 Reasoning effort names must fit in 64 UTF-8 bytes. An oversized name throws `FxError.invalidInput` before loading saved history or creating the runtime. The core validates effort names and model support.
 
 ## Discover models and steer a turn

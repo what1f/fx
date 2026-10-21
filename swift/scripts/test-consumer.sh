@@ -135,6 +135,11 @@ struct SubscriptionHTTP: FxHTTPClient {
         guard try await duplicate.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
         try await restored.close()
         try await store.close()
+        let defaultModel = try await FxEngine.open(configuration: FxConfiguration(apiKey: "consumer-test-key", httpClient: MockHTTP()))
+        let defaultTurn = try await defaultModel.prompt("use the default model")
+        guard try await defaultTurn.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
+        _ = try await defaultModel.checkpoint()
+        try await defaultModel.close()
         let searching = try await FxEngine.open(configuration: FxConfiguration(apiKey: "consumer-test-key",
             model: "swift/consumer", providerTools: [.webSearch], httpClient: ProviderSearchHTTP()))
         let search = try await searching.prompt("search if needed")

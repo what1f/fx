@@ -15,7 +15,7 @@ public struct FxConfiguration: Sendable {
     public var checkpointAfterBytes: Int?
 
     public init(
-        apiKey: String, model: FxModel, instructions: String = "", tools: [FxTool] = [],
+        apiKey: String, model: FxModel = .init(), instructions: String = "", tools: [FxTool] = [],
         providerTools: [FxProviderTool] = [],
         workspace: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         gatewayURL: URL = URL(string: "https://ai-gateway.vercel.sh/v4/ai/language-model")!,
@@ -29,7 +29,7 @@ public struct FxConfiguration: Sendable {
     }
 
     public init(
-        provider: FxProvider, model: FxModel, instructions: String = "", tools: [FxTool] = [],
+        provider: FxProvider, model: FxModel = .init(), instructions: String = "", tools: [FxTool] = [],
         providerTools: [FxProviderTool] = [],
         workspace: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil,
@@ -54,10 +54,10 @@ public struct FxConfiguration: Sendable {
     var nativeOptions: JSONValue {
         get throws {
             var fields: [String: JSONValue] = [
-                "model": .string(model.id),
                 "home": .string(FileManager.default.homeDirectoryForCurrentUser.path),
                 "workspaceRoot": .string(workspace.path), "gatewayChatUrl": .string(gatewayURL.absoluteString),
             ]
+            if let id = model.id { fields["model"] = .string(id) }
             switch provider {
             case .gateway(let apiKey): fields["apiKey"] = .string(apiKey)
             case .subscription(let subscription): fields["provider"] = .string(subscription.provider.rawValue)

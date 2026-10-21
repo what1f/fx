@@ -4,17 +4,18 @@ import CryptoKit
 struct CheckpointMetadata: Sendable {
     let value: JSONValue
 
-    init(configuration: FxConfiguration) throws {
+    init(configuration: FxConfiguration, modelID: String? = nil) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let descriptors = configuration.toolDescriptors.sorted { ($0["name"]?.string ?? "") < ($1["name"]?.string ?? "") }
         let bytes = try encoder.encode(JSONValue.array(descriptors))
         let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
-        value = .object([
+        var fields: [String: JSONValue] = [
             "libfxVersion": .string("2"),
             "toolSchemaHash": .string("sha256:" + hash),
-            "model": .string(configuration.model.id),
-        ])
+        ]
+        if let model = modelID ?? configuration.model.id { fields["model"] = .string(model) }
+        value = .object(fields)
     }
 
     func compare(_ saved: JSONValue?, sessionID: String, observation: FxObservationOptions?) {

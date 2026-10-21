@@ -58,8 +58,10 @@ public actor FxEngine {
            key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw FxError.invalidInput("API key is required")
         }
-        guard !configuration.model.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw FxError.invalidInput("Model is required")
+        if let model = configuration.model.id {
+            guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw FxError.invalidInput("Model is required") }
+        } else {
+            guard case .gateway = configuration.provider else { throw FxError.invalidInput("Model is required") }
         }
         if let effort = configuration.model.reasoningEffort, effort.utf8.count > 64 {
             throw FxError.invalidInput("Reasoning effort must not exceed 64 bytes")
@@ -80,7 +82,6 @@ public actor FxEngine {
             tools[tool.name] = tool
         }
         let httpClient = ProviderHTTPClient(client: configuration.httpClient, provider: configuration.provider)
-        let checkpointMetadata = try CheckpointMetadata(configuration: configuration)
         try Task.checkCancellation()
         let transport = try NativeTransport(options: configuration.nativeOptions, httpClient: httpClient)
         let rpc = RPCClient(transport: transport, observer: configuration.wireObserver)
@@ -105,6 +106,14 @@ public actor FxEngine {
             guard let id = session["sessionId"]?.string else {
                 throw FxError.protocolViolation("Missing session identifier")
             }
+            let selectedModel: String?
+            if case .array(let options) = session["configOptions"] {
+                selectedModel = options.first { $0["id"] == .string("model") }?["currentValue"]?.string
+            } else { selectedModel = nil }
+            guard let modelID = selectedModel, !modelID.isEmpty else {
+                throw FxError.protocolViolation("Missing selected model")
+            }
+            let checkpointMetadata = try CheckpointMetadata(configuration: configuration, modelID: modelID)
             await httpClient.setSessionID(id)
             if configuration.observation != nil, session["_meta"]?["fx"]?["hooksVersion"] != .number(1) {
                 throw FxError.protocolViolation("Runtime does not support observation")

@@ -1,13 +1,14 @@
 /// A model identifier and the options requested for its calls.
 /// The core validates support against the provider's model capabilities.
 public struct FxModel: Sendable, Equatable, Codable, ExpressibleByStringLiteral {
-    public var id: String
+    /// Nil lets the Gateway core select its default model.
+    public var id: String?
     public var reasoningEffort: String?
     public var fast: Bool?
     public var ultrafast: Bool?
 
     public init(
-        id: String,
+        id: String? = nil,
         reasoningEffort: String? = nil,
         fast: Bool? = nil,
         ultrafast: Bool? = nil

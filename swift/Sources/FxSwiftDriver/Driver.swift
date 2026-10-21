@@ -134,7 +134,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             }
             let modelOption = options["model"] ?? .null
             let model = FxModel(
-                id: modelOption["id"]?.string ?? "",
+                id: modelOption["id"]?.string,
                 reasoningEffort: modelOption["effort"]?.string,
                 fast: bool(modelOption["fast"]),
                 ultrafast: bool(modelOption["ultrafast"])
@@ -362,7 +362,10 @@ actor Driver: FxHTTPClient, FxPersistence {
             } catch { try? await store.close(); throw error }
         case "listModels":
             let models = try await FxModel.available(apiKey: value["apiKey"]?.string ?? "", httpClient: self)
-            return .array(models.map { .string($0.id) })
+            return .array(try models.map {
+                guard let id = $0.id else { throw FxModelCatalogError.malformedResponse }
+                return .string(id)
+            })
         case "prompt", "resume":
             guard let engine else { throw FxError.closed }
             let deadline: Date?

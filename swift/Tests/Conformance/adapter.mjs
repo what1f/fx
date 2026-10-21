@@ -16,7 +16,7 @@ function swiftModel(options) {
   const object = options.model !== null && typeof options.model === 'object';
   if (object) {
     if (['effort', 'fast', 'ultrafast'].some(key => Object.hasOwn(options, key))) {
-      throw new TypeError('model options cannot be mixed with top-level settings');
+      throw new TypeError('model options cannot be mixed with top-level effort, fast, or ultrafast');
     }
     for (const key of Object.keys(options.model)) {
       if (!['id', 'effort', 'fast', 'ultrafast'].includes(key)) throw new TypeError(`unsupported model option: ${key}`);
@@ -43,7 +43,7 @@ export async function createFxEngine(options = {}) {
   const sessionIntakes = new Set();
   const fetchControllers = new Map();
   const fetchReaders = new Map();
-  let nextID = 1, turn = null, closed = false, stderr = '';
+  let nextID = 1, turn = null, closed = false, stderr = '', runtimeStarted = false;
   let resumable = false, recoveryCalls = [], recoveryTurnID = null;
 
   child.stderr.on('data', data => { stderr += data; });
@@ -65,6 +65,9 @@ export async function createFxEngine(options = {}) {
     });
   }
   const exited = new Promise(resolve => child.once('exit', (code, signal) => {
+    if (runtimeStarted) {
+      try { options.onEvent?.({ type: 'runtime.exit', code, signal }); } catch {}
+    }
     const error = new Error(`Swift driver exited: ${code ?? signal}${stderr ? `\n${stderr}` : ''}`);
     for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
@@ -109,7 +112,10 @@ export async function createFxEngine(options = {}) {
       }
     } else if (value.observationError) {
       try { Promise.resolve(options.hooks?.onError?.(new Error(value.observationError))).catch(() => {}); } catch {}
-    } else if (value.diagnostic) { options.onEvent?.(value.diagnostic); }
+    } else if (value.diagnostic) {
+      if (value.diagnostic.type === 'acp.send') runtimeStarted = true;
+      options.onEvent?.(value.diagnostic);
+    }
     else if ('id' in value) {
       const waiter = pending.get(value.id);
       pending.delete(value.id);
@@ -395,7 +401,7 @@ export async function createFxEngine(options = {}) {
         if (stderr) throw new Error(stderr);
       },
     };
-  } catch (error) { child.kill(); await exited; throw error; }
+  } catch (error) { child.stdin.end(); await exited; lines.close(); throw error; }
 }
 
 async function encodePrompt(input) {

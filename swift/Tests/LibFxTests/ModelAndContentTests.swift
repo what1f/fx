@@ -6,13 +6,15 @@ private actor RequestRecorder: FxHTTPClient {
     var calls: [JSONValue] = []
     var frames: [JSONValue] = []
     var catalogRequests = 0
+    var modelHeaders: [String?] = []
     func record(_ frame: JSONValue) { frames.append(frame) }
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         let payload: String
         if request.httpMethod == "GET" {
             catalogRequests += 1
-            payload = #"{"data":[{"id":"swift/vision","type":"language","tags":["vision","tool-use","reasoning"],"reasoning_options":[{"type":"effort","values":["low","high"]}],"fast_options":[{"type":"toggle"}]}]}"#
+            payload = #"{"data":[{"id":"swift/vision","type":"language","tags":["vision","tool-use","reasoning"],"reasoning_options":[{"type":"effort","values":["low","high"]}],"fast_options":[{"type":"toggle"}]},{"id":"openai/swift-ultra","type":"language","owned_by":"openai","fast_options":[{"type":"toggle"}],"pricing":{"service_tiers":{"ultrafast":{"input":0.00006,"output":0.0003}}}}]}"#
         } else {
+            modelHeaders.append(request.value(forHTTPHeaderField: "ai-language-model-id"))
             calls.append(try JSONDecoder().decode(JSONValue.self, from: request.httpBody!))
             payload = "data: {\"type\":\"text-delta\",\"delta\":\"ok\"}\n\ndata: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\",\"raw\":\"stop\"}}\n\ndata: [DONE]\n\n"
         }
@@ -89,6 +91,91 @@ func oversizedEffortIsRejectedBeforeCoreAllocation(effort: String) async throws 
     #expect(requests.first?["reasoning"] == nil)
     #expect(requests.first?["providerOptions"]?["gateway"]?["speed"] == nil)
     try await engine.close()
+}
+
+@Test(arguments: [false, true])
+func kernelDefaultModelMatchesSavedMetadataAndRestoredRequests(useJournal: Bool) async throws {
+    let recorder = RequestRecorder(), store = FxMemoryPersistence()
+    var configuration = FxConfiguration(apiKey: "test-key", httpClient: recorder)
+    configuration.wireObserver = { direction, frame in
+        if direction == .sent { await recorder.record(frame) }
+    }
+    #expect(configuration.model.id == nil)
+    let engine = try await FxEngine.open(configuration: configuration, persistence: useJournal ? store : nil)
+    let turn = try await engine.prompt("hello")
+    #expect(try await turn.result.stopReason == .endTurn)
+    let checkpoint: Data?
+    if useJournal { try await engine.saveCheckpoint(); checkpoint = nil }
+    else { checkpoint = try await engine.checkpoint() }
+    let headers = await recorder.modelHeaders
+    let model = try #require(headers.first ?? nil)
+    #expect(!model.isEmpty)
+    let frames = await recorder.frames
+    let exported = try #require(frames.first { $0["method"] == .string(useJournal ? "libfx/snapshot" : "libfx/checkpoint") })
+    #expect(exported["params"]?["checkpointMeta"]?["model"] == .string(model))
+    try await engine.close()
+    let restored = try await FxEngine.open(configuration: configuration, checkpoint: checkpoint, persistence: useJournal ? store : nil)
+    let next = try await restored.prompt("continue")
+    #expect(try await next.result.stopReason == .endTurn)
+    #expect(await recorder.modelHeaders == [model, model])
+    try await restored.close()
+}
+
+@Test(arguments: [false, true])
+func nonGatewayProvidersStillRequireAnExplicitModel(subscription: Bool) async throws {
+    let recorder = RequestRecorder()
+    let provider: FxProvider
+    if subscription {
+        provider = .subscription(FxSubscription(provider: .codex, credentials: { _ in
+            Issue.record("Credentials loaded without a model")
+            throw FxError.invalidInput("Unexpected credential lookup")
+        }))
+    } else {
+        provider = .custom(try FxCustomProvider(name: "fixture", baseURL: URL(string: "https://example.com/v1")!))
+    }
+    await #expect(throws: FxError.invalidInput("Model is required")) {
+        try await FxEngine.open(configuration: FxConfiguration(provider: provider, httpClient: recorder))
+    }
+    #expect(await recorder.catalogRequests == 0)
+    #expect(await recorder.calls.isEmpty)
+}
+
+@Test(arguments: [false, true])
+func ultrafastRoutingTakesPriorityOverFastWhenEnabled(ultrafast: Bool) async throws {
+    let recorder = RequestRecorder()
+    let engine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "test-key",
+        model: FxModel(id: "openai/swift-ultra", fast: true, ultrafast: ultrafast), httpClient: recorder))
+    #expect(await recorder.catalogRequests == 1)
+    let turn = try await engine.prompt("hello")
+    #expect(try await turn.result.stopReason == .endTurn)
+    let requests = await recorder.calls
+    let options = try #require(requests.first?["providerOptions"])
+    if ultrafast {
+        #expect(options["openai"]?["serviceTier"] == .string("ultrafast"))
+        #expect(options["gateway"]?["only"] == .array([.string("openai")]))
+        #expect(options["gateway"]?["speed"] == nil)
+    } else {
+        #expect(options["openai"]?["serviceTier"] == nil)
+        #expect(options["gateway"]?["only"] == nil)
+        #expect(options["gateway"]?["speed"] == .string("fast"))
+    }
+    try await engine.close()
+}
+
+@Test func unsupportedUltrafastNeverSendsChat() async throws {
+    let recorder = RequestRecorder()
+    do {
+        let engine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "test-key",
+            model: FxModel(id: "swift/vision", ultrafast: true), httpClient: recorder))
+        try await engine.close()
+        Issue.record("Unsupported ultrafast was accepted")
+    } catch FxError.rpc(_, _, let data) {
+        #expect(data?["code"] == .string("LIBFX_MODEL_UNSUPPORTED_ULTRAFAST"))
+        #expect(data?["model"] == .string("swift/vision"))
+        #expect(data?["capability"] == .string("ultrafast"))
+    }
+    #expect(await recorder.catalogRequests == 1)
+    #expect(await recorder.calls.isEmpty)
 }
 
 @Test func imageBytesReachProviderWithoutEnteringACPFrames() async throws {
