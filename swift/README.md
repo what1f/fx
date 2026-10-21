@@ -147,6 +147,14 @@ Pass `providerTools: [.webSearch]` to `FxConfiguration` to advertise search exec
 
 Images use `Data` and a supported format. Each prompt accepts up to eight images, at most 3.75 MiB each and 6 MiB together, subject to the encoded request limit. The core checks image content and model capabilities. Image resizing and external image storage are not implemented yet.
 
+## Resolve core permission requests
+
+Set `FxConfiguration.onPermission` to handle a permission request from the core. The asynchronous callback receives a `FxPermissionRequest` with the public session and turn IDs, tool details, bounded display input, and offered options. Return `.select(optionID:)` with one of those option IDs, or `.cancel`. Each option has a typed kind for allowing or rejecting once or for the session; your app can use that kind to localize its controls.
+
+A missing callback, callback error, malformed request, or unoffered selection denies the request. The SDK does not copy callback errors into replies. Callback tasks are cancelled when their turn ends, is cancelled, or closes. A late callback cannot approve a later turn. Durable workers check their lease before and after the callback. Keep callbacks cancellable so your approval interface can dismiss pending work.
+
+This callback handles core permission requests. Host tool closures remain responsible for authorizing their own effects. Declaring a host tool does not automatically route its execution through this callback.
+
 ## Observe runtime events
 
 Set `FxConfiguration.observation` to receive semantic events in delivery order:

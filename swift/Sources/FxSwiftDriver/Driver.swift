@@ -38,6 +38,7 @@ actor Driver: FxHTTPClient, FxPersistence {
     private var store: (any FxPersistence)?
     private var turns: [String: FxTurn] = [:]
     private var credentialWaiters: [String: CheckedContinuation<JSONValue, any Error>] = [:]
+    private var permissionWaiters: [String: CheckedContinuation<FxPermissionDecision, any Error>] = [:]
     private var nextFetchID = 1
     private var retryObservers: [String: CheckedContinuation<Void, Never>] = [:]
     private var fetchWaiters: [Int: CheckedContinuation<FxHTTPResponse, any Error>] = [:]
@@ -220,6 +221,10 @@ actor Driver: FxHTTPClient, FxPersistence {
             config.onTransportEvent = { [weak self] event in
                 if case .retrying = event { await self?.observeRetry(event) }
                 else { DriverOutput.emit(.object(["diagnostic": encodeTransportEvent(event)])) }
+            }
+            config.onPermission = { [weak self] request in
+                guard let self else { throw FxError.closed }
+                return try await self.requestPermission(request)
             }
             config.wireObserver = { [weak self] direction, message in
                 await self?.emit(.object(["diagnostic": .object([
@@ -486,6 +491,11 @@ actor Driver: FxHTTPClient, FxPersistence {
                 fetchStreams.removeValue(forKey: id)
             }
             return .null
+        case "permissionResult":
+            if let token = value["token"]?.string, let waiter = permissionWaiters.removeValue(forKey: token) {
+                waiter.resume(returning: value["optionID"]?.string.map { .select(optionID: $0) } ?? .cancel)
+            }
+            return .null
         case "credentialResult":
             guard let token = value["token"]?.string, let waiter = credentialWaiters.removeValue(forKey: token) else {
                 throw FxError.invalidInput("Unknown credential request")
@@ -650,6 +660,28 @@ actor Driver: FxHTTPClient, FxPersistence {
         if let reference { return FxImage(reference: reference, format: format) }
         throw FxError.invalidInput("Image data or reference is required")
     }
+
+    private func requestPermission(_ request: FxPermissionRequest) async throws -> FxPermissionDecision {
+        let token = UUID().uuidString
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { waiter in
+                permissionWaiters[token] = waiter
+                var tool: [String: JSONValue] = ["toolCallId": .string(request.tool.id), "name": .string(request.tool.name),
+                                                "title": .string(request.tool.title), "kind": .string(request.tool.kind.rawValue)]
+                if case .complete(let input) = request.tool.input { tool["rawInput"] = input }
+                if case .truncated(let preview) = request.tool.input { tool["inputPreview"] = .string(preview) }
+                emit(.object(["permissionRequest": .object([
+                    "token": .string(token), "sessionId": .string(request.sessionID), "turnId": .string(request.turnID),
+                    "toolCall": .object(tool), "options": .array(request.options.map { option in
+                        .object(["optionId": .string(option.id), "name": .string(option.name), "kind": .string(option.kind.rawValue)])
+                    }),
+                ])]))
+            }
+        } onCancel: { Task { await self.cancelPermission(token) } }
+    }
+
+    private func cancelPermission(_ token: String) { permissionWaiters.removeValue(forKey: token)?.resume(throwing: FxError.cancelled) }
 
     private func observeRetry(_ event: FxTransportEvent) async {
         let token = UUID().uuidString

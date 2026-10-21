@@ -149,7 +149,11 @@ struct SubscriptionHTTP: FxHTTPClient {
         let transportEvents = TransportEvents()
         let engine = try await FxEngine.open(configuration: FxConfiguration(
             apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP(), checkpointAfterBytes: 0,
-            onTransportEvent: { transportEvents.record($0) }
+            onTransportEvent: { transportEvents.record($0) },
+            onPermission: { request in
+                let offered: FxPermissionOption? = request.options.first { $0.kind == .rejectOnce }
+                return offered.map { FxPermissionDecision.select(optionID: $0.id) } ?? .cancel
+            }
         ), persistence: store)
         let turn = try await engine.prompt("hello", id: "consumer-turn")
         var text = ""

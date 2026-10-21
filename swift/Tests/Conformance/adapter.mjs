@@ -83,7 +83,12 @@ export async function createFxEngine(options = {}) {
   const fetchErrorNames = [];
   lines.on('line', line => {
     const value = JSON.parse(line);
-    if (value.refreshLockRequest) {
+    if (value.permissionRequest) {
+      const { token, ...permission } = value.permissionRequest;
+      void Promise.resolve().then(() => options.onPermission?.(permission))
+        .then(optionID => request('permissionResult', { token, ...(typeof optionID === 'string' ? { optionID } : {}) }),
+          () => request('permissionResult', { token })).catch(() => {});
+    } else if (value.refreshLockRequest) {
       const call = value.refreshLockRequest;
       Promise.resolve().then(() => options.refreshLock({ provider: call.provider, sessionId: call.sessionId },
         () => request('refreshLockedOperation', { token: call.token })))

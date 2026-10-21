@@ -11,6 +11,8 @@ public struct FxConfiguration: Sendable {
     public var gatewayURL: URL
     public var httpClient: any FxHTTPClient
     public var observation: FxObservationOptions?
+    /// Chooses an offered core permission option. Missing or failed callbacks deny the request.
+    public var onPermission: (@Sendable (FxPermissionRequest) async throws -> FxPermissionDecision)?
     /// Receives request metadata. The transport awaits this callback before advancing.
     public var onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)?
     /// Journal bytes between automatic snapshots. Nil disables automatic snapshots.
@@ -23,11 +25,12 @@ public struct FxConfiguration: Sendable {
         gatewayURL: URL = URL(string: "https://ai-gateway.vercel.sh/v4/ai/language-model")!,
         httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil,
         checkpointAfterBytes: Int? = 1024 * 1024,
-        onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)? = nil
+        onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)? = nil,
+        onPermission: (@Sendable (FxPermissionRequest) async throws -> FxPermissionDecision)? = nil
     ) {
         self.init(provider: .gateway(apiKey: apiKey), model: model, instructions: instructions,
                   tools: tools, providerTools: providerTools, workspace: workspace, httpClient: httpClient,
-                  observation: observation, checkpointAfterBytes: checkpointAfterBytes, onTransportEvent: onTransportEvent)
+                  observation: observation, checkpointAfterBytes: checkpointAfterBytes, onTransportEvent: onTransportEvent, onPermission: onPermission)
         self.gatewayURL = gatewayURL
     }
 
@@ -37,7 +40,8 @@ public struct FxConfiguration: Sendable {
         workspace: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil,
         checkpointAfterBytes: Int? = 1024 * 1024,
-        onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)? = nil
+        onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)? = nil,
+        onPermission: (@Sendable (FxPermissionRequest) async throws -> FxPermissionDecision)? = nil
     ) {
         self.provider = provider
         self.model = model
@@ -49,6 +53,7 @@ public struct FxConfiguration: Sendable {
         self.httpClient = httpClient
         self.onTransportEvent = onTransportEvent
         self.observation = observation
+        self.onPermission = onPermission
         self.checkpointAfterBytes = checkpointAfterBytes
     }
 

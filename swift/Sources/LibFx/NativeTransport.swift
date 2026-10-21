@@ -77,6 +77,7 @@ actor NativeTransport: CoreTransport {
 
     func write(_ data: Data) throws {
         guard !closed else { throw FxError.closed }
+        try Task.checkCancellation()
         let status = data.withUnsafeBytes {
             fx_core_write(handle.pointer, $0.bindMemory(to: UInt8.self).baseAddress, data.count)
         }

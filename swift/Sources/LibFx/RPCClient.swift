@@ -94,6 +94,7 @@ actor RPCClient {
         var data = try JSONEncoder().encode(message)
         data.append(10)
         await observer?(.sent, message)
+        try Task.checkCancellation()
         try await transport.write(data)
     }
 

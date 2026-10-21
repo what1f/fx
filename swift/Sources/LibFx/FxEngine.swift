@@ -6,6 +6,7 @@ public actor FxEngine {
     private let rpc: RPCClient
     private let transport: NativeTransport
     private let tools: [String: FxTool]
+    private let permissions: PermissionRequests
     private let journal: JournalWriter?
     private let observation: FxObservationOptions?
     private let checkpointAfterBytes: Int?
@@ -33,12 +34,22 @@ public actor FxEngine {
 
     private init(
         sessionID: String, rpc: RPCClient, transport: NativeTransport,
-        tools: [String: FxTool], journal: JournalWriter?, observation: FxObservationOptions?, checkpointAfterBytes: Int?, checkpointMetadata: CheckpointMetadata
+        tools: [String: FxTool], journal: JournalWriter?, observation: FxObservationOptions?, checkpointAfterBytes: Int?, checkpointMetadata: CheckpointMetadata, onPermission: PermissionRequests.Handler?
     ) {
         self.sessionID = sessionID
         self.rpc = rpc
         self.transport = transport
         self.tools = tools
+        let permissionHandler: PermissionRequests.Handler?
+        if let onPermission {
+            permissionHandler = { request in
+                try await journal?.check()
+                let decision = try await onPermission(request)
+                try await journal?.check()
+                return decision
+            }
+        } else { permissionHandler = nil }
+        self.permissions = PermissionRequests(sessionID: sessionID, rpc: rpc, handler: permissionHandler)
         self.journal = journal
         self.observation = observation
         self.checkpointAfterBytes = checkpointAfterBytes
@@ -120,7 +131,7 @@ public actor FxEngine {
                 throw FxError.protocolViolation("Runtime does not support observation")
             }
             let journal = persistence.map { JournalWriter(store: $0, head: loaded?.head, lastSequence: loaded?.lastSequence ?? 0, tailBytes: loaded?.tailBytes ?? 0) }
-            let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes, checkpointMetadata: checkpointMetadata)
+            let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes, checkpointMetadata: checkpointMetadata, onPermission: configuration.onPermission)
             await rpc.setHandler { [weak engine] message in await engine?.handle(message) }
             if let checkpoint {
                 try await transport.putAttachment(checkpoint, id: 1)
@@ -510,8 +521,10 @@ public actor FxEngine {
                 await self.removeTool(callID)
             }
         } else if message.method == "session/request_permission", let id = message.id {
-            // Host tools must authorize their own effects. Unhandled core permission requests are denied.
-            try? await rpc.respond(id: id, result: .object(["outcome": .object(["outcome": .string("cancelled")])]))
+            let expectedTurn = turnID
+            await permissions.handle(id: id, params: message.params, turnID: publicTurnID, scope: expectedTurn) { [weak self] in
+                await self?.isActive(expectedTurn) == true
+            }
         } else if let id = message.id {
             try? await rpc.respond(id: id, error: .protocolViolation("Unsupported host request: \(message.method)"))
         }
@@ -553,6 +566,7 @@ public actor FxEngine {
         defer { cancelling = false; startNextFollowUp() }
         for task in toolTasks.values { task.cancel() }
         toolTasks.removeAll()
+        await permissions.cancel(scope: id)
         guard await promptDispatch?.wait() == true, turnID == id, !closed else { return }
         try? await rpc.notify("session/cancel", .object(["sessionId": .string(sessionID)]))
         await transport.abortEffects()
@@ -604,6 +618,7 @@ public actor FxEngine {
         guard turnID == id else { return }
         for task in toolTasks.values { task.cancel() }
         toolTasks.removeAll()
+        Task { await permissions.cancel(scope: id) }
         if let error { output?.finish(throwing: error) } else { output?.finish() }
         output = nil
         turnID = nil
@@ -680,6 +695,7 @@ public actor FxEngine {
         let checkpointSave = checkpointSaveTask
         let task = Task {
             let saved = await checkpointSave?.result
+            await permissions.cancelAll()
             await rpc.close()
             try await journal?.check()
             try saved?.get()

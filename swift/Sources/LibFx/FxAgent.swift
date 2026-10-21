@@ -145,6 +145,14 @@ public actor FxAgent {
         var config = configured(for: input.options)
         config.checkpointAfterBytes = checkpointAfterBytes
         let store = self.store
+        if let onPermission = configuration.onPermission {
+            config.onPermission = { request in
+                try await store.checkLease(lease)
+                let decision = try await onPermission(request.scoped(sessionID: lease.sessionID, turnID: input.id))
+                try await store.checkLease(lease)
+                return decision
+            }
+        }
         config.tools = configuration.tools.map { tool in
             FxTool(name: tool.name, description: tool.description, inputSchema: tool.inputSchema,
                    isIdempotent: tool.isIdempotent, writes: tool.writes) { value, context in
