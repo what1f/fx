@@ -16,6 +16,7 @@ const termScripts = [
   "test-term-agents-md.mjs",
 ];
 const commands = [
+  [process.execPath, [fileURLToPath(new URL("test-v27.mjs", import.meta.url))]],
   [process.execPath, ["--experimental-wasm-jspi", fileURLToPath(new URL("test-wasm-jspi-tier-up.mjs", import.meta.url))]],
   [process.execPath, [fileURLToPath(new URL("test-core-output.mjs", import.meta.url))]],
   [process.execPath, ["--experimental-wasm-jspi", fileURLToPath(new URL("test-core-output-pressure.mjs", import.meta.url)), "wasm"]],

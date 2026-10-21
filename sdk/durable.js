@@ -1,3 +1,5 @@
+import { foldCommits, withCommit } from "./durable/v27.mjs";
+
 // Durable agent sessions: the code that runs an agent in a script runs it in
 // production. Every model step and tool intent is stored in the session's
 // log before anything depends on it, one worker at a time runs a session
@@ -273,6 +275,9 @@ function afterCutoff(cut) {
  * whether a lease stands; `alive` returns true, false, or null for unknown.
  */
 export function foldSessionLog(entries, { now = 0, alive = () => null } = {}) {
+  // Fold the portable stream first. The lease projection below continues to
+  // own scheduling until every durable consumer has moved to these tables.
+  foldCommits(entries);
   let checkpoint = null;
   for (const item of entries) if (item.entry?.k === "checkpoint") checkpoint = item;
   const base = checkpoint?.entry ?? null;
@@ -1588,7 +1593,10 @@ async function recordMessage(log, state, message) {
   if (idInUse(state, message)) throw messageIdInUse(message);
   const entries = messageEntries(state, message);
   const appended = [];
-  for (const entry of entries) appended.push({ cursor: await log.append(entry), entry });
+  for (const entry of entries) {
+    const stored = withCommit(entry, state.maxCursor + appended.length);
+    appended.push({ cursor: await log.append(stored), entry: stored });
+  }
   return appended;
 }
 
@@ -1783,7 +1791,10 @@ class SessionWorker {
       // Both writes go out at once and neither waits for the other; the
       // claim settles once both have, with the lease's cursor if it landed
       // and the first failure.
-      const writes = [log.append(lease), ...(early?.writes ?? []).map((entry) => log.append(entry))];
+      const writes = [
+        log.append(withCommit(lease, state.maxCursor)),
+        ...(early?.writes ?? []).map((entry, index) => log.append(withCommit(entry, state.maxCursor + index + 1))),
+      ];
       const claimed = Promise.allSettled(writes).then(async ([leased, ...rest]) => {
         const head = leased.status === "fulfilled" ? leased.value : null;
         const error = leased.status === "rejected" ? leased.reason : rest.find((item) => item.status === "rejected")?.reason ?? null;
@@ -1863,7 +1874,8 @@ class SessionWorker {
       const appended = chain.then(async () => {
         if (failed) throw failed;
         try {
-          head = await log.append({ ...entry, a: head });
+          const chainedEntry = { ...entry, a: head };
+          head = await log.append(withCommit(chainedEntry, Number(head ?? 0)));
           for (const mark of entry.marks ?? []) if (typeof mark.start === "string") started.add(mark.start);
           return head;
         } catch (error) {
