@@ -11,6 +11,9 @@ const checks = [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-agent-steering.mjs', 'native', '--hooks',
   ] },
   ...[
+    ['automatic', "a turn's end saves a checkpoint once the records since the last reach 64 KiB, and the next turn starts from it"],
+    ['tools', 'a tool that stops being idempotent changes the tools a checkpoint names'],
+    ['metadata', 'a checkpoint names the libfx, tools and model that saved it, and a resume with others hears so'],
     ['text', 'a checkpoint restores the conversation in a new agent'],
     ['image', 'a checkpoint after an image prompt holds the image, and a new agent sends it'],
   ].map(([kind, test]) => ({ name: `upstream/test-durable-checkpoint-${kind}`, expected: '1/1 durable tests passed', env: { LIBFX_TEST_ONLY: test }, args: [

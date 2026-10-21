@@ -215,7 +215,8 @@ actor Driver: FxHTTPClient, FxPersistence {
                 let sessionStore = try FxSessionStore(url: options["sessionStorePath"]?.string.map { URL(fileURLWithPath: $0) })
                 self.sessionStore = sessionStore
                 agent = try FxAgent(configuration: config, name: options["name"]?.string ?? "default", store: sessionStore,
-                                    checkpoint: options["checkpoint"]?.string.flatMap { Data(base64Encoded: $0) })
+                                    checkpoint: options["checkpoint"]?.string.flatMap { Data(base64Encoded: $0) },
+                                    checkpointAfterBytes: options["checkpointAfterBytes"] == nil ? 64 * 1024 : config.checkpointAfterBytes)
                 return .object([:])
             }
             let checkpoint = options["checkpoint"]?.string.flatMap { Data(base64Encoded: $0) }

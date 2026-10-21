@@ -7,16 +7,19 @@ public actor FxAgent {
     let store: FxSessionStore
     private let configuration: FxConfiguration
     private let initialCheckpoint: Data?
+    private let checkpointAfterBytes: Int?
     private var workers: [String: Task<Void, Never>] = [:]
     private var failures: [String: any Error] = [:]
     private var intakes = 0
     private var closed = false
 
-    public init(configuration: FxConfiguration, name: String = "default", store: FxSessionStore, checkpoint: Data? = nil) throws {
+    public init(configuration: FxConfiguration, name: String = "default", store: FxSessionStore, checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024) throws {
         guard validSessionIdentifier(name), name.utf8.count <= 64,
               let first = name.utf8.first, (48...57).contains(first) || (65...90).contains(first) || (97...122).contains(first) else { throw FxError.invalidInput("Invalid agent name") }
         self.configuration = configuration
         self.initialCheckpoint = checkpoint
+        if let checkpointAfterBytes, checkpointAfterBytes < 0 { throw FxError.invalidInput("Checkpoint interval must not be negative") }
+        self.checkpointAfterBytes = checkpointAfterBytes
         self.name = name
         self.store = store
     }
@@ -36,7 +39,9 @@ public actor FxAgent {
         if let checkpoint = initialCheckpoint {
             do { _ = try await store.snapshot(session: session, agent: name) }
             catch FxSessionError.notFound {
-                let temporary = try await FxEngine.open(configuration: configured(for: options), checkpoint: checkpoint)
+                var config = configured(for: options)
+                config.observation = nil
+                let temporary = try await FxEngine.open(configuration: config, checkpoint: checkpoint)
                 try await temporary.close()
             }
         }
@@ -134,6 +139,7 @@ public actor FxAgent {
             return
         }
         var config = configured(for: input.options)
+        config.checkpointAfterBytes = checkpointAfterBytes
         let store = self.store
         config.tools = configuration.tools.map { tool in
             FxTool(name: tool.name, description: tool.description, inputSchema: tool.inputSchema,

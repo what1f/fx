@@ -149,3 +149,57 @@ private actor PausedCheckpointStore: FxCheckpointPersistence {
     #expect(await store.closeCompleted)
     #expect(await store.load().checkpoint != nil)
 }
+
+@Test func checkpointMetadataDetectsConfigurationChangesWithoutPreventingRestore() async throws {
+    let observations = Observations()
+    func tool(_ name: String, idempotent: Bool = true, reverseSchema: Bool = false) -> FxTool {
+        let schema: JSONValue = reverseSchema
+            ? .object(["properties": .object(["key": .object(["type": .string("string")])]), "type": .string("object")])
+            : .object(["type": .string("object"), "properties": .object(["key": .object(["type": .string("string")])])])
+        return FxTool(name: name, description: "Look up a value", inputSchema: schema, isIdempotent: idempotent) { _, _ in "value" }
+    }
+    var config = FxConfiguration(apiKey: "source-key", model: "swift/observe", tools: [tool("alpha"), tool("beta")],
+                                 httpClient: ObservationHTTP(), observation: FxObservationOptions(onEvent: observations.record))
+    let source = try await FxEngine.open(configuration: config)
+    let turn = try await source.prompt("remember me")
+    #expect(try await turn.result.stopReason == .endTurn)
+    let checkpoint = try await source.checkpoint()
+    try await source.close()
+    config.provider = .gateway(apiKey: "new-key")
+    config.instructions = "new instructions"
+    config.tools = [tool("beta", reverseSchema: true), tool("alpha", reverseSchema: true)]
+    let unchanged = try await FxEngine.open(configuration: config, checkpoint: checkpoint)
+    try await unchanged.close()
+    #expect(!observations.events.contains { $0.kind == .checkpointMismatch })
+    config.model = "swift/other"
+    config.tools = [tool("alpha", idempotent: false), tool("beta")]
+    let changed = try await FxEngine.open(configuration: config, checkpoint: checkpoint)
+    try await changed.close()
+    let mismatch = try #require(observations.events.first { $0.kind == .checkpointMismatch })
+    #expect(mismatch.data["changed"] == .array([.string("toolSchemaHash"), .string("model")]))
+    #expect(mismatch.data["saved"]?["model"] == .string("swift/observe"))
+    #expect(mismatch.data["current"]?["model"] == .string("swift/other"))
+    #expect(mismatch.sessionID == changed.sessionID)
+    #expect(!String(describing: mismatch).contains("source-key"))
+}
+
+@Test func snapshotMetadataReportsMismatchAndContainsObserverFailure() async throws {
+    let store = FxMemoryPersistence(), observations = Observations()
+    var config = FxConfiguration(apiKey: "test-key", model: "swift/observe", httpClient: ObservationHTTP(), checkpointAfterBytes: 0)
+    let source = try await FxEngine.open(configuration: config, persistence: store)
+    let turn = try await source.prompt("save metadata")
+    #expect(try await turn.result.stopReason == .endTurn)
+    try await source.close()
+    #expect(await store.load().checkpoint != nil)
+    config.model = "swift/other"
+    config.observation = FxObservationOptions(onEvent: { event in
+        observations.record(event)
+        if event.kind == .checkpointMismatch { throw FxError.cancelled }
+    }, onError: { _ in observations.recordError() })
+    let restored = try await FxEngine.open(configuration: config, persistence: store)
+    try await restored.close()
+    #expect(observations.events.filter { $0.kind == .checkpointMismatch }.count == 1)
+    #expect(observations.errorCount == 1)
+    #expect(observations.events.last?.kind == .journalRestored)
+    #expect(observations.events.last?.data["checkpoint"] == .bool(true))
+}

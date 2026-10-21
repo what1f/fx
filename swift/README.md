@@ -188,6 +188,8 @@ With a store conforming to `FxCheckpointPersistence`, call `saveCheckpoint()` to
 
 The core can defer a snapshot while queued inputs remain unplaced or the session exceeds snapshot bounds. This leaves the journal intact. Automatic saving tries again after a later turn.
 
+Exports and journal snapshots record the SDK format version, tool configuration hash, and model ID. Restoring with different metadata emits `.checkpointMismatch` through `FxObservationOptions`; restoration continues. Swift hashes sorted tool descriptors with SHA-256, including replay and write flags. Tool order and JSON object key order do not change the hash. JavaScript uses a different hash format, so crossing SDKs can report a tool-hash mismatch even for equivalent tools.
+
 Journal and checkpoint interoperability have local tests. Automatic snapshots run after completed turns when the store supports `FxCheckpointPersistence`. `FxConfiguration.checkpointAfterBytes` defaults to 1 MiB; use `0` to attempt a snapshot after every turn, or `nil` to save only on explicit calls. A turn settles after its automatic snapshot attempt. A failed automatic save keeps the journal, emits `.checkpointError` when observation is enabled, and retries at a later turn. Successful saves emit `.checkpointSaved`.
 
 Local process tests cover forced termination after a saved snapshot and after an ambiguous external write. Full crash-boundary coverage remains pending.
@@ -215,6 +217,8 @@ A session view does not create stored data. `prompt` returns after durable accep
 Set `FxSessionOptions` on a session view to capture the model, instructions, and tool context for subsequent inputs. Tools receive the logical session ID, public message ID, and captured context. `session.events(after:)` reads persisted entries by cursor and waits for later entries. Cancel its consuming task to stop reading.
 
 Call `session.resume()` after reopening to get a turn view for pending work. It returns `nil` when no input needs to run. Local workers use a file lock and a persisted ownership epoch; journal and event writes reject an old owner within the write transaction. Recovery automatically reruns only tools declared idempotent. If the core committed completion before the host could save the result, recovery returns `.unknown` without issuing another model request.
+
+An agent attempts a journal snapshot after a completed turn once new records reach 64 KiB. Set `FxAgent`'s `checkpointAfterBytes:` to another threshold, `0` to attempt after every turn, or `nil` to disable automatic saves. This setting is separate from the engine interval in `FxConfiguration`.
 
 Call `try await session.checkpoint()` to export the conversation, including stored images, without changing the session or taking ownership from its worker. Export reads a consistent stored snapshot and sends no model request. While a worker runs, the export includes only progress already stored. Pass the bytes as `checkpoint:` to a new `FxAgent` to seed new sessions. Existing stored sessions retain their own history. Exporting an unused session creates no stored data.
 

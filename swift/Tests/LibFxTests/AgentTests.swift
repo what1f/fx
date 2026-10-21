@@ -275,6 +275,26 @@ private actor SessionToolCapture {
         try await store.close()
     }
 
+    @Test(arguments: [Int?.some(0), nil]) func agentCheckpointIntervalIsExplicit(_ interval: Int?) async throws {
+        let http = SessionHTTP(), store = try FxSessionStore()
+        let agent = try FxAgent(configuration: config(http), store: store, checkpointAfterBytes: interval)
+        let session = try await agent.session(id: "checkpoint-interval")
+        let turn = try await session.prompt("remember me")
+        #expect(try await turn.result.stopReason == .endTurn)
+        let snapshot = try await store.snapshot(session: session.id, agent: agent.name)
+        #expect((snapshot.checkpoint != nil) == (interval == 0))
+        try await agent.close()
+        try await store.close()
+    }
+
+    @Test func negativeAgentCheckpointIntervalIsRejected() async throws {
+        let store = try FxSessionStore()
+        #expect(throws: FxError.invalidInput("Checkpoint interval must not be negative")) {
+            try FxAgent(configuration: config(SessionHTTP()), store: store, checkpointAfterBytes: -1)
+        }
+        try await store.close()
+    }
+
     private func config(_ http: SessionHTTP) -> FxConfiguration {
         FxConfiguration(apiKey: "test-key", model: "swift/test", httpClient: http)
     }
