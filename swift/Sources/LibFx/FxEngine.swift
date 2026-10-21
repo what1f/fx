@@ -43,7 +43,8 @@ public actor FxEngine {
         self.checkpointAfterBytes = checkpointAfterBytes
     }
 
-    public static func open(configuration: FxConfiguration, checkpoint: Data? = nil, persistence: (any FxPersistence)? = nil) async throws -> FxEngine {
+    public static func open(configuration: FxConfiguration, sessionID: String? = nil, checkpoint: Data? = nil, persistence: (any FxPersistence)? = nil) async throws -> FxEngine {
+        if let sessionID, !validSessionIdentifier(sessionID) { throw FxError.invalidInput("Invalid session ID") }
         guard checkpoint == nil || persistence == nil else {
             throw FxError.invalidInput("Use a checkpoint or a persistence store, not both")
         }
@@ -79,6 +80,7 @@ public actor FxEngine {
                 ]),
             ]))
             var sessionOptions: [String: JSONValue] = [:]
+            if let sessionID { sessionOptions["sessionId"] = .string(sessionID) }
             if let observation = configuration.observation {
                 sessionOptions["hooks"] = .object(["captureContent": .bool(observation.captureContent)])
             }
@@ -227,6 +229,8 @@ public actor FxEngine {
         }
     }
 
+    var completedTurnID: String? { lastCompletedTurnID }
+
     public var recoveryState: FxRecoveryState? { recovery }
     @_spi(Conformance) public var hasResumableWork: Bool { recovery != nil || followUps.contains { $0.held } }
 
@@ -281,43 +285,8 @@ public actor FxEngine {
             metadata["inputId"] = .string(followUp.receipt.id)
             metadata["inputAccepted"] = .bool(followUp.acceptedInCore)
         }
-        guard resuming || content.contains(where: {
-            switch $0 {
-            case .text(let text): return !text.isEmpty
-            case .image: return true
-            }
-        }) else {
-            throw FxError.invalidInput("Prompt must not be empty")
-        }
-        var blocks: [JSONValue] = []
-        var images: [Data] = []
-        var imageCount = 0
-        for block in content {
-            switch block {
-            case .text(let text): blocks.append(.object(["type": .string("text"), "text": .string(text)]))
-            case .image(let image):
-                imageCount += 1
-                try image.validate()
-                var fields = image.fields
-                if let data = image.data {
-                    guard data.count <= 5 * 1024 * 1024 / 4 * 3 || image.sourceReference != nil else {
-                        throw FxError.invalidInput("Prompt image exceeds the size limit")
-                    }
-                    if data.count <= 5 * 1024 * 1024 / 4 * 3 {
-                        images.append(data)
-                        fields["_meta"] = .object(["fx": .object(["attachment": .number(Double(images.count))])])
-                    }
-                }
-                blocks.append(.object(fields))
-            }
-        }
-        guard imageCount <= 8, images.reduce(0, { $0 + $1.count }) <= 6 * 1024 * 1024 else {
-            throw FxError.invalidInput("Prompt images exceed the count or size limit")
-        }
-        let encodedImageBytes = images.reduce(0) { $0 + (($1.count + 2) / 3) * 4 }
-        guard try JSONEncoder().encode(JSONValue.array(blocks)).count + encodedImageBytes <= 8 * 1024 * 1024 - 1024 else {
-            throw FxError.invalidInput("Prompt exceeds frame limit")
-        }
+        let prepared = try PreparedPrompt(content, allowEmpty: resuming)
+        let blocks = prepared.blocks, images = prepared.images
         let id = UUID()
         turnID = id
         publicTurnID = publicID

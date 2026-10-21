@@ -1,6 +1,6 @@
 /// A model identifier and the options requested for its calls.
 /// The core validates support against the provider's model capabilities.
-public struct FxModel: Sendable, Equatable, ExpressibleByStringLiteral {
+public struct FxModel: Sendable, Equatable, Codable, ExpressibleByStringLiteral {
     public var id: String
     public var reasoningEffort: String?
     public var fast: Bool?

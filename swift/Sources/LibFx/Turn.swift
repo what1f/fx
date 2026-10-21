@@ -1,6 +1,6 @@
 import Foundation
 
-public enum FxEvent: Sendable, Equatable {
+public enum FxEvent: Sendable, Equatable, Codable {
     case text(String)
     case reasoning(String)
     case userMessage(String, id: String?)
@@ -8,7 +8,7 @@ public enum FxEvent: Sendable, Equatable {
     case toolFinished(id: String, name: String, content: String?, isError: Bool)
 }
 
-public struct FxUsage: Sendable, Equatable {
+public struct FxUsage: Sendable, Equatable, Codable {
     public let inputTokens: Int?
     public let outputTokens: Int?
     public let cacheReadTokens: Int?
@@ -24,8 +24,8 @@ public struct FxUsage: Sendable, Equatable {
     }
 }
 
-public struct FxTurnResult: Sendable, Equatable {
-    public enum StopReason: String, Sendable {
+public struct FxTurnResult: Sendable, Equatable, Codable {
+    public enum StopReason: String, Sendable, Codable {
         case endTurn = "end_turn", maxOutputTokens = "max_output_tokens"
         case maxModelTurns = "max_model_turns", refused, cancelled, error, unknown, yielded
     }

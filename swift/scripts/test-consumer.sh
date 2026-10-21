@@ -110,6 +110,20 @@ struct SubscriptionHTTP: FxHTTPClient {
         guard try await duplicate.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
         try await restored.close()
         try await store.close()
+        let sessions = try FxSessionStore(url: directory.appendingPathComponent("sessions.sqlite"))
+        let agent = try FxAgent(configuration: FxConfiguration(
+            apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()), store: sessions)
+        let session = try await agent.session(id: "consumer-session")
+        let durable = try await session.prompt("hello", id: "durable-message")
+        var durableText = ""
+        for try await event in durable { if case .text(let delta) = event { durableText += delta } }
+        guard durableText == "consumer ok", try await durable.result.stopReason == .endTurn else {
+            throw FxError.protocolViolation("Unexpected durable response")
+        }
+        let repeated = try await session.prompt("ignored", id: durable.id)
+        guard try await repeated.result.isRepeated else { throw FxPersistenceError.invalidJournal }
+        try await agent.close()
+        try await sessions.close()
         let subscription = FxSubscription(provider: .grok, credentials: { _ in
             try FxSubscriptionCredentials(accessToken: "consumer-subscription-key", accountID: "consumer-account")
         })

@@ -30,6 +30,9 @@ These conditions are binding requirements for the active libfx-swift goal. Evalu
 - Keep the implementation small. Add abstractions only for current behavior, ownership, or a verified test need. Do not add speculative extension systems or compatibility layers.
 - Reuse upstream behavioral tests through a thin adapter. The adapter must call the Swift SDK for the behavior under test. Add Swift-native tests for concurrency, cancellation, memory ownership, and package integration.
 - Do not complete the goal while required functionality or verification remains missing. Record unsupported scope and unverified gates explicitly.
+- Prefer mature, widely used libraries and tools for supporting capabilities. Research comparable implementations and known solutions before introducing a new supporting abstraction; verify that each adopted approach fits the current repository.
+- Use pnpm for JavaScript and TypeScript dependencies and test tooling.
+- Keep any user-facing examples, errors, and interface text concise and free of internal implementation details. Review localization when interface text changes; do not introduce hard-coded interface copy.
 
 ## Contracts
 
@@ -51,7 +54,7 @@ Persistence preserves ordered append, expected cursor checks, durability barrier
 | Model options and providers | test-agent-effort, test-agent-fast, test-agent-ultrafast-options, test-agent-custom, test-agent-codex, test-agent-grok | Matching request behavior and validation | Partial: effort and fast, custom provider engine scenarios, Codex and Grok engine authentication and refresh, shared rotations and host locks, error redaction and Foundation redirect isolation; full provider agent/session suites and sign-in helpers pending |
 | Images and limits | test-agent-images, test-instruction-limits, test-native-core-image-framing | Input, tool images, UTF-8, frame bounds | Partial: binary input; resizing and image storage pending |
 | Journal and checkpoints | test-journal, test-checkpoint | Swift and JS restore in both directions | Partial: bidirectional checkpoint and journal proof, explicit and automatic snapshot save and restore; full suite pending |
-| Durable sessions | test-durable, test-durable-core, test-durable-provider-crash, test-world-persistence | Queue, deduplication, crash recovery, fencing | Partial: SQLite persistence, stable turn IDs, cooperative yield and repeated resume across Swift/JS snapshots, latest completed ID deduplication, cross-process writer fencing and two SIGKILL recovery boundaries; agent and session APIs pending |
+| Durable sessions | test-durable, test-durable-core, test-durable-provider-crash, test-world-persistence | Queue, deduplication, crash recovery, fencing | Partial: SQLite persistence, stable turn IDs, cooperative yield and repeated resume across Swift/JS snapshots, latest completed ID deduplication, cross-process writer fencing and two SIGKILL recovery boundaries; initial agent/session intake, event replay, local ownership, ordered workers and recovery tested; full agent/session suites pending |
 | Hooks | test-hooks | Event scopes and observation isolation | Partial: runtime and journal observations, content opt-in, error isolation, JS comparison and hooks-enabled steering; parent and tool-local scopes pending |
 | MCP and skills | test-mcp-adapter, test-skills-adapter | Host adapters and cancellation | Pending |
 | Swift package | Swift native tests and clean consumer | Import, link, release build, lifecycle and concurrency | Partial: XCFramework and independent release consumer on arm64; CI pending |

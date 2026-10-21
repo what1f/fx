@@ -8,7 +8,7 @@ Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. 
 
 ## Implemented proof
 
-`swift test --package-path swift` passed 70 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
+`swift test --package-path swift` passed 82 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
 
 - Fragmented UTF-8 frames, host requests, cancellation, oversized frames, and pending requests during close.
 - HTTP response status, Unicode, bounded chunks, invalid responses, and cancellation before headers.
@@ -27,7 +27,11 @@ Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. 
 - Handoff during a tool call, preservation of journal progress and pending steering, rejection of later prompts, resumes, and snapshot saves, persistence requirements, and stale-turn isolation.
 - Follow-up acceptance and ordered automatic turns, idle acceptance, explicit recovery of held inputs, independent current inputs, cancellation of one waiter, close and failed storage rejecting both waiters, tool turn IDs, and snapshots deferred without errors until queued inputs are placed.
 
-The independent Release consumer also exercised the default Foundation client against a local HTTP server. It completed an authenticated custom-provider turn, rejected authenticated and token-body 307 redirects, and verified that the redirect target received no request. The Release consumer also used the public subscription API for a Grok turn. The custom-provider conformance scenario compared JavaScript and Swift engine requests, host-tool round trips, missing credentials, rejected keys, and plain and JSON-escaped credential redaction. The full upstream custom-provider file still requires agent and session APIs.
+The initial agent/session implementation adds 12 native tests. They cover durable ordered intake, historical message-ID deduplication, per-reader replay, scoped queued cancellation, graceful close, competing local connections and agents, stale-owner rejection, snapshot rollback, wrong-agent rejection, and persisted tool context and public identities. Two recovery fixtures distinguish a started input with no core dispatch from a completed core turn with no saved host result. The former runs normally; the latter returns `.unknown` without another model call. These fixtures simulate those boundaries in process; they are not SIGKILL qualification of the new session store.
+
+`FxSessionStore` stores intake, events, and core journals in one SQLite database. Ownership checks and writes share an immediate transaction, following [SQLite's documented isolation rules](https://www.sqlite.org/isolation.html). A separate local file lock covers the worker lifetime. The Release consumer also imports the public agent/session API, runs a durable turn, replays its events, and checks historical-ID deduplication. Full upstream agent/session coverage, cross-process session-worker termination, steering, deadlines, and checkpoint export remain pending.
+
+The independent Release consumer also exercised the default Foundation client against a local HTTP server. It completed an authenticated custom-provider turn, rejected authenticated and token-body 307 redirects, and verified that the redirect target received no request. The Release consumer also used the public subscription API for a Grok turn. The custom-provider conformance scenario compared JavaScript and Swift engine requests, host-tool round trips, missing credentials, rejected keys, and plain and JSON-escaped credential redaction. The full upstream custom-provider file still requires agent/session driver support and qualification.
 
 The subscription conformance check reads the engine sections from the upstream provider files and runs their assertions unchanged against JavaScript and Swift. It selects Codex sections 1 through 3 and Grok sections 1 through 4, before the durable-session marker. It changes the SDK import and native artifact path only and removes unused agent imports. The selected assertions cover request headers, model traffic, expiry and rejection refresh, saved credentials, secret isolation, and Grok account changes. Later agent/session, shared-agent, and options sections remain unqualified by this check. Swift-native tests separately exercise shared refresh and the host lock contract.
 
@@ -63,13 +67,13 @@ Additional executable checks passed:
 
 `node swift/Tests/Conformance/run.mjs` reruns the 20 selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
 
-`swift test --package-path swift --sanitize=thread` passed all 70 Swift tests without a sanitizer warning. The first focused run reported concurrent access to the native handle during shutdown. The transport now waits for the [Dispatch source's cancellation handler](https://developer.apple.com/documentation/dispatch/dispatch_source_set_cancel_handler) and destroys the handle on its actor. This check instruments Swift code; the precompiled Zig archive is not instrumented. The Swift CI workflow repeats the check after conformance testing.
+`swift test --package-path swift --sanitize=thread` passed all 82 Swift tests without a sanitizer warning. The first focused run reported concurrent access to the native handle during shutdown. The transport now waits for the [Dispatch source's cancellation handler](https://developer.apple.com/documentation/dispatch/dispatch_source_set_cancel_handler) and destroys the handle on its actor. This check instruments Swift code; the precompiled Zig archive is not instrumented. The Swift CI workflow repeats the check after conformance testing.
 
 `zig build`, the freshly built CLI's help command, Zig formatting checks for the changed files, and the public-surface audit passed. The help command proves startup only; it is not real-model agent evidence. See [C bridge validation](BRIDGE-VALIDATION.md) for the C consumer and original Node backend regression checks.
 
 ## Required remaining gates
 
-- Full classified upstream test coverage, including complete provider agent/session suites and sign-in helpers, durable image handoff, parent and tool-local observation scopes, image processing and storage, and durable agent and session behavior.
+- Full classified upstream test coverage, including complete provider agent/session suites and sign-in helpers, durable image handoff, parent and tool-local observation scopes, image processing and storage, and full durable agent and session behavior.
 - Additional storage integrations, durability barriers under slow storage, and systematic termination across all effect boundaries.
 - Address Sanitizer, instrumentation of the native core, and concurrency stress tests, especially cancellation during preparation and storage.
 - Runtime proof for x86_64 and final consumer validation against the release artifact.

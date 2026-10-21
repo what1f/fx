@@ -190,4 +190,30 @@ The core can defer a snapshot while queued inputs remain unplaced or the session
 
 Journal and checkpoint interoperability have local tests. Automatic snapshots run after completed turns when the store supports `FxCheckpointPersistence`. `FxConfiguration.checkpointAfterBytes` defaults to 1 MiB; use `0` to attempt a snapshot after every turn, or `nil` to save only on explicit calls. A turn settles after its automatic snapshot attempt. A failed automatic save keeps the journal, emits `.checkpointError` when observation is enabled, and retries at a later turn. Successful saves emit `.checkpointSaved`.
 
-Local process tests cover forced termination after a saved snapshot and after an ambiguous external write. Full crash-boundary coverage and durable agent and session APIs remain pending.
+Local process tests cover forced termination after a saved snapshot and after an ambiguous external write. Full crash-boundary coverage remains pending.
+
+
+## Queue durable sessions
+
+Use `FxSessionStore` for multiple conversations in one local SQLite database. Omit its URL for in-memory operation. Keep the store open until all agents using it have closed.
+
+```swift
+let store = try FxSessionStore(url: sessionsURL)
+let agent = try FxAgent(configuration: configuration, name: "assistant", store: store)
+let session = try await agent.session(id: "conversation-1")
+let turn = try await session.prompt("Review the changes", id: "request-1")
+for try await event in turn {
+    if case .text(let delta) = event { print(delta, terminator: "") }
+}
+let result = try await turn.result
+try await agent.close()
+try await store.close()
+```
+
+A session view does not create stored data. `prompt` returns after durable acceptance, and inputs run in order within a session. Retrying a stored message ID returns its existing work and sets `isRepeated`; it does not replace the saved input. Each turn iterator replays its own durable events independently. Cancelling a reader leaves the work running. Call `turn.cancel()` to cancel that input, or `session.cancel()` to cancel the currently started input. `agent.close()` stops intake and waits for accepted work.
+
+Set `FxSessionOptions` on a session view to capture the model, instructions, and tool context for subsequent inputs. Tools receive the logical session ID, public message ID, and captured context. `session.events(after:)` reads persisted entries by cursor and waits for later entries. Cancel its consuming task to stop reading.
+
+Call `session.resume()` after reopening to drain pending work. Local workers use a file lock and a persisted ownership epoch; journal and event writes reject an old owner within the write transaction. Recovery automatically reruns only tools declared idempotent. If the core committed completion before the host could save the result, recovery returns `.unknown` without issuing another model request.
+
+The agent/session surface is still partial. Session checkpoint export, steering, deadline scheduling, external storage adapters, and full upstream agent/session qualification remain pending. The session store's host event format is Swift-specific; core journal and checkpoint interoperability is a separate tested contract.

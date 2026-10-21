@@ -69,6 +69,7 @@ public struct FxToolContext: Sendable {
     public let executionID: String
     public let sessionID: String
     public let turnID: String
+    public var context: JSONValue? = nil
 }
 
 public struct FxTool: Sendable {

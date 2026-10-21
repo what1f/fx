@@ -5,7 +5,7 @@ public enum FxImageFormat: String, Sendable, Codable {
 }
 
 /// Image bytes, a host reference, or both. The core validates the image content.
-public struct FxImage: Sendable, Equatable {
+public struct FxImage: Sendable, Equatable, Codable {
     public let data: Data?
     public let format: FxImageFormat
     public let sourceReference: String?
@@ -39,7 +39,7 @@ public struct FxImage: Sendable, Equatable {
     }
 }
 
-public enum FxPromptContent: Sendable, Equatable {
+public enum FxPromptContent: Sendable, Equatable, Codable {
     case text(String)
     case image(FxImage)
 }

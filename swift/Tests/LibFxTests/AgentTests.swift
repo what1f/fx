@@ -1,0 +1,202 @@
+import Foundation
+import Testing
+import CryptoKit
+@testable import LibFx
+
+private actor SessionHTTP: FxHTTPClient {
+    private var requests: [URLRequest] = []
+    private var blocked = false
+    private var gate: CheckedContinuation<Void, Never>?
+    init(blocked: Bool = false) { self.blocked = blocked }
+    func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        if request.httpMethod == "GET" {
+            let data = Data(#"{"data":[{"id":"swift/test","type":"language"}]}"#.utf8)
+            return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { $0.yield(data); $0.finish() })
+        }
+        requests.append(request)
+        if blocked { await withCheckedContinuation { gate = $0 } }
+        let text = "data: {\"type\":\"text-delta\",\"delta\":\"hello\"}\n\ndata: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\",\"raw\":\"stop\"}}\n\ndata: [DONE]\n\n"
+        return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { $0.yield(Data(text.utf8)); $0.finish() })
+    }
+    var count: Int { requests.count }
+    func waitForRequest() async { while requests.isEmpty { await Task.yield() } }
+    func release() { blocked = false; gate?.resume(); gate = nil }
+}
+
+private actor SessionToolHTTP: FxHTTPClient {
+    private(set) var bodies: [String] = []
+    func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        let text: String
+        if request.httpMethod == "GET" {
+            text = #"{"data":[{"id":"swift/test","type":"language","tags":["tool-use"]}]}"#
+        } else {
+            bodies.append(String(decoding: request.httpBody ?? Data(), as: UTF8.self))
+            let frames: [JSONValue] = bodies.count == 1 ? [
+                .object(["type": .string("tool-call"), "toolCallId": .string("call-1"), "toolName": .string("inspect"), "input": .object([:])]),
+                .object(["type": .string("finish"), "finishReason": .object(["unified": .string("tool-calls"), "raw": .string("tool-calls")])]),
+            ] : [
+                .object(["type": .string("text-delta"), "delta": .string("inspected")]),
+                .object(["type": .string("finish"), "finishReason": .object(["unified": .string("stop"), "raw": .string("stop")])]),
+            ]
+            text = try frames.map { "data: \(String(decoding: try JSONEncoder().encode($0), as: UTF8.self))\n\n" }.joined() + "data: [DONE]\n\n"
+        }
+        return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { $0.yield(Data(text.utf8)); $0.finish() })
+    }
+}
+
+private actor SessionToolCapture {
+    private(set) var values: [FxToolContext] = []
+    func record(_ value: FxToolContext) { values.append(value) }
+}
+
+@Suite(.serialized) struct AgentTests {
+    @Test func queueRunsNativeCoreAndResultsReplayWithoutNewCalls() async throws {
+        let http = SessionHTTP(), store = try FxSessionStore()
+        let agent = try FxAgent(configuration: config(http), store: store)
+        let session = try await agent.session(id: "logical-session")
+        let first = try await session.prompt("first", id: "one")
+        let second = try await session.prompt("second", id: "two")
+        #expect(try await first.result.stopReason == .endTurn)
+        #expect(try await second.result.stopReason == .endTurn)
+        var text = ""
+        for try await event in first { if case .text(let delta) = event { text += delta } }
+        #expect(text == "hello")
+        var replay = ""
+        for try await event in first { if case .text(let delta) = event { replay += delta } }
+        #expect(replay == text)
+        let duplicate = try await session.prompt("ignored", id: "one")
+        #expect(try await duplicate.result.isRepeated)
+        try await agent.close()
+        #expect(await http.count == 2)
+        await #expect(throws: FxError.closed) { try await session.prompt("closed") }
+        try await store.close()
+    }
+
+    @Test func closeDrainsAcceptedWorkAndReaderCancellationDoesNotCancelIt() async throws {
+        let http = SessionHTTP(blocked: true), store = try FxSessionStore()
+        let agent = try FxAgent(configuration: config(http), store: store)
+        let session = try await agent.session(id: "s")
+        let turn = try await session.prompt("hello", id: "m")
+        await http.waitForRequest()
+        let reader = Task { try await turn.result }
+        reader.cancel()
+        await #expect(throws: CancellationError.self) { try await reader.value }
+        let closing = Task { try await agent.close() }
+        await http.release()
+        try await closing.value
+        #expect(try await turn.result.stopReason == .endTurn)
+        #expect(await http.count == 1)
+        try await store.close()
+    }
+
+    @Test func explicitQueuedCancellationDoesNotAffectCurrentTurn() async throws {
+        let http = SessionHTTP(blocked: true), store = try FxSessionStore()
+        let agent = try FxAgent(configuration: config(http), store: store)
+        let session = try await agent.session(id: "s")
+        let first = try await session.prompt("first", id: "one")
+        await http.waitForRequest()
+        let second = try await session.prompt("second", id: "two")
+        try await second.cancel()
+        await http.release()
+        #expect(try await first.result.stopReason == .endTurn)
+        #expect(try await second.result.stopReason == .cancelled)
+        try await agent.close()
+        #expect(await http.count == 1)
+        try await store.close()
+    }
+
+    @Test func competingAgentsDrainOneInboxAndReopenDeduplicatesHistory() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("sessions.sqlite")
+        let http = SessionHTTP(blocked: true)
+        let aStore = try FxSessionStore(url: url), bStore = try FxSessionStore(url: url)
+        let a = try FxAgent(configuration: config(http), store: aStore)
+        let b = try FxAgent(configuration: config(http), store: bStore)
+        let aSession = try await a.session(id: "s"), bSession = try await b.session(id: "s")
+        let first = try await aSession.prompt("first", id: "one")
+        await http.waitForRequest()
+        let second = try await bSession.prompt("second", id: "two")
+        await http.release()
+        #expect(try await first.result.stopReason == .endTurn)
+        #expect(try await second.result.stopReason == .endTurn)
+        try await a.close()
+        try await b.close()
+        try await aStore.close()
+        try await bStore.close()
+        let reopened = try FxSessionStore(url: url)
+        let c = try FxAgent(configuration: config(http), store: reopened)
+        let session = try await c.session(id: "s")
+        let duplicate = try await session.prompt("ignored", id: "one")
+        #expect(try await duplicate.result.isRepeated)
+        #expect(await http.count == 2)
+        try await c.close()
+        try await reopened.close()
+    }
+
+    @Test func startedInputWithoutCoreDispatchResumesNormally() async throws {
+        let store = try FxSessionStore(), http = SessionHTTP()
+        _ = try await store.accept(session: "s", agent: "default", id: "m", content: [.text("accepted")], options: .init())
+        let lease = try #require(try await store.claim(session: "s", agent: "default"))
+        try await store.start(lease, input: #require(try await store.next(lease)))
+        try await store.release(lease)
+        let agent = try FxAgent(configuration: config(http), store: store)
+        let session = try await agent.session(id: "s")
+        let turn = try await session.prompt("ignored duplicate", id: "m")
+        #expect(try await turn.result.stopReason == .endTurn)
+        #expect(await http.count == 1)
+        let entries = try await store.entries(session: "s", agent: "default", after: 0)
+        #expect(entries.contains { $0.event == .resumed(id: "m", sessionID: "s") })
+        try await agent.close()
+        try await store.close()
+    }
+
+    @Test func missingHostCompletionReportsUnknownWithoutRepeatingCoreWork() async throws {
+        let store = try FxSessionStore(), http = SessionHTTP()
+        _ = try await store.accept(session: "s", agent: "default", id: "m", content: [.text("accepted")], options: .init())
+        let lease = try #require(try await store.claim(session: "s", agent: "default"))
+        try await store.start(lease, input: #require(try await store.next(lease)))
+        let engine = try await FxEngine.open(configuration: config(http), sessionID: "s", persistence: SessionPersistence(store: store, lease: lease))
+        let id = "turn_" + SHA256.hash(data: Data("m".utf8)).map { String(format: "%02x", $0) }.joined()
+        let turn = try await engine.prompt("accepted", id: id)
+        #expect(try await turn.result.stopReason == .endTurn)
+        try await engine.close()
+        // Simulate a process stopping after the core commit, before the host result.
+        try await store.release(lease)
+        let agent = try FxAgent(configuration: config(http), store: store)
+        let session = try await agent.session(id: "s")
+        let repeated = try await session.prompt("ignored duplicate", id: "m")
+        #expect(try await repeated.result.stopReason == .unknown)
+        #expect(await http.count == 1)
+        try await agent.close()
+        try await store.close()
+    }
+
+    @Test func toolsReceivePublicIdentityAndPersistedContext() async throws {
+        let http = SessionToolHTTP(), capture = SessionToolCapture(), store = try FxSessionStore()
+        let tool = FxTool(name: "inspect", description: "Inspect", inputSchema: .object(["type": .string("object")]), isIdempotent: true) { _, context in
+            await capture.record(context)
+            return "inspected"
+        }
+        let config = FxConfiguration(apiKey: "test-key", model: "swift/test", instructions: "base instructions", tools: [tool], httpClient: http)
+        let agent = try FxAgent(configuration: config, store: store)
+        let options = FxSessionOptions(model: "swift/test", instructions: "session instructions", context: .object(["project": .string("example")]))
+        let session = try await agent.session(id: "public-session", options: options)
+        let turn = try await session.prompt("inspect", id: "public-message")
+        #expect(try await turn.result.stopReason == .endTurn)
+        let values = await capture.values
+        #expect(values.count == 1)
+        let context = try #require(values.first)
+        #expect(context.executionID == "call-1" && context.sessionID == "public-session" && context.turnID == "public-message")
+        #expect(context.context == options.context)
+        let bodies = await http.bodies
+        #expect(bodies.first?.contains("session instructions") == true)
+        #expect(bodies.first?.contains("base instructions") == false)
+        try await agent.close()
+        try await store.close()
+    }
+
+    private func config(_ http: SessionHTTP) -> FxConfiguration {
+        FxConfiguration(apiKey: "test-key", model: "swift/test", httpClient: http)
+    }
+}
