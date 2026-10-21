@@ -14,9 +14,19 @@ private enum DriverOutput {
     }
 }
 
+private struct RelayedCheckpointStore: FxCheckpointPersistence {
+    let driver: Driver
+    func load() async throws -> FxPersistenceSnapshot { try await driver.load() }
+    func append(expected: String?, idempotencyKey: String, data: Data, barrier: Bool) async throws -> String {
+        try await driver.append(expected: expected, idempotencyKey: idempotencyKey, data: data, barrier: barrier)
+    }
+    func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) async throws { try await driver.saveCheckpoint(checkpoint) }
+}
+
 /// Test-only protocol adapter. Engine behavior stays in LibFx.
 actor Driver: FxHTTPClient, FxPersistence {
     private var engine: FxEngine?
+    private var store: (any FxPersistence)?
     private var turn: FxTurn?
     private var turnToken: String?
     private var nextFetchID = 1
@@ -89,6 +99,11 @@ actor Driver: FxHTTPClient, FxPersistence {
             )
             if let url = options["gatewayChatUrl"]?.string, let endpoint = URL(string: url) { config.gatewayURL = endpoint }
             config.httpClient = self
+            if let bytes = options["checkpointAfterBytes"] {
+                if bytes == .null { config.checkpointAfterBytes = nil }
+                else if let count = bytes.integer { config.checkpointAfterBytes = count }
+                else { throw FxError.invalidInput("Invalid checkpoint interval") }
+            }
             if options["hooks"] != nil, options["hooks"] != .null {
                 config.observation = FxObservationOptions(captureContent: options["hooks"]?["captureContent"] == .bool(true)) { event in
                     let encoder = JSONEncoder()
@@ -112,9 +127,14 @@ actor Driver: FxHTTPClient, FxPersistence {
                 ])]))
             }
             let checkpoint = options["checkpoint"]?.string.flatMap { Data(base64Encoded: $0) }
+            if let path = options["sqlitePath"]?.string {
+                store = try FxSQLitePersistence(url: URL(fileURLWithPath: path))
+            } else if options["hasCheckpointPersistence"] == .bool(true) {
+                store = RelayedCheckpointStore(driver: self)
+            } else if options["hasPersistence"] == .bool(true) { store = self }
             engine = try await FxEngine.open(
                 configuration: config, checkpoint: checkpoint,
-                persistence: options["hasPersistence"] == .bool(true) ? self : nil
+                persistence: store
             )
             let recovery = await engine!.recoveryState
             return .object([
@@ -167,9 +187,15 @@ actor Driver: FxHTTPClient, FxPersistence {
         case "checkpoint":
             guard let engine else { throw FxError.closed }
             return .string(try await engine.checkpoint().base64EncodedString())
+        case "saveCheckpoint":
+            guard let engine else { throw FxError.closed }
+            try await engine.saveCheckpoint()
+            return .null
         case "close":
             try await engine?.close()
             engine = nil
+            if let sqlite = store as? FxSQLitePersistence { try await sqlite.close() }
+            store = nil
             for id in Array(fetchBodies.keys) { cancelFetch(id) }
             for waiter in toolWaiters.values { waiter.resume(throwing: FxError.closed) }
             toolWaiters.removeAll()
@@ -269,6 +295,12 @@ actor Driver: FxHTTPClient, FxPersistence {
         ])
         guard let cursor = value["cursor"]?.string else { throw FxPersistenceError.invalidCursor }
         return cursor
+    }
+
+    func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) async throws {
+        _ = try await persistenceRequest("saveCheckpoint", [
+            "through": .string(checkpoint.through), "data": .string(checkpoint.data.base64EncodedString()),
+        ])
     }
 
     private func bool(_ value: JSONValue?) -> Bool? {

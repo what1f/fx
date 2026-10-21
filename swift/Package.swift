@@ -7,7 +7,8 @@ let package = Package(
     products: [.library(name: "LibFx", targets: ["LibFx"])],
     targets: [
         .binaryTarget(name: "CFx", path: "Artifacts/CFx.xcframework"),
-        .target(name: "LibFx", dependencies: ["CFx"]),
+        .systemLibrary(name: "CSQLite"),
+        .target(name: "LibFx", dependencies: ["CFx", "CSQLite"]),
         .executableTarget(name: "FxSwiftDriver", dependencies: ["LibFx"]),
         .testTarget(name: "LibFxTests", dependencies: ["LibFx"]),
     ]

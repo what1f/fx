@@ -8,6 +8,7 @@ public actor FxEngine {
     private let tools: [String: FxTool]
     private let journal: JournalWriter?
     private let observation: FxObservationOptions?
+    private let checkpointAfterBytes: Int?
     private var recovery: FxRecoveryState?
     private var turnID: UUID?
     private var output: AsyncThrowingStream<FxEvent, any Error>.Continuation?
@@ -21,18 +22,22 @@ public actor FxEngine {
     private var checkpointSaveTask: Task<Void, any Error>?
     private var closingTask: Task<Void, any Error>?
 
-    private init(sessionID: String, rpc: RPCClient, transport: NativeTransport, tools: [String: FxTool], journal: JournalWriter?, observation: FxObservationOptions?) {
+    private init(sessionID: String, rpc: RPCClient, transport: NativeTransport, tools: [String: FxTool], journal: JournalWriter?, observation: FxObservationOptions?, checkpointAfterBytes: Int?) {
         self.sessionID = sessionID
         self.rpc = rpc
         self.transport = transport
         self.tools = tools
         self.journal = journal
         self.observation = observation
+        self.checkpointAfterBytes = checkpointAfterBytes
     }
 
     public static func open(configuration: FxConfiguration, checkpoint: Data? = nil, persistence: (any FxPersistence)? = nil) async throws -> FxEngine {
         guard checkpoint == nil || persistence == nil else {
             throw FxError.invalidInput("Use a checkpoint or a persistence store, not both")
+        }
+        if let bytes = configuration.checkpointAfterBytes, bytes < 0 {
+            throw FxError.invalidInput("Checkpoint interval must not be negative")
         }
         let loaded: LoadedJournal?
         if let persistence { loaded = try LoadedJournal(try await persistence.load()) }
@@ -72,8 +77,8 @@ public actor FxEngine {
             if configuration.observation != nil, session["_meta"]?["fx"]?["hooksVersion"] != .number(1) {
                 throw FxError.protocolViolation("Runtime does not support observation")
             }
-            let journal = persistence.map { JournalWriter(store: $0, head: loaded?.head, lastSequence: loaded?.lastSequence ?? 0) }
-            let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, observation: configuration.observation)
+            let journal = persistence.map { JournalWriter(store: $0, head: loaded?.head, lastSequence: loaded?.lastSequence ?? 0, tailBytes: loaded?.tailBytes ?? 0) }
+            let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes)
             await rpc.setHandler { [weak engine] message in await engine?.handle(message) }
             if let checkpoint {
                 try await transport.putAttachment(checkpoint, id: 1)
@@ -230,6 +235,7 @@ public actor FxEngine {
                 try await journal?.check()
                 try Task.checkCancellation()
                 recovery = nil
+                await maybeSaveCheckpoint(finishing: id)
                 self.finish(turn: id)
                 return FxTurnResult(
                     stopReason: FxTurnResult.StopReason(rawValue: result["stopReason"]?.string ?? "") ?? .unknown,
@@ -418,12 +424,28 @@ public actor FxEngine {
 
     /// Saves a journal snapshot through the configured checkpoint persistence store.
     public func saveCheckpoint() async throws {
+        try await storeCheckpoint(finishing: nil)
+    }
+
+    private func maybeSaveCheckpoint(finishing id: UUID) async {
+        guard let checkpointAfterBytes, let journal, await journal.shouldCheckpoint(afterBytes: checkpointAfterBytes),
+              !closed, turnID == id else { return }
+        do { try await storeCheckpoint(finishing: id) }
+        catch {
+            observation?.deliver(FxObservation(journal: .checkpointError, sessionID: sessionID, data: .object([
+                "error": .string(String(describing: type(of: error))),
+                "fenced": .bool((error as? FxPersistenceError) == .fenced),
+            ])))
+        }
+    }
+
+    private func storeCheckpoint(finishing id: UUID?) async throws {
         guard !closed else { throw FxError.closed }
-        guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
+        guard turnID == id, !cancelling, !checkpointing else { throw FxError.busy }
         guard let journal else { throw FxError.invalidInput("Persistence store is required") }
         checkpointing = true
         defer { checkpointing = false; checkpointSaveTask = nil }
-        let task = Task { [rpc, transport, sessionID] in
+        let task = Task { [rpc, transport, sessionID, observation] in
             try await journal.check()
             let reply = try await rpc.request("libfx/snapshot", .object(["sessionId": .string(sessionID)]))
             guard let rawID = reply["snapshotAttachment"]?.integer, let attachmentID = UInt32(exactly: rawID),
@@ -431,7 +453,11 @@ public actor FxEngine {
                 throw FxError.protocolViolation("Invalid journal snapshot")
             }
             let data = try await transport.takeAttachment(id: attachmentID)
-            try await journal.saveSnapshot(data, at: sequence)
+            if let through = try await journal.saveSnapshot(data, at: sequence) {
+                observation?.deliver(FxObservation(journal: .checkpointSaved, sessionID: sessionID, data: .object([
+                    "through": .string(through), "bytes": .number(Double(data.count)),
+                ])))
+            }
         }
         checkpointSaveTask = task
         try await task.value

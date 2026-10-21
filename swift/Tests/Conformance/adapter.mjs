@@ -83,6 +83,9 @@ export async function createFxEngine(options = {}) {
             result = { journal, head: loaded.head,
               ...(loaded.checkpoint ? { checkpoint: { through: loaded.checkpoint.through, data: Buffer.from(loaded.checkpoint.data).toString('base64') } } : {}),
             };
+          } else if (call.kind === 'saveCheckpoint') {
+            await options.persistence.saveCheckpoint({ through: call.through, data: new Uint8Array(Buffer.from(call.data, 'base64')) });
+            result = null;
           } else {
             const { id, kind, ...input } = call;
             result = await options.persistence.append({ ...input, data: new Uint8Array(Buffer.from(input.data, 'base64')) });
@@ -145,6 +148,7 @@ export async function createFxEngine(options = {}) {
     const opened = await request('open', { options: {
       ...configuration,
       hasPersistence: Boolean(persistence),
+      hasCheckpointPersistence: typeof persistence?.saveCheckpoint === 'function',
       ...(checkpoint ? { checkpoint: Buffer.from(checkpoint).toString('base64') } : {}),
       tools: (options.tools || []).map(({ execute, ...descriptor }) => descriptor),
     } });
@@ -180,6 +184,15 @@ export async function createFxEngine(options = {}) {
         return begin('resume', { rerun }, promptOptions);
       },
       async checkpoint() { return new Uint8Array(Buffer.from(await request('checkpoint'), 'base64')); },
+      async saveCheckpoint() { await request('saveCheckpoint'); },
+      async __killForTest() {
+        closed = true;
+        child.kill('SIGKILL');
+        const status = await exited;
+        lines.close();
+        if (stderr) throw new Error(stderr);
+        return status;
+      },
       async close() {
         if (closed) return;
         closed = true;

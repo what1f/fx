@@ -13,6 +13,7 @@ public struct FxObservation: Sendable, Codable, Equatable {
         case mcpStarted = "mcp.start", mcpRequest = "mcp.request", mcpEnded = "mcp.end"
         case delegation
         case journalCommitted = "journal.commit", journalRestored = "journal.restore", journalError = "journal.error"
+        case checkpointSaved = "checkpoint.save", checkpointError = "checkpoint.error"
     }
 
     public let version: Int

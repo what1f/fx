@@ -8,7 +8,7 @@ Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. 
 
 ## Implemented proof
 
-`swift test --package-path swift` passed 27 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
+`swift test --package-path swift` passed 34 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
 
 - Fragmented UTF-8 frames, host requests, cancellation, oversized frames, and pending requests during close.
 - HTTP response status, Unicode, bounded chunks, invalid responses, and cancellation before headers.
@@ -19,6 +19,8 @@ Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. 
 - Journal conversation restore, stale-writer fencing, retry deduplication, malformed and future records, and persistence failure before a model request.
 - Resuming a journal stopped after its pre-request progress record, restoring history after a saved journal snapshot, and waiting for a snapshot save during close.
 - Runtime observation ordering and scope, content opt-in, observer error isolation, successful journal commits, and fencing errors.
+- SQLite reopen, binary and empty records, retry keys after pruning, competing writers, snapshot transaction rollback, and future-schema rejection.
+- Automatic snapshots across SQLite reopen and a later journal tail, plus a failed save that preserves records and retries after the next turn.
 
 The following upstream tests passed through the Swift test driver with their assertions unchanged:
 
@@ -41,6 +43,9 @@ Additional executable checks passed:
 - `recovery.mjs`: journal truncated at tool intent; ambiguous writes remain stopped by default, while explicit rerun preserves execution ID.
 - `turn-control.mjs`: withdrawal while a tool is running, plus controls from an old turn leaving a new turn unaffected.
 - `observation.mjs`: JavaScript and Swift comparison of event kinds, scopes, parallel tool causality, tool failure, content opt-in, and committed journal cursors.
+- `automatic-checkpoint.mjs`: Swift to JS to Swift using automatic journal snapshots and excluding covered journal prefixes on load.
+- `sqlite-crash.mjs`: actual driver SIGKILL after a saved snapshot and after an external write whose result was not returned; recovery preserves earlier history and skips the ambiguous write.
+- `sqlite-fencing.mjs`: two core processes with one database; the stale writer stops before its model request.
 
 `node swift/Tests/Conformance/run.mjs` reruns the selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
 
@@ -49,7 +54,7 @@ Additional executable checks passed:
 ## Required remaining gates
 
 - Full classified upstream test coverage, including the SDK's providers, follow-ups and handoff, parent and tool-local observation scopes, image processing and storage, and durable agent and session behavior.
-- Persistent storage adapters, automatic checkpoints, durability barriers under slow storage, and process termination at effect boundaries.
+- Additional storage integrations, durability barriers under slow storage, and systematic termination across all effect boundaries.
 - Sanitizers and concurrency stress tests, especially cancellation during preparation and storage.
 - Runtime proof for x86_64 and final consumer validation against the release artifact.
 - Available-credential real-model integration and exact-commit CI, including macOS arm64.

@@ -10,12 +10,15 @@ public struct FxConfiguration: Sendable {
     public var gatewayURL: URL
     public var httpClient: any FxHTTPClient
     public var observation: FxObservationOptions?
+    /// Journal bytes between automatic snapshots. Nil disables automatic snapshots.
+    public var checkpointAfterBytes: Int?
 
     public init(
         apiKey: String, model: FxModel, instructions: String = "", tools: [FxTool] = [],
         workspace: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         gatewayURL: URL = URL(string: "https://ai-gateway.vercel.sh/v4/ai/language-model")!,
-        httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil
+        httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil,
+        checkpointAfterBytes: Int? = 1024 * 1024
     ) {
         self.apiKey = apiKey
         self.model = model
@@ -25,6 +28,7 @@ public struct FxConfiguration: Sendable {
         self.gatewayURL = gatewayURL
         self.httpClient = httpClient
         self.observation = observation
+        self.checkpointAfterBytes = checkpointAfterBytes
     }
 
     var nativeOptions: JSONValue {

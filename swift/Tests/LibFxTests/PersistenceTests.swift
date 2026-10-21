@@ -27,6 +27,76 @@ private actor FailingPersistence: FxPersistence {
     }
 }
 
+private actor RetryingCheckpointStore: FxCheckpointPersistence {
+    let memory = FxMemoryPersistence()
+    private(set) var attempts = 0
+    func load() async -> FxPersistenceSnapshot { await memory.load() }
+    func append(expected: String?, idempotencyKey: String, data: Data, barrier: Bool) async throws -> String {
+        try await memory.append(expected: expected, idempotencyKey: idempotencyKey, data: data, barrier: barrier)
+    }
+    func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) async throws {
+        attempts += 1
+        if attempts == 1 { throw FxPersistenceError.sizeLimit }
+        try await memory.saveCheckpoint(checkpoint)
+    }
+}
+
+@Test func automaticSnapshotsSurviveSQLiteReopenWithJournalTail() async throws {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("conversation.sqlite")
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let gateway = JournalGateway()
+    var config = FxConfiguration(apiKey: "test-key", model: "swift/journal", httpClient: gateway, checkpointAfterBytes: 0)
+    let store = try FxSQLitePersistence(url: url)
+    let first = try await FxEngine.open(configuration: config, persistence: store)
+    let turn = try await first.prompt("remember this disk turn")
+    for try await _ in turn {}
+    #expect(try await turn.result.stopReason == .endTurn)
+    let snapshot = try await store.load()
+    #expect(snapshot.checkpoint != nil)
+    #expect(snapshot.journal.isEmpty)
+    try await first.close()
+    try await store.close()
+
+    let reopened = try FxSQLitePersistence(url: url)
+    config.checkpointAfterBytes = nil
+    let second = try await FxEngine.open(configuration: config, persistence: reopened)
+    let next = try await second.prompt("append a disk tail")
+    for try await _ in next {}
+    #expect(try await next.result.stopReason == .endTurn)
+    #expect(try await reopened.load().journal.isEmpty == false)
+    try await second.close()
+    try await reopened.close()
+
+    let finalStore = try FxSQLitePersistence(url: url)
+    let third = try await FxEngine.open(configuration: config, persistence: finalStore)
+    let final = try await third.prompt("restore the snapshot and tail")
+    for try await _ in final {}
+    _ = try await final.result
+    let bodies = await gateway.bodies
+    #expect(bodies.last?.contains("remember this disk turn") == true)
+    #expect(bodies.last?.contains("append a disk tail") == true)
+    #expect(bodies.last?.contains("remembered answer") == true)
+    try await third.close()
+    try await finalStore.close()
+}
+
+@Test func failedAutomaticSnapshotPreservesJournalAndRetriesNextTurn() async throws {
+    let store = RetryingCheckpointStore()
+    let engine = try await FxEngine.open(configuration: FxConfiguration(
+        apiKey: "test-key", model: "swift/journal", httpClient: JournalGateway(), checkpointAfterBytes: 0
+    ), persistence: store)
+    for expectedAttempts in 1...2 {
+        let turn = try await engine.prompt("turn \(expectedAttempts)")
+        for try await _ in turn {}
+        #expect(try await turn.result.stopReason == .endTurn)
+        #expect(await store.attempts == expectedAttempts)
+        let snapshot = await store.load()
+        #expect((snapshot.checkpoint != nil) == (expectedAttempts == 2))
+        #expect(snapshot.journal.isEmpty == (expectedAttempts == 2))
+    }
+    try await engine.close()
+}
+
 @Test func journalRestoresConversationAcrossEngines() async throws {
     let gateway = JournalGateway()
     let store = FxMemoryPersistence()

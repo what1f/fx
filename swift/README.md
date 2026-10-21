@@ -92,7 +92,13 @@ Callbacks run synchronously before the next event is handled. Keep them short an
 
 ## Persist a conversation
 
-Pass a store conforming to `FxPersistence` when opening the engine. Its records are opaque bytes. The store must reject a stale expected cursor and honor durability barriers. `FxMemoryPersistence` provides an in-memory reference implementation; it does not survive process exit.
+Pass a store conforming to `FxPersistence` when opening the engine. Its records are opaque bytes. The store must reject a stale expected cursor and honor durability barriers. `FxSQLitePersistence` stores one conversation per local database file using the system SQLite library. Separate connections use transactions to reject stale writers. Close the store after its engines close.
+
+```swift
+let store = try FxSQLitePersistence(url: databaseURL)
+```
+
+Choose a file URL in your application's storage directory. `FxMemoryPersistence` provides an in-memory reference implementation for tests; it does not survive process exit.
 
 ```swift
 let engine = try await FxEngine.open(configuration: configuration, persistence: store)
@@ -111,4 +117,6 @@ For an idle engine, `checkpoint()` returns opaque bytes that another Swift or Ja
 
 With a store conforming to `FxCheckpointPersistence`, call `saveCheckpoint()` to save a journal snapshot through the last committed cursor. The store may then prune the covered journal prefix. Closing waits for a snapshot save already in progress. Journal snapshots differ from the export returned by `checkpoint()`; let the SDK create them.
 
-Journal and checkpoint interoperability have local tests. Automatic checkpoint storage, durable agents and sessions, and process-crash qualification remain pending.
+Journal and checkpoint interoperability have local tests. Automatic snapshots run after completed turns when the store supports `FxCheckpointPersistence`. `FxConfiguration.checkpointAfterBytes` defaults to 1 MiB; use `0` to attempt a snapshot after every turn, or `nil` to save only on explicit calls. A turn settles after its automatic snapshot attempt. A failed automatic save keeps the journal, emits `.checkpointError` when observation is enabled, and retries at a later turn. Successful saves emit `.checkpointSaved`.
+
+Local process tests cover forced termination after a saved snapshot and after an ambiguous external write. Full crash-boundary coverage and durable agent and session APIs remain pending.

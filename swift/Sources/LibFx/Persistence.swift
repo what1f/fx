@@ -81,6 +81,7 @@ struct LoadedJournal: Sendable {
     let events: [JSONValue]
     let head: String?
     let lastSequence: UInt64
+    let tailBytes: Int
 
     init(_ snapshot: FxPersistenceSnapshot) throws {
         func validateCursor(_ cursor: String) throws {
@@ -97,6 +98,7 @@ struct LoadedJournal: Sendable {
             for index in 0..<8 { covered |= UInt64(bytes[index + 5]) << (index * 8) }
         }
         var events: [JSONValue] = []
+        var tailBytes = 0
         var head = snapshot.checkpoint?.through
         for record in snapshot.journal {
             try validateCursor(record.cursor)
@@ -108,10 +110,12 @@ struct LoadedJournal: Sendable {
                 throw FxPersistenceError.invalidJournal
             }
             guard case .array(let batch) = value["events"] else { throw FxPersistenceError.invalidJournal }
-            events += batch.filter { event in
+            let uncovered = batch.filter { event in
                 guard let seq = event["seq"]?.integer, seq >= 0 else { return true }
                 return UInt64(seq) > covered
             }
+            events += uncovered
+            if !uncovered.isEmpty { tailBytes += record.data.count }
             head = record.cursor
         }
         if let explicit = snapshot.head { try validateCursor(explicit); head = explicit }
@@ -140,6 +144,7 @@ struct LoadedJournal: Sendable {
         self.events = events
         self.head = head
         self.lastSequence = events.last?["seq"]?.integer.flatMap(UInt64.init(exactly:)) ?? covered
+        self.tailBytes = tailBytes
     }
 }
 
@@ -150,9 +155,11 @@ actor JournalWriter {
     private(set) var head: String?
     private var tail: Task<Void, any Error>?
     private var lastSequence: UInt64
+    private var bytesSinceCheckpoint: Int
 
-    init(store: any FxPersistence, head: String?, lastSequence: UInt64 = 0) {
+    init(store: any FxPersistence, head: String?, lastSequence: UInt64 = 0, tailBytes: Int = 0) {
         self.store = store; self.head = head; self.lastSequence = lastSequence
+        self.bytesSinceCheckpoint = tailBytes
     }
 
     func append(_ events: JSONValue, barrier: Bool) async throws {
@@ -168,6 +175,7 @@ actor JournalWriter {
             let cursor = try await store.append(expected: head, idempotencyKey: "\(writerID):\(first)", data: data, barrier: barrier || waits)
             guard !cursor.isEmpty, cursor.utf8.count <= 1024 else { throw FxPersistenceError.invalidCursor }
             head = cursor
+            bytesSinceCheckpoint += data.count
             if let seq = batch.last?["seq"]?.integer, let sequence = UInt64(exactly: seq) {
                 lastSequence = sequence
             }
@@ -178,13 +186,19 @@ actor JournalWriter {
 
     func check() async throws { try await tail?.value }
 
-    func saveSnapshot(_ data: Data, at sequence: UInt64) async throws {
+    func shouldCheckpoint(afterBytes limit: Int) -> Bool {
+        store is any FxCheckpointPersistence && bytesSinceCheckpoint > 0 && bytesSinceCheckpoint >= limit
+    }
+
+    func saveSnapshot(_ data: Data, at sequence: UInt64) async throws -> String? {
         try await check()
         guard let store = store as? any FxCheckpointPersistence else {
             throw FxError.invalidInput("Persistence store does not support checkpoints")
         }
         guard sequence == lastSequence else { throw FxPersistenceError.invalidJournal }
-        guard let head else { return }
+        guard let head else { return nil }
         try await store.saveCheckpoint(FxStoredCheckpoint(through: head, data: data))
+        bytesSinceCheckpoint = 0
+        return head
     }
 }

@@ -29,9 +29,12 @@ struct MockHTTP: FxHTTPClient {
     static func main() async throws {
         let models = try await FxModel.available(apiKey: "consumer-test-key", httpClient: MockHTTP())
         guard models.map(\.id) == ["swift/consumer"] else { throw FxModelCatalogError.malformedResponse }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try FxSQLitePersistence(url: directory.appendingPathComponent("conversation.sqlite"))
         let engine = try await FxEngine.open(configuration: FxConfiguration(
-            apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()
-        ))
+            apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP(), checkpointAfterBytes: 0
+        ), persistence: store)
         let turn = try await engine.prompt("hello")
         var text = ""
         for try await event in turn { if case .text(let delta) = event { text += delta } }
@@ -39,6 +42,9 @@ struct MockHTTP: FxHTTPClient {
             throw FxError.protocolViolation("Unexpected consumer response")
         }
         try await engine.close()
+        let saved = try await store.load()
+        guard saved.checkpoint != nil, saved.journal.isEmpty else { throw FxPersistenceError.invalidJournal }
+        try await store.close()
         print("Swift package consumer passed")
     }
 }
