@@ -123,7 +123,15 @@ struct SubscriptionHTTP: FxHTTPClient {
         let repeated = try await session.prompt("ignored", id: durable.id)
         guard try await repeated.result.isRepeated else { throw FxPersistenceError.invalidJournal }
         guard try await session.resume() == nil else { throw FxPersistenceError.invalidJournal }
+        let sessionCheckpoint = try await session.checkpoint()
         try await agent.close()
+        let seeded = try FxAgent(configuration: FxConfiguration(
+            apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()),
+            store: sessions, checkpoint: sessionCheckpoint)
+        let seededSession = try await seeded.session(id: "seeded-session")
+        let seededTurn = try await seededSession.prompt("continue", id: "seeded-message")
+        guard try await seededTurn.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
+        try await seeded.close()
         try await sessions.close()
         let subscription = FxSubscription(provider: .grok, credentials: { _ in
             try FxSubscriptionCredentials(accessToken: "consumer-subscription-key", accountID: "consumer-account")

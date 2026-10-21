@@ -14,6 +14,7 @@ public struct FxSession: Sendable, Identifiable {
     }
     @discardableResult public func resume() async throws -> FxSessionTurn? { try await agent.resume(id) }
     public func cancel() async throws { try await agent.store.cancel(session: id, agent: agent.name) }
+    public func checkpoint() async throws -> Data { try await agent.checkpoint(id, options: options) }
     public func events(after cursor: Int64 = 0) -> FxSessionEvents {
         FxSessionEvents(sessionID: id, cursor: cursor, agent: agent)
     }

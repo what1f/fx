@@ -6,15 +6,17 @@ public actor FxAgent {
     public nonisolated let name: String
     let store: FxSessionStore
     private let configuration: FxConfiguration
+    private let initialCheckpoint: Data?
     private var workers: [String: Task<Void, Never>] = [:]
     private var failures: [String: any Error] = [:]
     private var intakes = 0
     private var closed = false
 
-    public init(configuration: FxConfiguration, name: String = "default", store: FxSessionStore) throws {
+    public init(configuration: FxConfiguration, name: String = "default", store: FxSessionStore, checkpoint: Data? = nil) throws {
         guard validSessionIdentifier(name), name.utf8.count <= 64,
               let first = name.utf8.first, (48...57).contains(first) || (65...90).contains(first) || (97...122).contains(first) else { throw FxError.invalidInput("Invalid agent name") }
         self.configuration = configuration
+        self.initialCheckpoint = checkpoint
         self.name = name
         self.store = store
     }
@@ -31,7 +33,15 @@ public actor FxAgent {
         intakes += 1
         defer { intakes -= 1 }
         try Task.checkCancellation()
-        let repeated = try await store.accept(session: session, agent: name, id: id, content: content, options: options)
+        if let checkpoint = initialCheckpoint {
+            do { _ = try await store.snapshot(session: session, agent: name) }
+            catch FxSessionError.notFound {
+                let temporary = try await FxEngine.open(configuration: configured(for: options), checkpoint: checkpoint)
+                try await temporary.close()
+            }
+        }
+        try Task.checkCancellation()
+        let repeated = try await store.accept(session: session, agent: name, id: id, content: content, options: options, checkpoint: initialCheckpoint)
         kick(session)
         return FxSessionTurn(id: id, sessionID: session, isRepeated: repeated, agent: self)
     }
@@ -46,6 +56,39 @@ public actor FxAgent {
         guard let id = pendingID else { return nil }
         kick(session)
         return FxSessionTurn(id: id, sessionID: session, isRepeated: false, agent: self)
+    }
+
+    func checkpoint(_ session: String, options: FxSessionOptions) async throws -> Data {
+        guard !closed else { throw FxError.closed }
+        intakes += 1
+        defer { intakes -= 1 }
+        let snapshot: FxPersistenceSnapshot
+        do { snapshot = try await store.snapshot(session: session, agent: name) }
+        catch FxSessionError.notFound {
+            let temporary = try await FxEngine.open(configuration: configured(for: options), checkpoint: initialCheckpoint)
+            do {
+                let data = try await temporary.checkpoint()
+                try await temporary.close()
+                return data
+            } catch { try? await temporary.close(); throw error }
+        }
+        var config = configured(for: options)
+        config.checkpointAfterBytes = nil
+        config.observation = nil
+        let temporary = try await FxEngine.open(configuration: config, sessionID: session,
+                                                 persistence: ReadOnlySessionPersistence(snapshot: snapshot))
+        do {
+            let data = try await temporary.checkpoint()
+            try await temporary.close()
+            return data
+        } catch { try? await temporary.close(); throw error }
+    }
+
+    private func configured(for options: FxSessionOptions) -> FxConfiguration {
+        var config = configuration
+        if let model = options.model { config.model = model }
+        if let instructions = options.instructions { config.instructions = instructions }
+        return config
     }
 
     func failure(_ session: String) throws {
@@ -90,9 +133,7 @@ public actor FxAgent {
             try await finish(input, lease: lease, reason: .cancelled)
             return
         }
-        var config = configuration
-        if let model = input.options.model { config.model = model }
-        if let instructions = input.options.instructions { config.instructions = instructions }
+        var config = configured(for: input.options)
         let store = self.store
         config.tools = configuration.tools.map { tool in
             FxTool(name: tool.name, description: tool.description, inputSchema: tool.inputSchema,

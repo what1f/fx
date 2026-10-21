@@ -67,3 +67,25 @@ struct SessionPersistence: FxCheckpointPersistence {
     }
     func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) async throws { try await store.saveJournalCheckpoint(lease, checkpoint) }
 }
+
+struct ReadOnlySessionPersistence: FxPersistence {
+    let snapshot: FxPersistenceSnapshot
+    func load() async throws -> FxPersistenceSnapshot { snapshot }
+    func append(expected: String?, idempotencyKey: String, data: Data, barrier: Bool) async throws -> String {
+        throw FxPersistenceError.fenced
+    }
+}
+
+func sessionSeed(_ checkpoint: Data) -> Data {
+    // FXSN v1 wraps an exported checkpoint with the covered sequence,
+    // next turn number, and the absence of an open turn.
+    var bytes = Data("FXSN".utf8)
+    bytes.append(1)
+    for value: UInt64 in [1, 1] {
+        var littleEndian = value.littleEndian
+        withUnsafeBytes(of: &littleEndian) { bytes.append(contentsOf: $0) }
+    }
+    bytes.append(0)
+    bytes.append(checkpoint)
+    return bytes
+}

@@ -8,7 +8,7 @@ Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. 
 
 ## Implemented proof
 
-`swift test --package-path swift` passed 84 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
+`swift test --package-path swift` passed 88 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
 
 - Fragmented UTF-8 frames, host requests, cancellation, oversized frames, and pending requests during close.
 - HTTP response status, Unicode, bounded chunks, invalid responses, and cancellation before headers.
@@ -27,9 +27,11 @@ Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. 
 - Handoff during a tool call, preservation of journal progress and pending steering, rejection of later prompts, resumes, and snapshot saves, persistence requirements, and stale-turn isolation.
 - Follow-up acceptance and ordered automatic turns, idle acceptance, explicit recovery of held inputs, independent current inputs, cancellation of one waiter, close and failed storage rejecting both waiters, tool turn IDs, and snapshots deferred without errors until queued inputs are placed.
 
-The agent/session implementation has 14 native tests. They cover durable ordered intake, historical message-ID deduplication, per-reader replay, scoped queued cancellation, graceful close, competing local connections and agents, stale-owner rejection, snapshot rollback, wrong-agent rejection, persisted tool context and public identities, and configuration failures before storage or network access. Two recovery fixtures distinguish a started input with no core dispatch from a completed core turn with no saved host result. The former runs normally; the latter returns `.unknown` without another model call. These fixtures simulate those boundaries in process; they are not SIGKILL qualification of the new session store.
+The agent/session implementation has 18 native tests. They cover durable ordered intake, historical message-ID deduplication, per-reader replay, scoped queued cancellation, graceful close, competing local connections and agents, stale-owner rejection, snapshot rollback, wrong-agent rejection, persisted tool context and public identities, and configuration failures before storage or network access. Two recovery fixtures distinguish a started input with no core dispatch from a completed core turn with no saved host result. The former runs normally; the latter returns `.unknown` without another model call. These fixtures simulate those boundaries in process; they are not SIGKILL qualification of the new session store.
 
-`FxSessionStore` stores intake, events, and core journals in one SQLite database. Ownership checks and writes share an immediate transaction, following [SQLite's documented isolation rules](https://www.sqlite.org/isolation.html). A separate local file lock covers the worker lifetime. The Release consumer also imports the public agent/session API, runs a durable turn, replays its events, and checks historical-ID deduplication. Full upstream durable-session coverage, steering, deadlines, and checkpoint export remain pending.
+`FxSessionStore` stores intake, events, and core journals in one SQLite database. Ownership checks and writes share an immediate transaction, following [SQLite's documented isolation rules](https://www.sqlite.org/isolation.html). A separate local file lock covers the worker lifetime. The Release consumer also imports the public agent/session API, runs a durable turn, replays its events, and checks historical-ID deduplication. Full upstream durable-session coverage, steering, deadlines, and checkpoint metadata notifications remain pending.
+
+Four session checkpoint tests cover read-only export with images, export during a live worker, exporting an unused view without creating data, and invalid seeds rejected before intake. The Release consumer exports a session and seeds another agent through the public API.
 
 The independent Release consumer also exercised the default Foundation client against a local HTTP server. It completed an authenticated custom-provider turn, rejected authenticated and token-body 307 redirects, and verified that the redirect target received no request. The Release consumer also used the public subscription API for a Grok turn. The custom-provider conformance scenario compared JavaScript and Swift engine requests, host-tool round trips, missing credentials, rejected keys, and plain and JSON-escaped credential redaction.
 
@@ -55,10 +57,13 @@ node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-
 
 These eight files, including a second steering run with hooks enabled, pass through the Swift driver. Both surface labels in the model-discovery fixture are redirected to Swift; this does not qualify a browser runtime. The adapter translates typed Swift errors to JavaScript error classes for those assertions. `test-agent-effort.mjs` passed its valid and unsupported capability cases, then stopped on a JavaScript error-class assertion. `test-agent-images.mjs` passed initial image transport cases, then stopped at the unimplemented resize hook. Neither file is counted as passed.
 
+Two selected tests from the unchanged upstream `test-durable.mjs` also passed: restoring a conversation in a new agent, and carrying an image through a checkpoint. This is selected coverage, not qualification of the full durable suite. A broader checkpoint-name filter exposed missing metadata mismatch notifications and event translation for automatic snapshots; those checks remain pending.
+
 Additional executable checks passed:
 
 - `smoke.mjs`: local HTTP server, Unicode and reasoning, host tool execution, checkpoint restore, and repeated close.
 - `checkpoint-interoperability.mjs`: JS to Swift to JS, preserving earlier turns and image bytes.
+- `session-checkpoint.mjs`: JavaScript, Swift journal, and Swift snapshot sources restored in both JavaScript and Swift; exports preserve text, responses, and image bytes without a model request.
 - `journal-interoperability.mjs`: Swift to JS to Swift using one persistence store.
 - `recovery.mjs`: journal truncated at tool intent; ambiguous writes remain stopped by default, while explicit rerun preserves execution ID.
 - `turn-control.mjs`: withdrawal while a tool is running, plus controls from an old turn leaving a new turn unaffected.
@@ -70,9 +75,13 @@ Additional executable checks passed:
 - `handoff.mjs`: Swift and JavaScript in both source and target roles; the source makes no later journal writes or automatic snapshots, the target receives the pending steer and skips the ambiguous write, and the source's turn-end observation marks the handoff.
 - `follow-up.mjs`: reference JavaScript and Swift automatic queues, durable acceptance and exactly one placement per input, plus recovery in both source and target roles; held inputs wait for explicit resume while current inputs run independently.
 
-`node swift/Tests/Conformance/run.mjs` reruns the 21 selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
+`node swift/Tests/Conformance/run.mjs` reruns the 24 selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
 
-`swift test --package-path swift --sanitize=thread` passed all 84 Swift tests without a sanitizer warning. The first focused run reported concurrent access to the native handle during shutdown. The transport now waits for the [Dispatch source's cancellation handler](https://developer.apple.com/documentation/dispatch/dispatch_source_set_cancel_handler) and destroys the handle on its actor. This check instruments Swift code; the precompiled Zig archive is not instrumented. The Swift CI workflow repeats the check after conformance testing.
+`swift test --package-path swift --sanitize=thread` passed all 88 Swift tests without a sanitizer warning. The first focused run reported concurrent access to the native handle during shutdown. The transport now waits for the [Dispatch source's cancellation handler](https://developer.apple.com/documentation/dispatch/dispatch_source_set_cancel_handler) and destroys the handle on its actor. This check instruments Swift code; the precompiled Zig archive is not instrumented. The Swift CI workflow repeats the check after conformance testing.
+
+The session byte decoder now looks up Base64 fields by name. Swift JSON encoding exposed its previous field-order dependency. A Zig regression test accepts both orders while retaining strict field, encoding, and decoded-byte validation.
+
+After this decoder change, `zig build test` passed. The original Node checkpoint and journal suites also passed for native to native, native to Wasm, and Wasm to native using newly built artifacts and Node's JSPI flag. These local Node 25 runs do not replace Node 24 CI.
 
 `zig build`, the freshly built CLI's help command, Zig formatting checks for the changed files, and the public-surface audit passed. The help command proves startup only; it is not real-model agent evidence. See [C bridge validation](BRIDGE-VALIDATION.md) for the C consumer and original Node backend regression checks.
 

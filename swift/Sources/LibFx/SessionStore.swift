@@ -58,7 +58,7 @@ public actor FxSessionStore {
         try database.close()
     }
 
-    func accept(session: String, agent: String, id: String, content: [FxPromptContent], options: FxSessionOptions) throws -> Bool {
+    func accept(session: String, agent: String, id: String, content: [FxPromptContent], options: FxSessionOptions, checkpoint: Data? = nil) throws -> Bool {
         guard validSessionIdentifier(session), validSessionIdentifier(id) else { throw FxError.invalidInput("Invalid session or message ID") }
         _ = try PreparedPrompt(content)
         let data = try JSONEncoder().encode(content), settings = try JSONEncoder().encode(options)
@@ -66,6 +66,13 @@ public actor FxSessionStore {
         return try database.transaction {
             try Task.checkCancellation()
             try database.execute("INSERT OR IGNORE INTO fx_sessions(id,agent) VALUES (?,?)", [.text(session), .text(agent)])
+            let created = try database.statement("SELECT changes()") { statement in
+                guard try database.step(statement) else { throw FxPersistenceError.invalidJournal }
+                return sqlite3_column_int(statement, 0) == 1
+            }
+            if created, let checkpoint {
+                try database.execute("UPDATE fx_sessions SET head=1,checkpoint_cursor=1,checkpoint=? WHERE id=?", [.blob(sessionSeed(checkpoint)), .text(session)])
+            }
             try checkAgent(session, agent: agent)
             let prior = try database.statement("SELECT 1 FROM fx_inputs WHERE session=? AND id=?", [.text(session), .text(id)]) { try database.step($0) }
             if prior { return true }
@@ -262,17 +269,30 @@ public actor FxSessionStore {
         }
     }
 
+    func snapshot(session: String, agent: String) throws -> FxPersistenceSnapshot {
+        try database.transaction(mode: "DEFERRED") {
+            try checkAgent(session, agent: agent)
+            return try readJournal(session)
+        }
+    }
+
     func loadJournal(_ lease: SessionLease) throws -> FxPersistenceSnapshot {
         try database.transaction(mode: "DEFERRED") {
             try checkLease(lease)
-            let state = try journalState(lease.sessionID)
-            let records = try database.statement("SELECT cursor,data FROM fx_session_records WHERE session=? ORDER BY cursor", [.text(lease.sessionID)]) { statement in
-                var records: [FxJournalRecord] = []
-                while try database.step(statement) { records.append(FxJournalRecord(cursor: String(sqlite3_column_int64(statement, 0)), data: database.bytes(statement, column: 1))) }
-                return records
-            }
-            return FxPersistenceSnapshot(checkpoint: state.checkpoint, journal: records, head: state.head == 0 ? nil : String(state.head))
+            return try readJournal(lease.sessionID)
         }
+    }
+
+    private func readJournal(_ session: String) throws -> FxPersistenceSnapshot {
+        let state = try journalState(session)
+        let records = try database.statement("SELECT cursor,data FROM fx_session_records WHERE session=? ORDER BY cursor", [.text(session)]) { statement in
+            var records: [FxJournalRecord] = []
+            while try database.step(statement) {
+                records.append(FxJournalRecord(cursor: String(sqlite3_column_int64(statement, 0)), data: database.bytes(statement, column: 1)))
+            }
+            return records
+        }
+        return FxPersistenceSnapshot(checkpoint: state.checkpoint, journal: records, head: state.head == 0 ? nil : String(state.head))
     }
 
     func appendJournal(_ lease: SessionLease, expected: String?, key: String, data: Data) throws -> String {

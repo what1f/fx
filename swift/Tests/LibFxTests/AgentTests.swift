@@ -10,7 +10,7 @@ private actor SessionHTTP: FxHTTPClient {
     init(blocked: Bool = false) { self.blocked = blocked }
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         if request.httpMethod == "GET" {
-            let data = Data(#"{"data":[{"id":"swift/test","type":"language"}]}"#.utf8)
+            let data = Data(#"{"data":[{"id":"swift/test","type":"language","tags":["vision"]}]}"#.utf8)
             return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { $0.yield(data); $0.finish() })
         }
         requests.append(request)
@@ -19,6 +19,7 @@ private actor SessionHTTP: FxHTTPClient {
         return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { $0.yield(Data(text.utf8)); $0.finish() })
     }
     var count: Int { requests.count }
+    var bodies: [String] { requests.map { String(decoding: $0.httpBody ?? Data(), as: UTF8.self) } }
     func waitForRequest() async { while requests.isEmpty { await Task.yield() } }
     func release() { blocked = false; gate?.resume(); gate = nil }
 }
@@ -195,6 +196,81 @@ private actor SessionToolCapture {
         let bodies = await http.bodies
         #expect(bodies.first?.contains("session instructions") == true)
         #expect(bodies.first?.contains("base instructions") == false)
+        try await agent.close()
+        try await store.close()
+    }
+
+    @Test func sessionCheckpointIsReadOnlyAndSeedsANewAgent() async throws {
+        let http = SessionHTTP(), store = try FxSessionStore()
+        let source = try FxAgent(configuration: config(http), store: store)
+        let session = try await source.session(id: "source")
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jP0cAAAAASUVORK5CYII="
+        let image = FxImage(data: try #require(Data(base64Encoded: png)), format: .png)
+        let first = try await session.prompt([.text("remember kiwi"), .image(image)], id: "one")
+        #expect(try await first.result.stopReason == .endTurn)
+        let before = try await store.snapshot(session: "source", agent: "default")
+        let events = try await store.entries(session: "source", agent: "default", after: 0)
+        let checkpoint = try await session.checkpoint()
+        let after = try await store.snapshot(session: "source", agent: "default")
+        #expect(before.head == after.head && before.checkpoint == after.checkpoint && before.journal == after.journal)
+        #expect(try await store.entries(session: "source", agent: "default", after: 0) == events)
+        #expect(await http.count == 1)
+        try await source.close()
+        let clonedStore = try FxSessionStore()
+        let cloned = try FxAgent(configuration: config(http), store: clonedStore, checkpoint: checkpoint)
+        let clone = try await cloned.session(id: "clone")
+        let next = try await clone.prompt("what word", id: "two")
+        #expect(try await next.result.stopReason == .endTurn)
+        #expect(await http.bodies.last?.contains("remember kiwi") == true)
+        #expect(await http.bodies.last?.contains(png) == true)
+        try await cloned.close()
+        // A seed only applies when the stored session is first created.
+        let reopened = try FxAgent(configuration: config(http), store: clonedStore, checkpoint: Data([1, 2, 3]))
+        let existing = try await reopened.session(id: "clone")
+        let final = try await existing.prompt("continue", id: "three")
+        #expect(try await final.result.stopReason == .endTurn)
+        #expect(await http.bodies.last?.contains("what word") == true)
+        try await reopened.close()
+        try await clonedStore.close()
+        try await store.close()
+    }
+
+    @Test func activeCheckpointDoesNotTakeOverOrChangeTheLiveWorker() async throws {
+        let http = SessionHTTP(blocked: true), store = try FxSessionStore()
+        let agent = try FxAgent(configuration: config(http), store: store)
+        let session = try await agent.session(id: "active")
+        let turn = try await session.prompt("in flight")
+        await http.waitForRequest()
+        let before = try await store.snapshot(session: "active", agent: "default")
+        let checkpoint = try await session.checkpoint()
+        #expect(!checkpoint.isEmpty)
+        let after = try await store.snapshot(session: "active", agent: "default")
+        #expect(before.head == after.head && before.checkpoint == after.checkpoint && before.journal == after.journal)
+        await http.release()
+        #expect(try await turn.result.stopReason == .endTurn)
+        #expect(await http.count == 1)
+        try await agent.close()
+        try await store.close()
+    }
+
+    @Test func newSessionCheckpointDoesNotCreateStoredData() async throws {
+        let store = try FxSessionStore(), http = SessionHTTP()
+        let agent = try FxAgent(configuration: config(http), store: store)
+        let session = try await agent.session(id: "fresh")
+        #expect(try await session.checkpoint().count > 0)
+        await #expect(throws: FxSessionError.notFound) { try await store.claim(session: "fresh", agent: "default") }
+        #expect(await http.count == 0)
+        try await agent.close()
+        try await store.close()
+    }
+
+    @Test func invalidCheckpointStoresNoInputOrSession() async throws {
+        let store = try FxSessionStore(), http = SessionHTTP()
+        let agent = try FxAgent(configuration: config(http), store: store, checkpoint: Data([1, 2, 3]))
+        let session = try await agent.session(id: "invalid")
+        await #expect(throws: FxError.self) { try await session.prompt("must not be accepted") }
+        await #expect(throws: FxSessionError.notFound) { try await store.claim(session: "invalid", agent: "default") }
+        #expect(await http.count == 0)
         try await agent.close()
         try await store.close()
     }

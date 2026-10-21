@@ -24,6 +24,8 @@ Use typed configuration, events, results, and errors with async/await and AsyncS
 
 These conditions are binding requirements for the active libfx-swift goal. Evaluate completion against both these conditions and the functional acceptance matrix below.
 
+Treat the user's current repository instructions as execution requirements throughout this goal. A passing JavaScript conformance suite alone does not establish completion: the Swift implementation must also pass its native ownership, concurrency, recovery, and package-consumer gates.
+
 - Design the public API for Swift callers. Use Swift naming, value types, enums, structured concurrency, and explicit ownership where each fits. Do not translate TypeScript interfaces line by line.
 - Support current libfx functionality through idiomatic Swift operations. API names and shapes may differ; required behavior must have acceptance evidence in the matrix below.
 - Exclude historical TypeScript compatibility branches, deprecated API aliases, and JavaScript platform workarounds. Preserve current protocol contracts and persistence compatibility where required.
@@ -33,6 +35,7 @@ These conditions are binding requirements for the active libfx-swift goal. Evalu
 - Prefer mature, widely used libraries and tools for supporting capabilities. Research comparable implementations and known solutions before introducing a new supporting abstraction; verify that each adopted approach fits the current repository.
 - Use pnpm for JavaScript and TypeScript dependencies and test tooling.
 - Keep any user-facing examples, errors, and interface text concise and free of internal implementation details. Review localization when interface text changes; do not introduce hard-coded interface copy.
+- Keep explanations direct and use simple, precise language. For interface work, prefer clear layout and standard controls over explanatory copy, including in prototypes and design proposals.
 
 ## Contracts
 
@@ -53,7 +56,7 @@ Persistence preserves ordered append, expected cursor checks, durability barrier
 | Steering | test-agent-steering | Interrupt, wait, join, withdraw, handoff | Partial: upstream steering, withdrawal, old-turn isolation, persisted handoff and queued follow-ups across Swift/JS engines; durable image handoff pending |
 | Model options and providers | test-agent-effort, test-agent-fast, test-agent-ultrafast-options, test-agent-custom, test-agent-codex, test-agent-grok | Matching request behavior and validation | Partial: effort and fast, complete upstream custom-provider, Codex and Grok files, shared rotations and host locks, error redaction and Foundation redirect isolation; sign-in helpers and remaining model-option suites pending |
 | Images and limits | test-agent-images, test-instruction-limits, test-native-core-image-framing | Input, tool images, UTF-8, frame bounds | Partial: binary input; resizing and image storage pending |
-| Journal and checkpoints | test-journal, test-checkpoint | Swift and JS restore in both directions | Partial: bidirectional checkpoint and journal proof, explicit and automatic snapshot save and restore; full suite pending |
+| Journal and checkpoints | test-journal, test-checkpoint | Swift and JS restore in both directions | Partial: bidirectional checkpoint and journal proof, explicit and automatic snapshot save and restore, read-only session exports and new-agent seeds with images; metadata mismatch notifications and full suite pending |
 | Durable sessions | test-durable, test-durable-core, test-durable-provider-crash, test-world-persistence | Queue, deduplication, crash recovery, fencing | Partial: SQLite persistence, stable turn IDs, cooperative yield and repeated resume across Swift/JS snapshots, latest completed ID deduplication, cross-process writer fencing and two SIGKILL recovery boundaries; agent/session intake, event replay, local ownership, ordered workers, resumable turn views and three worker SIGKILL boundaries tested; full agent/session suites pending |
 | Hooks | test-hooks | Event scopes and observation isolation | Partial: runtime and journal observations, content opt-in, error isolation, JS comparison and hooks-enabled steering; parent and tool-local scopes pending |
 | MCP and skills | test-mcp-adapter, test-skills-adapter | Host adapters and cancellation | Pending |

@@ -214,7 +214,8 @@ actor Driver: FxHTTPClient, FxPersistence {
             if value["op"] == .string("openAgent") {
                 let sessionStore = try FxSessionStore(url: options["sessionStorePath"]?.string.map { URL(fileURLWithPath: $0) })
                 self.sessionStore = sessionStore
-                agent = try FxAgent(configuration: config, name: options["name"]?.string ?? "default", store: sessionStore)
+                agent = try FxAgent(configuration: config, name: options["name"]?.string ?? "default", store: sessionStore,
+                                    checkpoint: options["checkpoint"]?.string.flatMap { Data(base64Encoded: $0) })
                 return .object([:])
             }
             let checkpoint = options["checkpoint"]?.string.flatMap { Data(base64Encoded: $0) }
@@ -237,13 +238,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             ])
         case "sessionPrompt", "sessionResume":
             guard let agent, let sessionID = value["sessionID"]?.string else { throw FxError.closed }
-            let options = value["options"] ?? .null
-            let model = options["model"]
-            let sessionOptions = FxSessionOptions(model: model.map {
-                FxModel(id: $0.string ?? $0["id"]?.string ?? "", reasoningEffort: $0["effort"]?.string,
-                        fast: bool($0["fast"]), ultrafast: bool($0["ultrafast"]))
-            }, instructions: options["instructions"]?.string, context: options["context"])
-            let session = try await agent.session(id: sessionID, options: sessionOptions)
+            let session = try await agent.session(id: sessionID, options: sessionOptions(value["options"] ?? .null))
             let content: [FxPromptContent]
             if case .array(let blocks) = value["text"] {
                 content = try blocks.map { block in
@@ -278,6 +273,10 @@ actor Driver: FxHTTPClient, FxPersistence {
                 sessionDeliveries.removeValue(forKey: token)
             }
             return .object(["messageID": .string(next.id), "sessionID": .string(next.sessionID)])
+        case "sessionCheckpoint":
+            guard let agent, let id = value["sessionID"]?.string else { throw FxError.closed }
+            let session = try await agent.session(id: id, options: sessionOptions(value["options"] ?? .null))
+            return .string(try await session.checkpoint().base64EncodedString())
         case "refreshLockedOperation":
             guard let token = value["token"]?.string, let operation = refreshOperations.removeValue(forKey: token) else { throw FxError.closed }
             let task = Task { try await operation() }
@@ -551,6 +550,13 @@ actor Driver: FxHTTPClient, FxPersistence {
         _ = try await persistenceRequest("saveCheckpoint", [
             "through": .string(checkpoint.through), "data": .string(checkpoint.data.base64EncodedString()),
         ])
+    }
+
+    private func sessionOptions(_ options: JSONValue) -> FxSessionOptions {
+        FxSessionOptions(model: options["model"].map {
+            FxModel(id: $0.string ?? $0["id"]?.string ?? "", reasoningEffort: $0["effort"]?.string,
+                    fast: bool($0["fast"]), ultrafast: bool($0["ultrafast"]))
+        }, instructions: options["instructions"]?.string, context: options["context"])
     }
 
     private func bool(_ value: JSONValue?) -> Bool? {

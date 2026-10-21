@@ -246,6 +246,9 @@ export async function createFxEngine(options = {}) {
         sessionIntakes.add(intake);
         return state.public;
       },
+      async sessionCheckpoint(sessionID, sessionOptions) {
+        return new Uint8Array(Buffer.from(await request('sessionCheckpoint', { sessionID, options: sessionOptions }), 'base64'));
+      },
       async __killForTest() {
         closed = true;
         child.kill('SIGKILL');
@@ -434,15 +437,26 @@ export function createFxAgent(options = {}) {
       async *[Symbol.asyncIterator]() { yield* await started; },
     };
   }
-  return {
+  let defaultSession;
+  const agent = {
     session(sessionID = randomUUID(), sessionOptions = {}) {
       return {
         id: sessionID,
         prompt(input, promptOptions) { return turnView(sessionID, sessionOptions, input, promptOptions); },
         resume() { return turnView(sessionID, sessionOptions, '', {}, true); },
+        async checkpoint() { return (await ready).sessionCheckpoint(sessionID, sessionOptions); },
       };
+    },
+    prompt(input, promptOptions) {
+      defaultSession ??= agent.session();
+      return defaultSession.prompt(input, promptOptions);
+    },
+    async checkpoint() {
+      defaultSession ??= agent.session();
+      return defaultSession.checkpoint();
     },
     async __killForTest() { return (await ready).__killForTest(); },
     async close() { await (await ready).close(); },
   };
+  return agent;
 }
