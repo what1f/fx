@@ -191,7 +191,10 @@ actor Driver: FxHTTPClient, FxPersistence {
             }
             return .object(["turnID": .string(next.id)])
         case "cancel":
-            if value["turnToken"]?.string == turnToken { await turn?.cancel() }
+            if value["turnToken"]?.string == turnToken {
+                if value["reason"] == .string("handoff") { try await turn?.handoff() }
+                else { await turn?.cancel() }
+            }
             return .null
         case "steer":
             guard let turn, value["turnToken"]?.string == turnToken else { throw FxError.noActiveTurn }

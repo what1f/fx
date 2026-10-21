@@ -166,7 +166,7 @@ export async function createFxEngine(options = {}) {
       const turnToken = randomUUID();
       const control = (op, args = {}) => request(op, { ...args, turnToken });
       let ready;
-      const state = createTurn(() => ready.then(() => control('cancel')), (input, inputID) => ready.then(() => control('steer', {
+      const state = createTurn(args => ready.then(() => control('cancel', args)), (input, inputID) => ready.then(() => control('steer', {
         text: Array.isArray(input) ? input.map(block => block.text).join('\n') : input, inputID,
       })), inputID => ready.then(() => control('withdraw', { inputID })));
       turn = state;
@@ -238,7 +238,7 @@ function createTurn(cancel, steer, withdraw) {
     fail(error) { if (done) return; done = true; failure = error; rejectResult(error); while (waiters.length) waiters.shift().reject(error); },
     public: {
       result,
-      cancel() { void cancel().catch(error => state.fail(error)); },
+      cancel(options = {}) { return cancel(options).catch(error => state.fail(error)); },
       steer(input, id = randomUUID()) {
         const receipt = steer(input, id);
         receipt.id = id;

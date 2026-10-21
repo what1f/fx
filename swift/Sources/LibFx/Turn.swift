@@ -50,6 +50,7 @@ public struct FxTurn: AsyncSequence, Sendable, Identifiable {
     let events: AsyncThrowingStream<FxEvent, any Error>
     let completion: Task<FxTurnResult, any Error>
     let cancelAction: @Sendable () async -> Void
+    let handoffAction: @Sendable () async throws -> Void
     let steerAction: @Sendable (String, String) async throws -> FxSteeringReceipt
     let withdrawAction: @Sendable (String) async throws -> FxWithdrawal
 
@@ -65,6 +66,8 @@ public struct FxTurn: AsyncSequence, Sendable, Identifiable {
     }
     public func makeAsyncIterator() -> AsyncIterator { events.makeAsyncIterator() }
     public func cancel() async { await cancelAction() }
+    /// Stops this engine while keeping the interrupted turn for a new engine to resume.
+    public func handoff() async throws { try await handoffAction() }
     public func steer(_ text: String, id: String = UUID().uuidString) async throws -> FxSteeringReceipt {
         try await steerAction(text, id)
     }
@@ -76,7 +79,7 @@ public struct FxTurn: AsyncSequence, Sendable, Identifiable {
         return FxTurn(
             id: id, events: events,
             completion: Task<FxTurnResult, any Error> { FxTurnResult(stopReason: .endTurn, usage: FxUsage(nil)) },
-            cancelAction: {}, steerAction: { _, _ in throw FxError.noActiveTurn },
+            cancelAction: {}, handoffAction: {}, steerAction: { _, _ in throw FxError.noActiveTurn },
             withdrawAction: { _ in .alreadyPlaced }
         )
     }

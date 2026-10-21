@@ -17,6 +17,7 @@ public actor FxEngine {
     private var toolTasks: [String: Task<Void, Never>] = [:]
     private var toolNames: [String: String] = [:]
     private var closed = false
+    private var handedOff = false
     private var cancelling = false
     private var turnCancelled = false
     private var promptDispatch: PromptDispatch?
@@ -125,6 +126,7 @@ public actor FxEngine {
 
     public func prompt(_ content: [FxPromptContent], id: String = UUID().uuidString, yieldAt: Date? = nil) throws -> FxTurn {
         guard !closed else { throw FxError.closed }
+        guard !handedOff else { throw FxError.handedOff }
         if let journalFailure { throw journalFailure }
         guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
         guard validInputID(id) else { throw FxError.invalidInput("Turn ID must contain 1–128 ASCII letters, digits, '.', '_' or '-'") }
@@ -142,6 +144,7 @@ public actor FxEngine {
     /// Continues an interrupted turn. Unlisted ambiguous calls are not repeated.
     public func resume(rerunning executionIDs: Set<String> = [], yieldAt: Date? = nil) throws -> FxTurn? {
         guard !closed else { throw FxError.closed }
+        guard !handedOff else { throw FxError.handedOff }
         if let journalFailure { throw journalFailure }
         guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
         guard let recovery else { return nil }
@@ -261,11 +264,13 @@ public actor FxEngine {
                 try await journal?.check()
                 try Task.checkCancellation()
                 let reason = FxTurnResult.StopReason(rawValue: result["stopReason"]?.string ?? "") ?? .unknown
-                if reason == .yielded {
-                    recovery = FxRecoveryState(turnID: publicID, runningCalls: [])
-                } else {
-                    recovery = nil
-                    if journal != nil { lastCompletedTurnID = publicID }
+                if !handedOff {
+                    if reason == .yielded {
+                        recovery = FxRecoveryState(turnID: publicID, runningCalls: [])
+                    } else {
+                        recovery = nil
+                        if journal != nil { lastCompletedTurnID = publicID }
+                    }
                 }
                 await maybeSaveCheckpoint(finishing: id)
                 self.finish(turn: id)
@@ -283,6 +288,10 @@ public actor FxEngine {
         return FxTurn(
             id: publicID, events: events, completion: task,
             cancelAction: { [weak self] in await self?.cancel(turn: id) },
+            handoffAction: { [weak self] in
+                guard let self else { throw FxError.closed }
+                try await self.handoff(turn: id)
+            },
             steerAction: { [weak self] text, inputID in
                 guard let self else { throw FxError.closed }
                 return try await self.steer(turn: id, text: text, inputID: inputID)
@@ -298,9 +307,18 @@ public actor FxEngine {
         guard !closed else { return }
         if message.method == "libfx/hook", message.params["rootSessionId"]?.string == sessionID {
             guard let observation else { return }
-            do { observation.deliver(try FxObservation(raw: message.params)) }
-            catch { observation.onError(error) }
+            do {
+                var params = message.params
+                if handedOff, params["type"] == .string("turn.end"), case .object(var fields) = params,
+                   case .object(var data) = fields["data"] {
+                    data["handoff"] = .bool(true)
+                    fields["data"] = .object(data)
+                    params = .object(fields)
+                }
+                observation.deliver(try FxObservation(raw: params))
+            } catch { observation.onError(error) }
         } else if message.method == "libfx/journal_append", message.params["sessionId"]?.string == sessionID, let journal {
+            guard !handedOff else { return }
             do {
                 let events = message.params["events"] ?? .null
                 try await journal.append(events, barrier: message.params["barrier"] == .bool(true))
@@ -409,6 +427,15 @@ public actor FxEngine {
         await transport.abortEffects()
     }
 
+    private func handoff(turn id: UUID) async throws {
+        guard !closed else { throw FxError.closed }
+        guard journal != nil else { throw FxError.invalidInput("Handoff requires persistence") }
+        guard isActive(id) else { return }
+        handedOff = true
+        await cancel(turn: id)
+        try await journal?.check()
+    }
+
     private func steer(turn id: UUID, text: String, inputID: String) async throws -> FxSteeringReceipt {
         guard !closed else { throw FxError.closed }
         guard isActive(id) else { throw FxError.noActiveTurn }
@@ -464,7 +491,7 @@ public actor FxEngine {
 
     private func maybeSaveCheckpoint(finishing id: UUID) async {
         guard let checkpointAfterBytes, let journal, await journal.shouldCheckpoint(afterBytes: checkpointAfterBytes),
-              !closed, turnID == id else { return }
+              !closed, !handedOff, turnID == id else { return }
         do { try await storeCheckpoint(finishing: id) }
         catch {
             observation?.deliver(FxObservation(journal: .checkpointError, sessionID: sessionID, data: .object([
@@ -476,6 +503,7 @@ public actor FxEngine {
 
     private func storeCheckpoint(finishing id: UUID?) async throws {
         guard !closed else { throw FxError.closed }
+        guard !handedOff else { throw FxError.handedOff }
         guard turnID == id, !cancelling, !checkpointing else { throw FxError.busy }
         guard let journal else { throw FxError.invalidInput("Persistence store is required") }
         checkpointing = true

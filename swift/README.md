@@ -119,6 +119,8 @@ Use `prompt(_:id:yieldAt:)` to give a turn a stable identity and an optional `Da
 
 Yielding requires persistence. Pass `yieldAt` to `prompt` or `resume` to stop at a safe boundary and return `.yielded`. Each invocation allows at least one model request before checking the deadline, including an expired deadline. Yielding does not interrupt an active request or tool. Resume the saved turn with `resume()` or its original ID. Automatic snapshots also preserve yielded turns.
 
+To transfer an active persisted turn to another engine, call `try await turn.handoff()`, await its cancelled result, and close the old engine. Handoff stops model and cooperative tool work while preserving the saved progress and pending steering. The old engine stops accepting journal records and cannot start or resume turns or save snapshots; those operations throw `FxError.handedOff`. Open a new engine with the same store and call `resume()`. Inspect its recovery calls before choosing any explicit reruns. A handoff on an old turn cannot affect a newer turn.
+
 For an idle engine, `checkpoint()` returns opaque bytes that another Swift or JavaScript engine can restore. Provide either checkpoint bytes or a persistence store at creation.
 
 With a store conforming to `FxCheckpointPersistence`, call `saveCheckpoint()` to save a journal snapshot through the last committed cursor. The store may then prune the covered journal prefix. Closing waits for a snapshot save already in progress. Journal snapshots differ from the export returned by `checkpoint()`; let the SDK create them.
