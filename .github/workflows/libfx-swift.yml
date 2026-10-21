@@ -40,3 +40,5 @@ jobs:
         run: zig build libfx-napi -Dnapi-surface=core
       - name: Run conformance checks
         run: node swift/Tests/Conformance/run.mjs
+      - name: Check Swift concurrency with Thread Sanitizer
+        run: swift test --package-path swift --sanitize=thread

@@ -47,6 +47,7 @@ public struct FxConfiguration: Sendable {
 public struct FxToolContext: Sendable {
     public let executionID: String
     public let sessionID: String
+    public let turnID: String
 }
 
 public struct FxTool: Sendable {

@@ -27,8 +27,7 @@ private struct RelayedCheckpointStore: FxCheckpointPersistence {
 actor Driver: FxHTTPClient, FxPersistence {
     private var engine: FxEngine?
     private var store: (any FxPersistence)?
-    private var turn: FxTurn?
-    private var turnToken: String?
+    private var turns: [String: FxTurn] = [:]
     private var nextFetchID = 1
     private var fetchWaiters: [Int: CheckedContinuation<FxHTTPResponse, any Error>] = [:]
     private var fetchBodies: [Int: AsyncThrowingStream<Data, any Error>.Continuation] = [:]
@@ -64,6 +63,28 @@ actor Driver: FxHTTPClient, FxPersistence {
                 fields["data"] = data
             }
             emit(.object(["id": id, "error": .object(fields)]))
+        }
+    }
+
+    private func deliver(_ next: FxTurn, token: String) {
+        guard let engine else { return }
+        turns[token] = next
+        emit(.object(["turnStarted": .string(token), "turnID": .string(next.id)]))
+        Task {
+            do {
+                for try await event in next { emit(.object(["event": encode(event), "turnToken": .string(token)])) }
+                let result = try await next.result
+                let recovery = await engine.recoveryState
+                emit(.object([
+                    "turnToken": .string(token), "completed": encode(result), "recovery": .object([
+                        "resumable": .bool(await engine.hasResumableWork), "openTurnId": recovery?.turnID.map(JSONValue.string) ?? .null,
+                        "runningCalls": .array((recovery?.runningCalls ?? []).map {
+                            .object(["executionId": .string($0.executionID), "name": .string($0.name), "input": $0.input])
+                        }),
+                    ]),
+                ]))
+            } catch { emit(.object(["failed": .string(String(describing: error)), "turnToken": .string(token)])) }
+            turns.removeValue(forKey: token)
         }
     }
 
@@ -138,7 +159,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             )
             let recovery = await engine!.recoveryState
             return .object([
-                "sessionId": .string(engine!.sessionID), "resumable": .bool(recovery != nil),
+                "sessionId": .string(engine!.sessionID), "resumable": .bool(await engine!.hasResumableWork),
                 "openTurnId": recovery?.turnID.map(JSONValue.string) ?? .null,
                 "runningCalls": .array((recovery?.runningCalls ?? []).map {
                     .object(["executionId": .string($0.executionID), "name": .string($0.name), "input": $0.input])
@@ -172,36 +193,35 @@ actor Driver: FxHTTPClient, FxPersistence {
                 }
                 next = try await engine.prompt(content, id: publicID, yieldAt: deadline)
             } else { next = try await engine.prompt(value["text"]?.string ?? "", id: publicID, yieldAt: deadline) }
-            turn = next
-            turnToken = value["turnToken"]?.string
+            deliver(next, token: value["turnToken"]?.string ?? next.id)
+            return .object(["turnID": .string(next.id)])
+        case "followUp":
+            guard let engine else { throw FxError.closed }
+            let receipt = try await engine.followUp(value["text"]?.string ?? "")
+            let token = value["turnToken"]?.string ?? receipt.id
             Task {
                 do {
-                    for try await event in next { emit(.object(["event": encode(event)])) }
-                    let result = try await next.result
-                    let recovery = await engine.recoveryState
-                    emit(.object([
-                        "completed": encode(result), "recovery": .object([
-                            "resumable": .bool(recovery != nil), "openTurnId": recovery?.turnID.map(JSONValue.string) ?? .null,
-                            "runningCalls": .array((recovery?.runningCalls ?? []).map {
-                                .object(["executionId": .string($0.executionID), "name": .string($0.name), "input": $0.input])
-                            }),
-                        ]),
-                    ]))
-                } catch { emit(.object(["failed": .string(String(describing: error))])) }
+                    try await receipt.accepted
+                    emit(.object(["followUpAccepted": .string(token), "inputID": .string(receipt.id)]))
+                } catch { emit(.object(["followUpRejected": .string(token), "error": .string(String(describing: error))])) }
             }
-            return .object(["turnID": .string(next.id)])
+            Task {
+                do { deliver(try await receipt.turn, token: token) }
+                catch { emit(.object(["failed": .string(String(describing: error)), "turnToken": .string(token)])) }
+            }
+            return .object(["inputID": .string(receipt.id)])
         case "cancel":
-            if value["turnToken"]?.string == turnToken {
-                if value["reason"] == .string("handoff") { try await turn?.handoff() }
-                else { await turn?.cancel() }
+            if let token = value["turnToken"]?.string, let turn = turns[token] {
+                if value["reason"] == .string("handoff") { try await turn.handoff() }
+                else { await turn.cancel() }
             }
             return .null
         case "steer":
-            guard let turn, value["turnToken"]?.string == turnToken else { throw FxError.noActiveTurn }
+            guard let token = value["turnToken"]?.string, let turn = turns[token] else { throw FxError.noActiveTurn }
             let receipt = try await turn.steer(value["text"]?.string ?? "", id: value["inputID"]?.string ?? UUID().uuidString)
             return .object(["id": .string(receipt.id)])
         case "withdraw":
-            guard let turn, value["turnToken"]?.string == turnToken else { return .string(FxWithdrawal.alreadyPlaced.rawValue) }
+            guard let token = value["turnToken"]?.string, let turn = turns[token] else { return .string(FxWithdrawal.alreadyPlaced.rawValue) }
             return .string(try await turn.withdraw(value["inputID"]?.string ?? "").rawValue)
         case "checkpoint":
             guard let engine else { throw FxError.closed }
@@ -378,6 +398,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                 emit(.object(["toolRequest": .object([
                     "id": .number(Double(id)), "name": .string(name), "input": input,
                     "executionId": .string(context.executionID), "sessionId": .string(context.sessionID),
+                    "turnId": .string(context.turnID),
                 ])]))
             }
         } onCancel: { Task { await self.cancelTool(id) } }

@@ -9,7 +9,7 @@ import Darwin
 import Glibc
 #endif
 
-/// The actor serializes C access. The box only releases the runtime after its owner dies.
+/// The actor serializes C access and destruction. A cancelled source retains the box until its handler runs.
 private final class CoreHandle: @unchecked Sendable {
     private(set) var pointer: OpaquePointer?
     init(_ pointer: OpaquePointer) { self.pointer = pointer }
@@ -58,8 +58,7 @@ actor NativeTransport: CoreTransport {
             Task { await self.pump() }
         }
         source.setCancelHandler { [handle, sourceClosedContinuation] in
-            handle.destroy()
-            sourceClosedContinuation.finish()
+            withExtendedLifetime(handle) { sourceClosedContinuation.finish() }
         }
         self.source = source
         source.resume()
@@ -226,5 +225,6 @@ actor NativeTransport: CoreTransport {
     func close() async {
         shutdown(nil)
         for await _ in sourceClosed {}
+        handle.destroy()
     }
 }

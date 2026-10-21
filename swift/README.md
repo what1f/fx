@@ -70,7 +70,7 @@ let image = FxImage(data: pngBytes, format: .png)
 let turn = try await engine.prompt([.text("Describe this image"), .image(image)])
 ```
 
-Pass tools through `FxConfiguration.tools`. A tool can return text, images, and an explicit error flag through `FxToolResult`. Its context carries a stable execution ID for effect deduplication and the session ID. Tool closures must cooperate with task cancellation.
+Pass tools through `FxConfiguration.tools`. A tool can return text, images, and an explicit error flag through `FxToolResult`. Its context carries a stable execution ID for effect deduplication, the session ID, and the public turn ID. Tool closures must cooperate with task cancellation.
 
 Images use `Data` and a supported format. Each prompt accepts up to eight images, at most 3.75 MiB each and 6 MiB together, subject to the encoded request limit. The core checks image content and model capabilities. Image resizing and external image storage are not implemented yet.
 
@@ -121,9 +121,23 @@ Yielding requires persistence. Pass `yieldAt` to `prompt` or `resume` to stop at
 
 To transfer an active persisted turn to another engine, call `try await turn.handoff()`, await its cancelled result, and close the old engine. Handoff stops model and cooperative tool work while preserving the saved progress and pending steering. The old engine stops accepting journal records and cannot start or resume turns or save snapshots; those operations throw `FxError.handedOff`. Open a new engine with the same store and call `resume()`. Inspect its recovery calls before choosing any explicit reruns. A handoff on an old turn cannot affect a newer turn.
 
+Queue text as a separate turn with `followUp`:
+
+```swift
+let queued = try await engine.followUp("Then summarize the changes")
+try await queued.accepted
+let next = try await queued.turn
+for try await event in next { /* Display the event. */ }
+_ = try await next.result
+```
+
+New follow-ups run in queue order after the active turn, or start immediately when the engine is idle. With persistence, `accepted` waits until the journal stores the input; without persistence, acceptance lasts only in memory. Cancelling a task waiting for acceptance or turn start does not remove the input. Close and handoff reject waiters whose turns have not started. After reopening, `resume()` first continues an interrupted turn, then starts one saved follow-up per call. Saved follow-ups wait for explicit resume and do not block new follow-ups queued in the current engine.
+
 For an idle engine, `checkpoint()` returns opaque bytes that another Swift or JavaScript engine can restore. Provide either checkpoint bytes or a persistence store at creation.
 
 With a store conforming to `FxCheckpointPersistence`, call `saveCheckpoint()` to save a journal snapshot through the last committed cursor. The store may then prune the covered journal prefix. Closing waits for a snapshot save already in progress. Journal snapshots differ from the export returned by `checkpoint()`; let the SDK create them.
+
+The core can defer a snapshot while queued inputs remain unplaced or the session exceeds snapshot bounds. This leaves the journal intact. Automatic saving tries again after a later turn.
 
 Journal and checkpoint interoperability have local tests. Automatic snapshots run after completed turns when the store supports `FxCheckpointPersistence`. `FxConfiguration.checkpointAfterBytes` defaults to 1 MiB; use `0` to attempt a snapshot after every turn, or `nil` to save only on explicit calls. A turn settles after its automatic snapshot attempt. A failed automatic save keeps the journal, emits `.checkpointError` when observation is enabled, and retries at a later turn. Successful saves emit `.checkpointSaved`.
 

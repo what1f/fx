@@ -8,7 +8,7 @@ Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. 
 
 ## Implemented proof
 
-`swift test --package-path swift` passed 42 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
+`swift test --package-path swift` passed 48 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
 
 - Fragmented UTF-8 frames, host requests, cancellation, oversized frames, and pending requests during close.
 - HTTP response status, Unicode, bounded chunks, invalid responses, and cancellation before headers.
@@ -23,6 +23,7 @@ Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. 
 - Automatic snapshots across SQLite reopen and a later journal tail, plus a failed save that preserves records and retries after the next turn.
 - Stable turn IDs, completed retry deduplication, repeated yields across a disk snapshot, replacing an interrupted turn, invalid IDs and deadlines, and cancellation of a task awaiting a turn result.
 - Handoff during a tool call, preservation of journal progress and pending steering, rejection of later prompts, resumes, and snapshot saves, persistence requirements, and stale-turn isolation.
+- Follow-up acceptance and ordered automatic turns, idle acceptance, explicit recovery of held inputs, independent current inputs, cancellation of one waiter, close and failed storage rejecting both waiters, tool turn IDs, and snapshots deferred without errors until queued inputs are placed.
 
 The following upstream tests passed through the Swift test driver with their assertions unchanged:
 
@@ -50,16 +51,19 @@ Additional executable checks passed:
 - `sqlite-fencing.mjs`: two core processes with one database; the stale writer stops before its model request.
 - `turn-identity.mjs`: reference JavaScript and Swift behavior, plus alternating implementations across yielded snapshots; preserves original input and completed tool results, resumes the original ID, and deduplicates retries of the most recently completed ID.
 - `handoff.mjs`: Swift and JavaScript in both source and target roles; the source makes no later journal writes or automatic snapshots, the target receives the pending steer and skips the ambiguous write, and the source's turn-end observation marks the handoff.
+- `follow-up.mjs`: reference JavaScript and Swift automatic queues, durable acceptance and exactly one placement per input, plus recovery in both source and target roles; held inputs wait for explicit resume while current inputs run independently.
 
-`node swift/Tests/Conformance/run.mjs` reruns the 17 selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
+`node swift/Tests/Conformance/run.mjs` reruns the 18 selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
+
+`swift test --package-path swift --sanitize=thread` passed all 48 Swift tests without a sanitizer warning. The first focused run reported concurrent access to the native handle during shutdown. The transport now waits for the [Dispatch source's cancellation handler](https://developer.apple.com/documentation/dispatch/dispatch_source_set_cancel_handler) and destroys the handle on its actor. This check instruments Swift code; the precompiled Zig archive is not instrumented. The Swift CI workflow repeats the check after conformance testing.
 
 `zig build`, the freshly built CLI's help command, Zig formatting checks for the changed files, and the public-surface audit passed. The help command proves startup only; it is not real-model agent evidence. See [C bridge validation](BRIDGE-VALIDATION.md) for the C consumer and original Node backend regression checks.
 
 ## Required remaining gates
 
-- Full classified upstream test coverage, including the SDK's providers, queued follow-ups and durable image handoff, parent and tool-local observation scopes, image processing and storage, and durable agent and session behavior.
+- Full classified upstream test coverage, including the SDK's providers, durable image handoff, parent and tool-local observation scopes, image processing and storage, and durable agent and session behavior.
 - Additional storage integrations, durability barriers under slow storage, and systematic termination across all effect boundaries.
-- Sanitizers and concurrency stress tests, especially cancellation during preparation and storage.
+- Address Sanitizer, instrumentation of the native core, and concurrency stress tests, especially cancellation during preparation and storage.
 - Runtime proof for x86_64 and final consumer validation against the release artifact.
 - Available-credential real-model integration and exact-commit CI, including macOS arm64.
 - Repository final ship gate before any release-readiness claim.

@@ -14,16 +14,18 @@ export async function createFxEngine(options = {}) {
   const pending = new Map();
   const tools = new Map((options.tools || []).map(tool => [tool.name, tool]));
   const toolControllers = new Map();
+  const turnStates = new Map(), followUps = new Map();
   const fetchControllers = new Map();
   const fetchReaders = new Map();
   let nextID = 1, turn = null, closed = false, stderr = '';
   let resumable = false, recoveryCalls = [], recoveryTurnID = null;
-  let turnSignal = null, removeAbortListener = () => {};
+
   child.stderr.on('data', data => { stderr += data; });
   child.stdin.on('error', error => {
     for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
-    turn?.fail(error);
+    for (const state of turnStates.values()) state.fail(error);
+    for (const queued of followUps.values()) { queued.rejectAccepted(error); queued.rejectTurn(error); }
   });
   function request(op, args = {}) {
     if (child.stdin.writableEnded || child.stdin.destroyed) return Promise.reject(new Error('Swift driver input is closed'));
@@ -39,7 +41,8 @@ export async function createFxEngine(options = {}) {
     const error = new Error(`Swift driver exited: ${code ?? signal}${stderr ? `\n${stderr}` : ''}`);
     for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
-    turn?.fail(error);
+    for (const state of turnStates.values()) state.fail(error);
+    for (const queued of followUps.values()) { queued.rejectAccepted(error); queued.rejectTurn(error); }
     resolve({ code, signal });
   }));
   child.on('error', error => {
@@ -66,14 +69,46 @@ export async function createFxEngine(options = {}) {
         if (value.error.data) Object.assign(error, value.error.data);
         waiter?.reject(error);
       } else waiter?.resolve(value.result);
-    } else if (value.event) turn?.push(value.event);
+    } else if (value.turnStarted) {
+      const state = turnStates.get(value.turnStarted);
+      if (state) {
+        turn = state;
+        state.public.id = value.turnID;
+        const queued = followUps.get(value.turnStarted);
+        if (queued) {
+          queued.resolveTurn(state.public); queued.started = true;
+          if (queued.accepted) followUps.delete(value.turnStarted);
+        }
+      }
+    } else if (value.followUpAccepted) {
+      const queued = followUps.get(value.followUpAccepted);
+      if (queued) {
+        queued.id = value.inputID; queued.resolveAccepted({ id: value.inputID }); queued.accepted = true;
+        const state = turnStates.get(value.followUpAccepted);
+        if (state) state.public.id = value.inputID;
+        if (queued.started) followUps.delete(value.followUpAccepted);
+      }
+    } else if (value.followUpRejected) {
+      followUps.get(value.followUpRejected)?.rejectAccepted(new Error(value.error));
+    } else if (value.event) turnStates.get(value.turnToken)?.push(value.event);
     else if (value.completed) {
       resumable = value.recovery?.resumable ?? false;
       recoveryCalls = value.recovery?.runningCalls ?? [];
       recoveryTurnID = value.recovery?.openTurnId ?? null;
-      removeAbortListener(); turn?.finish(value.completed); turn = null; turnSignal = null;
+      const state = turnStates.get(value.turnToken);
+      state?.cleanup?.(); state?.finish(value.completed);
+      if (turn === state) turn = null;
+      turnStates.delete(value.turnToken);
+    } else if (value.failed) {
+      const state = turnStates.get(value.turnToken);
+      const error = new Error(value.failed);
+      state?.cleanup?.(); state?.fail(error);
+      const queued = followUps.get(value.turnToken);
+      queued?.rejectTurn(error); queued?.rejectAccepted(error);
+      followUps.delete(value.turnToken);
+      if (turn === state) turn = null;
+      turnStates.delete(value.turnToken);
     }
-    else if (value.failed) { removeAbortListener(); turn?.fail(new Error(value.failed)); turn = null; turnSignal = null; }
     else if (value.fetchCancelled) {
       fetchControllers.get(value.fetchCancelled)?.abort();
       void fetchReaders.get(value.fetchCancelled)?.cancel().catch(() => {});
@@ -134,7 +169,8 @@ export async function createFxEngine(options = {}) {
     } else if (value.toolRequest) {
       const call = value.toolRequest, controller = new AbortController();
       toolControllers.set(call.id, controller);
-      if (turnSignal?.aborted) return;
+      const owner = [...turnStates.values()].find(state => state.public.id === call.turnId);
+      if (owner?.signal?.aborted) return;
       Promise.resolve().then(() => tools.get(call.name).execute(call.input, {
         signal: controller.signal, executionId: call.executionId, sessionId: call.sessionId,
       })).then(result => controller.signal.aborted ? undefined : request('toolResult', { toolID: call.id,
@@ -169,20 +205,21 @@ export async function createFxEngine(options = {}) {
       const state = createTurn(args => ready.then(() => control('cancel', args)), (input, inputID) => ready.then(() => control('steer', {
         text: Array.isArray(input) ? input.map(block => block.text).join('\n') : input, inputID,
       })), inputID => ready.then(() => control('withdraw', { inputID })));
+      turnStates.set(turnToken, state);
+      state.signal = promptOptions.signal;
       turn = state;
       const publicID = op === 'prompt' ? promptOptions.turnId === undefined ? randomUUID() : promptOptions.turnId : recoveryTurnID;
       state.public.id = publicID;
-      turnSignal = promptOptions.signal;
       ready = (op === 'prompt' ? encodePrompt(args.text).then(text => ({ text })) : Promise.resolve(args))
         .then(args => control(op, {
           ...args, ...(op === 'prompt' || publicID != null ? { turnID: publicID } : {}),
           ...(promptOptions.yieldAt === undefined ? {} : { yieldAt: promptOptions.yieldAt }),
         })).then(reply => { if (reply?.turnID) state.public.id = reply.turnID; });
       const abort = () => { void ready.then(() => control('cancel')).catch(error => state.fail(error)); };
-      turnSignal?.addEventListener('abort', abort, { once: true });
-      removeAbortListener = () => promptOptions.signal?.removeEventListener('abort', abort);
-      if (turnSignal?.aborted) abort();
-      ready.catch(error => { state.fail(error); if (turn === state) turn = null; });
+      promptOptions.signal?.addEventListener('abort', abort, { once: true });
+      state.cleanup = () => promptOptions.signal?.removeEventListener('abort', abort);
+      if (promptOptions.signal?.aborted) abort();
+      ready.catch(error => { state.cleanup?.(); state.fail(error); turnStates.delete(turnToken); if (turn === state) turn = null; });
       return state.public;
     }
     return {
@@ -194,6 +231,27 @@ export async function createFxEngine(options = {}) {
         if (!resumable) return null;
         const rerun = recoveryCalls.filter(call => promptOptions.onAmbiguous?.(call) === 'rerun').map(call => call.executionId);
         return begin('resume', { rerun }, promptOptions);
+      },
+      followUp(input) {
+        const token = randomUUID();
+        const control = (op, args = {}) => request(op, { ...args, turnToken: token });
+        const state = createTurn(args => control('cancel', args), (text, inputID) => control('steer', { text, inputID }),
+          inputID => control('withdraw', { inputID }));
+        turnStates.set(token, state);
+        let resolveTurn, rejectTurn, resolveAccepted, rejectAccepted;
+        const started = new Promise((resolve, reject) => { resolveTurn = resolve; rejectTurn = reject; });
+        const accepted = new Promise((resolve, reject) => { resolveAccepted = resolve; rejectAccepted = reject; });
+        const queued = { id: null, started: false, accepted: false, resolveTurn, rejectTurn, resolveAccepted, rejectAccepted };
+        followUps.set(token, queued);
+        Object.defineProperty(started, 'id', { get: () => queued.id });
+        started.accepted = accepted;
+        void started.catch(() => {});
+        void accepted.catch(() => {});
+        request('followUp', { text: Array.isArray(input) ? input.map(block => block.text).join('\n') : input, turnToken: token })
+          .then(reply => { queued.id = reply.inputID; }, error => {
+            state.fail(error); rejectTurn(error); rejectAccepted(error); turnStates.delete(token); followUps.delete(token);
+          });
+        return started;
       },
       async checkpoint() { return new Uint8Array(Buffer.from(await request('checkpoint'), 'base64')); },
       async saveCheckpoint() { await request('saveCheckpoint'); },

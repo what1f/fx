@@ -41,13 +41,20 @@ struct MockHTTP: FxHTTPClient {
         guard turn.id == "consumer-turn", text == "consumer ok", try await turn.result.stopReason == .endTurn else {
             throw FxError.protocolViolation("Unexpected consumer response")
         }
+        let queued = try await engine.followUp("continue")
+        try await queued.accepted
+        let followUp = try await queued.turn
+        for try await _ in followUp {}
+        guard followUp.id == queued.id, try await followUp.result.stopReason == .endTurn else {
+            throw FxError.protocolViolation("Unexpected follow-up response")
+        }
         try await engine.close()
         let saved = try await store.load()
         guard saved.checkpoint != nil, saved.journal.isEmpty else { throw FxPersistenceError.invalidJournal }
         let restored = try await FxEngine.open(configuration: FxConfiguration(
             apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()
         ), persistence: store)
-        let duplicate = try await restored.prompt("ignored retry", id: turn.id)
+        let duplicate = try await restored.prompt("ignored retry", id: followUp.id)
         for try await _ in duplicate { throw FxPersistenceError.invalidJournal }
         guard try await duplicate.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
         try await restored.close()

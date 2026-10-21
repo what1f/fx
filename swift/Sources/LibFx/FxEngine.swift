@@ -10,9 +10,14 @@ public actor FxEngine {
     private let observation: FxObservationOptions?
     private let checkpointAfterBytes: Int?
     private var recovery: FxRecoveryState?
+    private var followUps: [QueuedFollowUp] = []
+    private var followUpAcceptances: [String: FxFollowUp] = [:]
+    private var activeFollowUpID: String?
+    private var followUpAcceptanceTask: Task<Void, Never>?
     private var lastCompletedTurnID: String?
     private var journalFailure: (any Error)?
     private var turnID: UUID?
+    private var publicTurnID: String?
     private var output: AsyncThrowingStream<FxEvent, any Error>.Continuation?
     private var toolTasks: [String: Task<Void, Never>] = [:]
     private var toolNames: [String: String] = [:]
@@ -139,7 +144,89 @@ public actor FxEngine {
         return turn
     }
 
+    /// Queues text as a separate turn. Await accepted before relying on recovery after a process exit.
+    public func followUp(_ text: String) throws -> FxFollowUp {
+        guard !closed else { throw FxError.closed }
+        guard !handedOff else { throw FxError.handedOff }
+        if let journalFailure { throw journalFailure }
+        guard !text.isEmpty, text.utf8.count <= 64 * 1024 else {
+            throw FxError.invalidInput("Follow-up text must contain 1–65536 UTF-8 bytes")
+        }
+        let receipt = FxFollowUp(id: "in_" + UUID().uuidString.lowercased())
+        let acceptNow = journal != nil && turnID != nil
+        followUps.append(QueuedFollowUp(receipt: receipt, text: text, acceptance: acceptNow ? .pending : .onStart, held: false))
+        if journal != nil { followUpAcceptances[receipt.id] = receipt }
+        if acceptNow {
+            let dispatch = promptDispatch
+            let previous = followUpAcceptanceTask
+            followUpAcceptanceTask = Task {
+                do {
+                    await previous?.value
+                    _ = await dispatch?.wait()
+                    guard !closed else { throw FxError.closed }
+                    guard !handedOff else { throw FxError.handedOff }
+                    _ = try await rpc.request("libfx/follow_up", .object([
+                        "sessionId": .string(sessionID), "id": .string(receipt.id), "text": .string(text),
+                    ]))
+                    try await journal?.check()
+                    guard !closed else { throw FxError.closed }
+                    guard !handedOff else { throw FxError.handedOff }
+                    if let index = followUps.firstIndex(where: { $0.receipt.id == receipt.id }) { followUps[index].acceptance = .stored }
+                    await receipt.acceptance.resolve(.success(()))
+                    startNextFollowUp()
+                } catch {
+                    followUps.removeAll { $0.receipt.id == receipt.id }
+                    followUpAcceptances.removeValue(forKey: receipt.id)
+                    await receipt.acceptance.resolve(.failure(error))
+                    await receipt.started.resolve(.failure(error))
+                    startNextFollowUp()
+                }
+            }
+        } else { startNextFollowUp() }
+        return receipt
+    }
+
+    @discardableResult
+    private func startNextFollowUp(held: Bool = false) -> FxTurn? {
+        guard !closed, !handedOff, journalFailure == nil, turnID == nil, !cancelling, !checkpointing else { return nil }
+        while let index = followUps.firstIndex(where: { $0.held == held }) {
+            guard followUps[index].ready else { return nil }
+            let entry = followUps.remove(at: index)
+            do {
+                let turn = try startTurn([.text(entry.text)], publicID: entry.receipt.id, followUp: entry)
+                recovery = nil
+                Task {
+                    await entry.receipt.started.resolve(.success(turn))
+                    if journal == nil || entry.acceptedInCore { await entry.receipt.acceptance.resolve(.success(())) }
+                }
+                return turn
+            } catch {
+                followUpAcceptances.removeValue(forKey: entry.receipt.id)
+                Task {
+                    await entry.receipt.acceptance.resolve(.failure(error))
+                    await entry.receipt.started.resolve(.failure(error))
+                }
+            }
+        }
+        return nil
+    }
+
+    private func failFollowUps(_ error: any Error) {
+        let queued = followUps
+        let accepting = followUpAcceptances.values.map { $0 }
+        followUps.removeAll()
+        followUpAcceptances.removeAll()
+        Task {
+            for entry in queued {
+                await entry.receipt.started.resolve(.failure(error))
+                await entry.receipt.acceptance.resolve(.failure(error))
+            }
+            for receipt in accepting { await receipt.acceptance.resolve(.failure(error)) }
+        }
+    }
+
     public var recoveryState: FxRecoveryState? { recovery }
+    @_spi(Conformance) public var hasResumableWork: Bool { recovery != nil || followUps.contains { $0.held } }
 
     /// Continues an interrupted turn. Unlisted ambiguous calls are not repeated.
     public func resume(rerunning executionIDs: Set<String> = [], yieldAt: Date? = nil) throws -> FxTurn? {
@@ -147,7 +234,7 @@ public actor FxEngine {
         guard !handedOff else { throw FxError.handedOff }
         if let journalFailure { throw journalFailure }
         guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
-        guard let recovery else { return nil }
+        guard let recovery else { return startNextFollowUp(held: true) }
         guard executionIDs.isSubset(of: Set(recovery.runningCalls.map(\.executionID))) else {
             throw FxError.invalidInput("Unknown recovery execution identifier")
         }
@@ -156,6 +243,12 @@ public actor FxEngine {
 
     private func setRecovery(_ opened: JSONValue) {
         lastCompletedTurnID = opened["lastTurnId"]?.string
+        if case .array(let entries) = opened["followUps"] {
+            followUps = entries.compactMap { entry in
+                guard let id = entry["id"]?.string, let text = entry["text"]?.string else { return nil }
+                return QueuedFollowUp(receipt: FxFollowUp(id: id), text: text, acceptance: .stored, held: true)
+            }
+        }
         guard opened["resumable"] == .bool(true) else { recovery = nil; return }
         let calls: [FxRecoveryCall]
         if case .array(let entries) = opened["runningCalls"] {
@@ -169,7 +262,7 @@ public actor FxEngine {
         recovery = FxRecoveryState(turnID: opened["openTurnId"]?.string, runningCalls: calls)
     }
 
-    private func startTurn(_ content: [FxPromptContent], publicID: String, yieldAt: Date? = nil, resuming: Bool = false, rerunning: Set<String> = []) throws -> FxTurn {
+    private func startTurn(_ content: [FxPromptContent], publicID: String, yieldAt: Date? = nil, resuming: Bool = false, rerunning: Set<String> = [], followUp: QueuedFollowUp? = nil) throws -> FxTurn {
         guard !closed else { throw FxError.closed }
         guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
         var metadata: [String: JSONValue] = [:]
@@ -182,6 +275,10 @@ public actor FxEngine {
             metadata["yieldAt"] = .number(milliseconds)
         }
         if !resuming { metadata["turnId"] = .string(publicID) }
+        if let followUp {
+            metadata["inputId"] = .string(followUp.receipt.id)
+            metadata["inputAccepted"] = .bool(followUp.acceptedInCore)
+        }
         guard resuming || content.contains(where: {
             switch $0 {
             case .text(let text): return !text.isEmpty
@@ -221,6 +318,8 @@ public actor FxEngine {
         }
         let id = UUID()
         turnID = id
+        publicTurnID = publicID
+        activeFollowUpID = followUp?.receipt.id
         turnCancelled = false
         let dispatch = PromptDispatch()
         promptDispatch = dispatch
@@ -323,6 +422,11 @@ public actor FxEngine {
                 let events = message.params["events"] ?? .null
                 try await journal.append(events, barrier: message.params["barrier"] == .bool(true))
                 if case .array(let batch) = events, !batch.isEmpty {
+                    for event in batch where event["type"] == .string("input_accepted") {
+                        if let id = event["data"]?["id"]?.string, let receipt = followUpAcceptances.removeValue(forKey: id) {
+                            await receipt.acceptance.resolve(.success(()))
+                        }
+                    }
                     let cursor = await journal.head
                     observation?.deliver(FxObservation(journal: .journalCommitted, sessionID: sessionID, data: .object([
                         "cursor": cursor.map(JSONValue.string) ?? .null,
@@ -332,6 +436,7 @@ public actor FxEngine {
                 }
             } catch {
                 journalFailure = error
+                failFollowUps(error)
                 observation?.deliver(FxObservation(journal: .journalError, sessionID: sessionID, data: .object([
                     "error": .string(String(describing: type(of: error))),
                     "fenced": .bool((error as? FxPersistenceError) == .fenced),
@@ -354,12 +459,12 @@ public actor FxEngine {
             let params = message.params
             let callID = params["toolCallId"]?.string ?? ""
             let expectedTurn = turnID
-            guard isActive(expectedTurn), params["sessionId"]?.string == sessionID else {
+            guard isActive(expectedTurn), let publicTurnID, params["sessionId"]?.string == sessionID else {
                 try? await rpc.respond(id: requestID, error: .protocolViolation("Tool call does not belong to the active conversation"))
                 return
             }
             let name = params["name"]?.string ?? ""
-            let context = FxToolContext(executionID: callID, sessionID: params["sessionId"]?.string ?? sessionID)
+            let context = FxToolContext(executionID: callID, sessionID: sessionID, turnID: publicTurnID)
             let tool = tools[name]
             toolTasks[callID] = Task { [weak self, rpc] in
                 guard let self, await self.isActive(expectedTurn) else { return }
@@ -419,7 +524,7 @@ public actor FxEngine {
         guard isActive(id), !cancelling else { return }
         turnCancelled = true
         cancelling = true
-        defer { cancelling = false }
+        defer { cancelling = false; startNextFollowUp() }
         for task in toolTasks.values { task.cancel() }
         toolTasks.removeAll()
         guard await promptDispatch?.wait() == true, turnID == id, !closed else { return }
@@ -432,6 +537,7 @@ public actor FxEngine {
         guard journal != nil else { throw FxError.invalidInput("Handoff requires persistence") }
         guard isActive(id) else { return }
         handedOff = true
+        failFollowUps(FxError.handedOff)
         await cancel(turn: id)
         try await journal?.check()
     }
@@ -468,13 +574,19 @@ public actor FxEngine {
         if let error { output?.finish(throwing: error) } else { output?.finish() }
         output = nil
         turnID = nil
+        publicTurnID = nil
+        if let activeFollowUpID, let receipt = followUpAcceptances.removeValue(forKey: activeFollowUpID) {
+            Task { await receipt.acceptance.resolve(.failure(error ?? FxError.cancelled)) }
+        }
+        activeFollowUpID = nil
+        startNextFollowUp()
     }
 
     public func checkpoint() async throws -> Data {
         guard !closed else { throw FxError.closed }
         guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
         checkpointing = true
-        defer { checkpointing = false }
+        defer { checkpointing = false; startNextFollowUp() }
         let reply = try await rpc.request("libfx/checkpoint", .object(["sessionId": .string(sessionID)]))
         guard let id = reply["checkpointAttachment"]?.integer, let attachmentID = UInt32(exactly: id) else {
             throw FxError.protocolViolation("Invalid checkpoint attachment")
@@ -507,10 +619,11 @@ public actor FxEngine {
         guard turnID == id, !cancelling, !checkpointing else { throw FxError.busy }
         guard let journal else { throw FxError.invalidInput("Persistence store is required") }
         checkpointing = true
-        defer { checkpointing = false; checkpointSaveTask = nil }
+        defer { checkpointing = false; checkpointSaveTask = nil; startNextFollowUp() }
         let task = Task { [rpc, transport, sessionID, observation] in
             try await journal.check()
             let reply = try await rpc.request("libfx/snapshot", .object(["sessionId": .string(sessionID)]))
+            if reply["snapshotAttachment"] == .null { return }
             guard let rawID = reply["snapshotAttachment"]?.integer, let attachmentID = UInt32(exactly: rawID),
                   let rawSequence = reply["atSeq"]?.integer, let sequence = UInt64(exactly: rawSequence) else {
                 throw FxError.protocolViolation("Invalid journal snapshot")
@@ -529,6 +642,7 @@ public actor FxEngine {
     public func close() async throws {
         if let closingTask { try await closingTask.value; return }
         closed = true
+        failFollowUps(FxError.closed)
         if let turnID { finish(turn: turnID, error: FxError.closed) }
         let checkpointSave = checkpointSaveTask
         let task = Task {
