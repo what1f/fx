@@ -56,6 +56,19 @@ struct MockHTTP: FxHTTPClient {
         })
     }
 }
+struct ProviderSearchHTTP: FxHTTPClient {
+    func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        if request.httpMethod == "GET" {
+            let text = #"{"data":[{"id":"swift/consumer","type":"language","tags":["tool-use"]}]}"#
+            return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { $0.yield(Data(text.utf8)); $0.finish() })
+        }
+        let body = try JSONDecoder().decode(JSONValue.self, from: request.httpBody ?? Data())
+        guard case .array(let tools) = body["tools"], tools.contains(where: { $0["type"] == .string("provider") }) else {
+            throw FxError.protocolViolation("Missing search advertisement")
+        }
+        return try await MockHTTP().send(request)
+    }
+}
 actor PreparingHTTP: FxHTTPClient {
     private var blocked = true
     func unblock() { blocked = false }
@@ -122,6 +135,11 @@ struct SubscriptionHTTP: FxHTTPClient {
         guard try await duplicate.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
         try await restored.close()
         try await store.close()
+        let searching = try await FxEngine.open(configuration: FxConfiguration(apiKey: "consumer-test-key",
+            model: "swift/consumer", providerTools: [.webSearch], httpClient: ProviderSearchHTTP()))
+        let search = try await searching.prompt("search if needed")
+        guard try await search.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
+        try await searching.close()
         let sessions = try FxSessionStore(url: directory.appendingPathComponent("sessions.sqlite"))
         let agent = try FxAgent(configuration: FxConfiguration(
             apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()), store: sessions, checkpointAfterBytes: 0,

@@ -68,9 +68,13 @@ public actor FxEngine {
         if let persistence { loaded = try LoadedJournal(try await persistence.load()) }
         else { loaded = nil }
         try Task.checkCancellation()
+        let providerNames = configuration.providerTools.map(\.rawValue)
+        guard Set(providerNames).count == providerNames.count else {
+            throw FxError.invalidInput("Tool names must be unique")
+        }
         var tools: [String: FxTool] = [:]
         for tool in configuration.tools {
-            guard !tool.name.isEmpty, tools[tool.name] == nil, case .object = tool.inputSchema else {
+            guard !tool.name.isEmpty, tools[tool.name] == nil, !providerNames.contains(tool.name), case .object = tool.inputSchema else {
                 throw FxError.invalidInput("Tool names must be unique and schemas must be objects")
             }
             tools[tool.name] = tool
@@ -87,7 +91,7 @@ public actor FxEngine {
                 "protocolVersion": .number(1),
                 "clientCapabilities": .object([
                     "libfx": .object([
-                        "tools": .array(configuration.tools.map(\.descriptor)),
+                        "tools": .array(configuration.toolDescriptors),
                         "instructions": .string(configuration.instructions),
                     ]),
                 ]),

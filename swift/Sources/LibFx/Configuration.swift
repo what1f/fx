@@ -6,6 +6,7 @@ public struct FxConfiguration: Sendable {
     public var model: FxModel
     public var instructions: String
     public var tools: [FxTool]
+    public var providerTools: [FxProviderTool]
     public var workspace: URL
     public var gatewayURL: URL
     public var httpClient: any FxHTTPClient
@@ -15,19 +16,21 @@ public struct FxConfiguration: Sendable {
 
     public init(
         apiKey: String, model: FxModel, instructions: String = "", tools: [FxTool] = [],
+        providerTools: [FxProviderTool] = [],
         workspace: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         gatewayURL: URL = URL(string: "https://ai-gateway.vercel.sh/v4/ai/language-model")!,
         httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil,
         checkpointAfterBytes: Int? = 1024 * 1024
     ) {
         self.init(provider: .gateway(apiKey: apiKey), model: model, instructions: instructions,
-                  tools: tools, workspace: workspace, httpClient: httpClient,
+                  tools: tools, providerTools: providerTools, workspace: workspace, httpClient: httpClient,
                   observation: observation, checkpointAfterBytes: checkpointAfterBytes)
         self.gatewayURL = gatewayURL
     }
 
     public init(
         provider: FxProvider, model: FxModel, instructions: String = "", tools: [FxTool] = [],
+        providerTools: [FxProviderTool] = [],
         workspace: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil,
         checkpointAfterBytes: Int? = 1024 * 1024
@@ -36,11 +39,16 @@ public struct FxConfiguration: Sendable {
         self.model = model
         self.instructions = instructions
         self.tools = tools
+        self.providerTools = providerTools
         self.workspace = workspace
         self.gatewayURL = URL(string: "https://ai-gateway.vercel.sh/v4/ai/language-model")!
         self.httpClient = httpClient
         self.observation = observation
         self.checkpointAfterBytes = checkpointAfterBytes
+    }
+
+    var toolDescriptors: [JSONValue] {
+        tools.map(\.descriptor) + providerTools.map { .object(["name": .string($0.rawValue), "providerExecuted": .bool(true)]) }
     }
 
     var nativeOptions: JSONValue {
@@ -101,4 +109,9 @@ public struct FxTool: Sendable {
         if let writes { fields["writes"] = .bool(writes) }
         return .object(fields)
     }
+}
+
+/// A tool executed by the model service, without a host callback.
+public enum FxProviderTool: String, Sendable, Codable {
+    case webSearch = "web_search"
 }

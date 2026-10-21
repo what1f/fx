@@ -123,6 +123,8 @@ let turn = try await engine.prompt([.text("Describe this image"), .image(image)]
 
 Pass tools through `FxConfiguration.tools`. A tool can return text, images, and an explicit error flag through `FxToolResult`. Its context carries a stable execution ID for effect deduplication, the session ID, and the public turn ID. Tool closures must cooperate with task cancellation.
 
+Pass `providerTools: [.webSearch]` to `FxConfiguration` to advertise search executed by the model service. It has no host closure. Search calls and results appear as ordinary tool events and remain in checkpoint and journal history. Availability depends on the model service. Provider and host tool names share one namespace; duplicate names are rejected.
+
 Images use `Data` and a supported format. Each prompt accepts up to eight images, at most 3.75 MiB each and 6 MiB together, subject to the encoded request limit. The core checks image content and model capabilities. Image resizing and external image storage are not implemented yet.
 
 ## Observe runtime events

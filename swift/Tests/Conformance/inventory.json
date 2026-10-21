@@ -47,7 +47,7 @@
       "upstream": "sdk/tests/test-agent-provider-tools.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged upstream native file through Swift; provider advertisement, streamed search events and results, and checkpoint restoration without a host executor"
     },
     {
       "upstream": "sdk/tests/test-agent-request-context.mjs",
@@ -89,7 +89,7 @@
       "upstream": "sdk/tests/test-agent-ultrafast-options.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "partial: supported-model configuration and provider routing assertions passed; file stops on missing runtime.exit diagnostics; omitted-model and remaining scenarios are not qualified"
     },
     {
       "upstream": "sdk/tests/test-backend-info.mjs",

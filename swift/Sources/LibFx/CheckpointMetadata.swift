@@ -7,7 +7,7 @@ struct CheckpointMetadata: Sendable {
     init(configuration: FxConfiguration) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let descriptors = configuration.tools.sorted { $0.name < $1.name }.map(\.descriptor)
+        let descriptors = configuration.toolDescriptors.sorted { ($0["name"]?.string ?? "") < ($1["name"]?.string ?? "") }
         let bytes = try encoder.encode(JSONValue.array(descriptors))
         let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         value = .object([

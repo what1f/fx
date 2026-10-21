@@ -112,9 +112,15 @@ actor Driver: FxHTTPClient, FxPersistence {
             providerLabel = options["provider"]?.string ?? options["provider"]?["name"]?.string ?? "gateway"
             try validateRepresentation(options)
             var tools: [FxTool] = []
+            var providerTools: [FxProviderTool] = []
             if case .array(let descriptors) = options["tools"] {
                 for descriptor in descriptors {
                     let name = descriptor["name"]?.string ?? ""
+                    if descriptor["providerExecuted"] == .bool(true) {
+                        guard let tool = FxProviderTool(rawValue: name) else { throw FxError.invalidInput("Unsupported provider tool") }
+                        providerTools.append(tool)
+                        continue
+                    }
                     tools.append(FxTool(
                         name: name, description: descriptor["description"]?.string ?? "",
                         inputSchema: descriptor["inputSchema"] ?? .object([:]),
@@ -135,7 +141,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             )
             var config = FxConfiguration(
                 apiKey: options["apiKey"]?.string ?? "", model: model,
-                instructions: options["instructions"]?.string ?? "", tools: tools
+                instructions: options["instructions"]?.string ?? "", tools: tools, providerTools: providerTools
             )
             if let name = options["provider"]?["name"]?.string,
                let base = options["provider"]?["baseUrl"]?.string, let url = URL(string: base) {
