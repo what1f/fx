@@ -16,6 +16,7 @@ public enum FxSessionError: Error, Sendable, Equatable {
     case notFound
     case invalidCursor
     case messageIDInUse
+    case preparationTimedOut
 }
 
 public struct FxSessionOptions: Sendable, Codable, Equatable {

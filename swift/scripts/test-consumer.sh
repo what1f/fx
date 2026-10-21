@@ -56,6 +56,18 @@ struct MockHTTP: FxHTTPClient {
         })
     }
 }
+actor PreparingHTTP: FxHTTPClient {
+    private var blocked = true
+    func unblock() { blocked = false }
+    func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        if request.httpMethod == "GET" {
+            if blocked { try await Task.sleep(for: .seconds(60)) }
+            let text = #"{"data":[{"id":"swift/preparing","type":"language","tags":["reasoning"],"reasoning_options":[{"type":"effort","values":["high"]}]}]}"#
+            return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { $0.yield(Data(text.utf8)); $0.finish() })
+        }
+        return try await MockHTTP().send(request)
+    }
+}
 struct SubscriptionHTTP: FxHTTPClient {
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         let text: String
@@ -144,6 +156,20 @@ struct SubscriptionHTTP: FxHTTPClient {
         let seededTurn = try await seededSession.prompt("continue", id: "seeded-message")
         guard try await seededTurn.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
         try await seeded.close()
+        let preparingHTTP = PreparingHTTP()
+        let preparing = try FxAgent(configuration: FxConfiguration(apiKey: "consumer-test-key",
+            model: FxModel(id: "swift/preparing", reasoningEffort: "high"), httpClient: preparingHTTP),
+            store: sessions, deliveryPolicy: FxDeliveryPolicy(maximumDuration: .milliseconds(180), reserve: .milliseconds(80)))
+        let preparingSession = try await preparing.session(id: "preparing-session")
+        let waiting = try await preparingSession.prompt("retain this input", id: "preparing-message")
+        do {
+            _ = try await waiting.result
+            throw FxError.protocolViolation("Expected preparation timeout")
+        } catch FxSessionError.preparationTimedOut {}
+        await preparingHTTP.unblock()
+        guard let retried = try await preparingSession.resume(), retried.id == waiting.id,
+              try await retried.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
+        try await preparing.close()
         try await sessions.close()
         let subscription = FxSubscription(provider: .grok, credentials: { _ in
             try FxSubscriptionCredentials(accessToken: "consumer-subscription-key", accountID: "consumer-account")

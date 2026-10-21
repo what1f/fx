@@ -24,6 +24,7 @@ public struct FxPersistenceSnapshot: Sendable {
 /// Implementations must serialize appends and reject a stale expected cursor.
 /// A barrier acknowledges durability of this record and every preceding record.
 public protocol FxPersistence: Sendable {
+    /// Asynchronous loads must cooperate with cancellation. Opening waits for a cancelled load to exit.
     func load() async throws -> FxPersistenceSnapshot
     func append(expected: String?, idempotencyKey: String, data: Data, barrier: Bool) async throws -> String
 }

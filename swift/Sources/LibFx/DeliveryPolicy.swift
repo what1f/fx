@@ -23,6 +23,47 @@ public struct FxDeliveryPolicy: Sendable {
     }
 }
 
+private enum EnginePreparation: Sendable {
+    case opened(FxEngine)
+    case failed(any Error)
+    case timedOut
+}
+
+func openSessionEngine(configuration: FxConfiguration, sessionID: String,
+                       persistence: any FxPersistence, deadline: ContinuousClock.Instant?) async throws -> FxEngine {
+    guard let deadline else {
+        return try await FxEngine.open(configuration: configuration, sessionID: sessionID, persistence: persistence)
+    }
+    try Task.checkCancellation()
+    guard ContinuousClock.now < deadline else { throw FxSessionError.preparationTimedOut }
+    return try await withThrowingTaskGroup(of: EnginePreparation.self) { group in
+        group.addTask {
+            do { return .opened(try await FxEngine.open(configuration: configuration, sessionID: sessionID, persistence: persistence)) }
+            catch { return .failed(error) }
+        }
+        group.addTask {
+            do { try await Task.sleep(until: deadline, clock: .continuous); return .timedOut }
+            catch { return .failed(error) }
+        }
+        let first = try await group.next()!
+        group.cancelAll()
+        // An open can finish at the same time as the timer. Join both tasks and
+        // close any engine whose result the caller will not receive.
+        for try await remaining in group {
+            if case .opened(let engine) = remaining { try? await engine.close() }
+        }
+        switch first {
+        case .opened(let engine):
+            if Task.isCancelled { try? await engine.close(); throw CancellationError() }
+            return engine
+        case .failed(let error): throw error
+        case .timedOut:
+            try Task.checkCancellation()
+            throw FxSessionError.preparationTimedOut
+        }
+    }
+}
+
 extension FxSessionStore {
     func deliveryCutoffs(_ lease: SessionLease, id: String) throws -> Int {
         try checkLease(lease)

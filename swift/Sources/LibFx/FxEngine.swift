@@ -46,6 +46,7 @@ public actor FxEngine {
     }
 
     public static func open(configuration: FxConfiguration, sessionID: String? = nil, checkpoint: Data? = nil, persistence: (any FxPersistence)? = nil) async throws -> FxEngine {
+        try Task.checkCancellation()
         if let sessionID, !validSessionIdentifier(sessionID) { throw FxError.invalidInput("Invalid session ID") }
         guard checkpoint == nil || persistence == nil else {
             throw FxError.invalidInput("Use a checkpoint or a persistence store, not both")
@@ -63,6 +64,7 @@ public actor FxEngine {
         let loaded: LoadedJournal?
         if let persistence { loaded = try LoadedJournal(try await persistence.load()) }
         else { loaded = nil }
+        try Task.checkCancellation()
         var tools: [String: FxTool] = [:]
         for tool in configuration.tools {
             guard !tool.name.isEmpty, tools[tool.name] == nil, case .object = tool.inputSchema else {
@@ -72,6 +74,7 @@ public actor FxEngine {
         }
         let httpClient = ProviderHTTPClient(client: configuration.httpClient, provider: configuration.provider)
         let checkpointMetadata = try CheckpointMetadata(configuration: configuration)
+        try Task.checkCancellation()
         let transport = try NativeTransport(options: configuration.nativeOptions, httpClient: httpClient)
         let rpc = RPCClient(transport: transport, observer: configuration.wireObserver)
         do {
@@ -133,6 +136,7 @@ public actor FxEngine {
                     "turns": opened["turns"] ?? .number(0),
                 ])))
             }
+            try Task.checkCancellation()
             return engine
         } catch {
             await rpc.close()

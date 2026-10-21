@@ -156,9 +156,11 @@ public actor FxAgent {
         }
         let engine: FxEngine
         do {
-            engine = try await FxEngine.open(configuration: config, sessionID: lease.sessionID,
-                                             persistence: SessionPersistence(store: store, lease: lease))
-        } catch let error as FxPersistenceError { throw error }
+            engine = try await openSessionEngine(configuration: config, sessionID: lease.sessionID,
+                                                 persistence: SessionPersistence(store: store, lease: lease), deadline: deadlines?.stop)
+        } catch let error as FxSessionError { throw error }
+        catch let error as FxPersistenceError { throw error }
+        catch let error as FxSQLiteError { throw error }
         catch FxError.invalidInput(let message) {
             try await finish(input, lease: lease, reason: .error, error: message)
             return false
