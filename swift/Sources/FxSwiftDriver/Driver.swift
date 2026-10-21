@@ -28,6 +28,7 @@ actor Driver: FxHTTPClient, FxPersistence {
     private var engine: FxEngine?
     private var store: (any FxPersistence)?
     private var turns: [String: FxTurn] = [:]
+    private var credentialWaiters: [String: CheckedContinuation<String, any Error>] = [:]
     private var nextFetchID = 1
     private var fetchWaiters: [Int: CheckedContinuation<FxHTTPResponse, any Error>] = [:]
     private var fetchBodies: [Int: AsyncThrowingStream<Data, any Error>.Continuation] = [:]
@@ -118,6 +119,26 @@ actor Driver: FxHTTPClient, FxPersistence {
                 apiKey: options["apiKey"]?.string ?? "", model: model,
                 instructions: options["instructions"]?.string ?? "", tools: tools
             )
+            if let name = options["provider"]?["name"]?.string,
+               let base = options["provider"]?["baseUrl"]?.string, let url = URL(string: base) {
+                var models: [String: FxCustomProvider.ModelCapabilities] = [:]
+                if case .object(let entries) = options["provider"]?["models"] {
+                    for (id, value) in entries {
+                        models[id] = .init(
+                            contextWindow: value["contextWindow"]?.integer.flatMap(UInt32.init(exactly:)),
+                            maxOutputTokens: value["maxOutputTokens"]?.integer.flatMap(UInt32.init(exactly:)),
+                            supportsToolUse: bool(value["supportsToolUse"]), supportsVision: bool(value["supportsVision"])
+                        )
+                    }
+                }
+                let provider = try FxCustomProvider(name: name, baseURL: url, models: models)
+                if options["hasCredentials"] == .bool(true) {
+                    config.provider = .custom(provider, credentials: { [weak self] request in
+                        guard let self else { throw FxError.closed }
+                        return try await self.credentials(request)
+                    })
+                } else { config.provider = .custom(provider) }
+            }
             if let url = options["gatewayChatUrl"]?.string, let endpoint = URL(string: url) { config.gatewayURL = endpoint }
             config.httpClient = self
             if let bytes = options["checkpointAfterBytes"] {
@@ -269,6 +290,13 @@ actor Driver: FxHTTPClient, FxPersistence {
                 fetchStreams.removeValue(forKey: id)
             }
             return .null
+        case "credentialResult":
+            guard let token = value["token"]?.string, let waiter = credentialWaiters.removeValue(forKey: token) else {
+                throw FxError.invalidInput("Unknown credential request")
+            }
+            if let key = value["key"]?.string { waiter.resume(returning: key) }
+            else { waiter.resume(throwing: FxError.invalidInput("Credentials are unavailable")) }
+            return .null
         case "toolResult":
             guard let requestID = value["toolID"]?.integer,
                   let waiter = toolWaiters.removeValue(forKey: requestID) else { throw FxError.invalidInput("Unknown tool result") }
@@ -387,6 +415,23 @@ actor Driver: FxHTTPClient, FxPersistence {
         fetchBodies.removeValue(forKey: id)?.finish(throwing: FxError.cancelled)
         fetchStreams.removeValue(forKey: id)
         emit(.object(["fetchCancelled": .number(Double(id))]))
+    }
+
+    private func credentials(_ request: FxCredentialRequest) async throws -> String {
+        let token = UUID().uuidString
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { waiter in
+                credentialWaiters[token] = waiter
+                emit(.object(["credentialRequest": .object([
+                    "token": .string(token), "provider": .string(request.provider), "sessionId": .string(request.sessionID),
+                ])]))
+            }
+        } onCancel: { Task { await self.cancelCredentials(token) } }
+    }
+
+    private func cancelCredentials(_ token: String) {
+        credentialWaiters.removeValue(forKey: token)?.resume(throwing: FxError.cancelled)
     }
 
     private func callTool(_ name: String, input: JSONValue, context: FxToolContext) async throws -> FxToolResult {

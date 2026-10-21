@@ -22,6 +22,8 @@ Use typed configuration, events, results, and errors with async/await and AsyncS
 
 ### Required goal acceptance conditions
 
+These conditions are binding requirements for the active libfx-swift goal. Evaluate completion against both these conditions and the functional acceptance matrix below.
+
 - Design the public API for Swift callers. Use Swift naming, value types, enums, structured concurrency, and explicit ownership where each fits. Do not translate TypeScript interfaces line by line.
 - Support current libfx functionality through idiomatic Swift operations. API names and shapes may differ; required behavior must have acceptance evidence in the matrix below.
 - Exclude historical TypeScript compatibility branches, deprecated API aliases, and JavaScript platform workarounds. Preserve current protocol contracts and persistence compatibility where required.
@@ -46,7 +48,7 @@ Persistence preserves ordered append, expected cursor checks, durability barrier
 | Tools | test-host-tools, test-tool-contract, test-agent-tool-start | Advertisements, calls, results, errors, parallel admission | Partial: upstream host-tools and Swift result tests |
 | Cancellation and shutdown | test-core-cancel, test-host-tool-cancel, test-native-host-tool-late-settle | No late callbacks, deadlocks, or stranded requests | Partial: upstream host-tool cancellation and native lifecycle tests |
 | Steering | test-agent-steering | Interrupt, wait, join, withdraw, handoff | Partial: upstream steering, withdrawal, old-turn isolation, persisted handoff and queued follow-ups across Swift/JS engines; durable image handoff pending |
-| Model options and providers | test-agent-effort, test-agent-fast, test-agent-ultrafast-options, test-agent-custom, test-agent-codex, test-agent-grok | Matching request behavior and validation | Partial: effort and fast; provider APIs pending |
+| Model options and providers | test-agent-effort, test-agent-fast, test-agent-ultrafast-options, test-agent-custom, test-agent-codex, test-agent-grok | Matching request behavior and validation | Partial: effort and fast, custom provider requests and tools, scoped host credentials, error redaction and Foundation redirect isolation; subscription providers pending |
 | Images and limits | test-agent-images, test-instruction-limits, test-native-core-image-framing | Input, tool images, UTF-8, frame bounds | Partial: binary input; resizing and image storage pending |
 | Journal and checkpoints | test-journal, test-checkpoint | Swift and JS restore in both directions | Partial: bidirectional checkpoint and journal proof, explicit and automatic snapshot save and restore; full suite pending |
 | Durable sessions | test-durable, test-durable-core, test-durable-provider-crash, test-world-persistence | Queue, deduplication, crash recovery, fencing | Partial: SQLite persistence, stable turn IDs, cooperative yield and repeated resume across Swift/JS snapshots, latest completed ID deduplication, cross-process writer fencing and two SIGKILL recovery boundaries; agent and session APIs pending |

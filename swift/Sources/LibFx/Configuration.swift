@@ -2,7 +2,7 @@ import Foundation
 
 public struct FxConfiguration: Sendable {
     @_spi(Conformance) public var wireObserver: (@Sendable (FxWireDirection, JSONValue) async -> Void)?
-    public var apiKey: String
+    public var provider: FxProvider
     public var model: FxModel
     public var instructions: String
     public var tools: [FxTool]
@@ -20,27 +20,47 @@ public struct FxConfiguration: Sendable {
         httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil,
         checkpointAfterBytes: Int? = 1024 * 1024
     ) {
-        self.apiKey = apiKey
+        self.init(provider: .gateway(apiKey: apiKey), model: model, instructions: instructions,
+                  tools: tools, workspace: workspace, httpClient: httpClient,
+                  observation: observation, checkpointAfterBytes: checkpointAfterBytes)
+        self.gatewayURL = gatewayURL
+    }
+
+    public init(
+        provider: FxProvider, model: FxModel, instructions: String = "", tools: [FxTool] = [],
+        workspace: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
+        httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil,
+        checkpointAfterBytes: Int? = 1024 * 1024
+    ) {
+        self.provider = provider
         self.model = model
         self.instructions = instructions
         self.tools = tools
         self.workspace = workspace
-        self.gatewayURL = gatewayURL
+        self.gatewayURL = URL(string: "https://ai-gateway.vercel.sh/v4/ai/language-model")!
         self.httpClient = httpClient
         self.observation = observation
         self.checkpointAfterBytes = checkpointAfterBytes
     }
 
     var nativeOptions: JSONValue {
-        var fields: [String: JSONValue] = [
-            "apiKey": .string(apiKey), "model": .string(model.id),
-            "home": .string(FileManager.default.homeDirectoryForCurrentUser.path),
-            "workspaceRoot": .string(workspace.path), "gatewayChatUrl": .string(gatewayURL.absoluteString),
-        ]
-        if let effort = model.reasoningEffort { fields["effort"] = .string(effort) }
-        if let fast = model.fast { fields["fast"] = .bool(fast) }
-        if let ultrafast = model.ultrafast { fields["ultrafast"] = .bool(ultrafast) }
-        return .object(fields)
+        get throws {
+            var fields: [String: JSONValue] = [
+                "model": .string(model.id),
+                "home": .string(FileManager.default.homeDirectoryForCurrentUser.path),
+                "workspaceRoot": .string(workspace.path), "gatewayChatUrl": .string(gatewayURL.absoluteString),
+            ]
+            switch provider {
+            case .gateway(let apiKey): fields["apiKey"] = .string(apiKey)
+            case .custom(let provider, _):
+                fields["provider"] = .string(provider.name)
+                fields["configuredProviders"] = .string(String(decoding: try JSONEncoder().encode(provider.definition), as: UTF8.self))
+            }
+            if let effort = model.reasoningEffort { fields["effort"] = .string(effort) }
+            if let fast = model.fast { fields["fast"] = .bool(fast) }
+            if let ultrafast = model.ultrafast { fields["ultrafast"] = .bool(ultrafast) }
+            return .object(fields)
+        }
     }
 }
 

@@ -37,7 +37,7 @@ public struct FxURLSessionHTTPClient: FxHTTPClient {
     public init(session: URLSession = .shared) { self.session = session }
 
     public func send(_ request: URLRequest) async throws -> FxHTTPResponse {
-        let (bytes, response) = try await session.bytes(for: request)
+        let (bytes, response) = try await session.bytes(for: request, delegate: CredentialRedirectPolicy())
         if Task.isCancelled {
             bytes.task.cancel()
             throw CancellationError()
@@ -90,5 +90,14 @@ public struct FxURLSessionHTTPClient: FxHTTPClient {
         case .terminated: throw CancellationError()
         @unknown default: throw FxError.outputOverflow
         }
+    }
+}
+
+/// An authenticated API request is authorized for its original endpoint only.
+private final class CredentialRedirectPolicy: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest) async -> URLRequest? {
+        task.originalRequest?.value(forHTTPHeaderField: "Authorization") == nil ? request : nil
     }
 }

@@ -63,7 +63,8 @@ public actor FxEngine {
             }
             tools[tool.name] = tool
         }
-        let transport = try NativeTransport(options: configuration.nativeOptions, httpClient: configuration.httpClient)
+        let httpClient = ProviderHTTPClient(client: configuration.httpClient, provider: configuration.provider)
+        let transport = try NativeTransport(options: configuration.nativeOptions, httpClient: httpClient)
         let rpc = RPCClient(transport: transport, observer: configuration.wireObserver)
         do {
             try await transport.start()
@@ -85,6 +86,7 @@ public actor FxEngine {
             guard let id = session["sessionId"]?.string else {
                 throw FxError.protocolViolation("Missing session identifier")
             }
+            await httpClient.setSessionID(id)
             if configuration.observation != nil, session["_meta"]?["fx"]?["hooksVersion"] != .number(1) {
                 throw FxError.protocolViolation("Runtime does not support observation")
             }

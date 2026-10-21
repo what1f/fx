@@ -17,7 +17,7 @@
       "upstream": "sdk/tests/test-agent-custom.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "partial: engine requests, tools, scoped credentials, rejected keys and error redaction passed against JS and Swift; full agent/session suite pending"
     },
     {
       "upstream": "sdk/tests/test-agent-effort.mjs",

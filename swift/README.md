@@ -53,6 +53,30 @@ let withdrawal = try await turn.withdraw(receipt.id)
 
 Model discovery does not create an engine. Steering joins the current turn at a safe boundary and carries an ID in the user-message event. A withdrawal returns `.withdrawn` if the model has not received that input, or `.alreadyPlaced` otherwise. With persistence, these operations wait for their journal records. Controls on an old turn cannot change a newer turn.
 
+## Use a custom provider
+
+Use an OpenAI Chat Completions service through `FxProvider.custom`:
+
+```swift
+let provider = try FxCustomProvider(
+    name: "local",
+    baseURL: URL(string: "http://localhost:8000/v1")!,
+    models: ["local-model": .init(
+        contextWindow: 32768, maxOutputTokens: 4096, supportsToolUse: true
+    )]
+)
+let engine = try await FxEngine.open(configuration: FxConfiguration(
+    provider: .custom(provider, credentials: { request in
+        key
+    }),
+    model: "local-model"
+))
+```
+
+The asynchronous credentials closure receives the provider name and engine session ID and returns an API key. Omit it for a service that needs no key. Cancellation of the turn cancels a pending credential lookup. Keys are added only to the provider's chat endpoint and remain outside core configuration and saved records. Rejected keys are not refreshed or resent. Error details are bounded and mask the key, including JSON-escaped copies.
+
+The default Foundation HTTP client rejects redirects for authenticated requests. A custom `FxHTTPClient` must preserve that credential scope when handling redirects. Custom providers support HTTPS and HTTP on loopback addresses. Codex and Grok subscription providers remain pending.
+
 ## Provide tools and images
 
 ```swift

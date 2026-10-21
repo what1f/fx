@@ -2,7 +2,38 @@
 set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 task_tmp="$(mktemp -d)"
-trap 'rm -rf "$task_tmp"' EXIT
+provider_pid=""
+cleanup() {
+    if [[ -n "$provider_pid" ]]; then
+        kill "$provider_pid" 2>/dev/null || true
+        wait "$provider_pid" 2>/dev/null || true
+    fi
+    rm -rf "$task_tmp"
+}
+trap cleanup EXIT
+node - "$task_tmp" <<'JS' &
+const http = require('node:http');
+const fs = require('node:fs');
+const directory = process.argv[2];
+const server = http.createServer((request, response) => {
+    fs.appendFileSync(`${directory}/requests.jsonl`, JSON.stringify({url: request.url, auth: request.headers.authorization}) + '\n');
+    request.resume();
+    if (request.url === '/redirect/chat/completions') {
+        response.writeHead(307, {location: '/other/chat/completions'}); response.end(); return;
+    }
+    response.writeHead(200, {'content-type': 'text/event-stream'});
+    response.end('data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"HTTP consumer ok"},"finish_reason":null}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+});
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
+server.listen(0, '127.0.0.1', () => fs.writeFileSync(`${directory}/port`, String(server.address().port)));
+JS
+provider_pid=$!
+for ((attempt=0; attempt<100; attempt++)); do
+    [[ -f "$task_tmp/port" ]] && break
+    sleep 0.05
+done
+[[ -f "$task_tmp/port" ]]
+provider_port="$(cat "$task_tmp/port")"
 mkdir -p "$task_tmp/Sources/Consumer"
 cat > "$task_tmp/Package.swift" <<'SWIFT'
 // swift-tools-version: 6.0
@@ -59,8 +90,31 @@ struct MockHTTP: FxHTTPClient {
         guard try await duplicate.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
         try await restored.close()
         try await store.close()
+        let port = ProcessInfo.processInfo.environment["LIBFX_PROVIDER_PORT"]!
+        for prefix in ["v1", "redirect"] {
+            let provider = try FxCustomProvider(name: "local", baseURL: URL(string: "http://127.0.0.1:\(port)/\(prefix)")!,
+                                                models: ["local-model": .init(contextWindow: 32768, maxOutputTokens: 4096)])
+            let native = try await FxEngine.open(configuration: FxConfiguration(
+                provider: .custom(provider, credentials: { _ in "consumer-provider-key" }), model: "local-model"))
+            let response = try await native.prompt("hello")
+            var content = ""
+            for try await event in response { if case .text(let delta) = event { content += delta } }
+            let result = try await response.result
+            guard prefix == "v1" ? (content == "HTTP consumer ok" && result.stopReason == .endTurn) : result.stopReason != .endTurn else {
+                throw FxError.protocolViolation("Unexpected provider HTTP response")
+            }
+            try await native.close()
+        }
         print("Swift package consumer passed")
     }
 }
 SWIFT
-LIBFX_SWIFT_PACKAGE="$repo_root/swift" swift run --package-path "$task_tmp" -c release Consumer
+LIBFX_PROVIDER_PORT="$provider_port" LIBFX_SWIFT_PACKAGE="$repo_root/swift" swift run --package-path "$task_tmp" -c release Consumer
+
+node - "$task_tmp/requests.jsonl" <<'JS'
+const assert = require('node:assert/strict');
+const requests = require('node:fs').readFileSync(process.argv[2], 'utf8').trim().split('\n').map(JSON.parse);
+assert.deepEqual(requests.map(request => request.url), ['/v1/chat/completions', '/redirect/chat/completions']);
+assert.ok(requests.every(request => request.auth === 'Bearer consumer-provider-key'));
+console.log('Foundation HTTP consumer and credential redirect isolation passed');
+JS

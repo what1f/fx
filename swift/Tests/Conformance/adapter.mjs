@@ -51,7 +51,12 @@ export async function createFxEngine(options = {}) {
   });
   lines.on('line', line => {
     const value = JSON.parse(line);
-    if (value.observation) {
+    if (value.credentialRequest) {
+      const call = value.credentialRequest;
+      Promise.resolve().then(() => options.credentials({ provider: call.provider, sessionId: call.sessionId }))
+        .then(value => request('credentialResult', { token: call.token, key: value?.apiKey }),
+          () => request('credentialResult', { token: call.token })).catch(() => {});
+    } else if (value.observation) {
       try { Promise.resolve(options.hooks?.onEvent(value.observation)).catch(error => {
         try { Promise.resolve(options.hooks?.onError?.(error)).catch(() => {}); } catch {}
       }); } catch (error) {
@@ -189,6 +194,7 @@ export async function createFxEngine(options = {}) {
     }
     const opened = await request('open', { options: {
       ...configuration,
+      hasCredentials: typeof options.credentials === 'function',
       hasPersistence: Boolean(persistence),
       hasCheckpointPersistence: typeof persistence?.saveCheckpoint === 'function',
       ...(checkpoint ? { checkpoint: Buffer.from(checkpoint).toString('base64') } : {}),
