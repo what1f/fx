@@ -7,6 +7,9 @@ const checks = [
   { name: 'upstream/test-skills-adapter-records', args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-skills-adapter.mjs', 'records', 'native',
   ] },
+  { name: 'upstream/test-skills-adapter-disk', args: [
+    '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-skills-adapter.mjs', 'disk', 'native',
+  ] },
   ...['test-host-tools', 'test-agent-step-limit', 'test-host-tool-cancel', 'test-agent-steering', 'test-list-models', 'test-agent-effort', 'test-agent-fast', 'test-agent-provider-tools', 'test-agent-ultrafast-options', 'test-agent-request-context', 'test-agent-bootstrap', 'test-agent-transport-retry', 'test-agent-tool-start', 'test-agent-reserved-tool-names'].map(name => ({
     name: `upstream/${name}`, args: ['--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', `sdk/tests/${name}.mjs`, 'native'],
   })),

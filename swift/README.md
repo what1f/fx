@@ -59,7 +59,9 @@ let skills = try FxSkills([
 let configuration = FxConfiguration(apiKey: key, instructions: skills.instructions, tools: skills.tools)
 ```
 
-The collection accepts at most 64 unique names and 64 KiB of rendered UTF-8 instructions, including resource text and framing. It throws `FxSkillError` for a duplicate name or exceeded limit. Tool closures and their order are preserved; the engine validates tool names when it opens. Resources stay inline and their URIs are not fetched. This API does not load `SKILL.md` files or execute skill scripts. File loading remains pending.
+The collection accepts at most 64 unique names and 64 KiB of rendered UTF-8 instructions, including resource text and framing. It throws `FxSkillError` for a duplicate name or exceeded limit. Tool closures and their order are preserved; the engine validates tool names when it opens. Resources stay inline and their URIs are not fetched.
+
+Load a local `SKILL.md` with `try await FxSkill.load(from: fileURL, resources: resources, tools: tools)`, then pass the result to `FxSkills`. File loading uses Foundation and [Yams](https://github.com/jpsim/Yams) to decode YAML frontmatter. It reads `name` and `description` and ignores other metadata. Quoted and multiline YAML values are supported. Without a name, it uses the filename without its extension. Plain Markdown without frontmatter retains its text. Invalid UTF-8, unterminated frontmatter, or invalid metadata throws `FxSkillFileError`; filesystem errors propagate. Loading checks task cancellation around the file read and parsing. It does not fetch referenced files or execute scripts.
 
 ## Observe HTTP requests
 

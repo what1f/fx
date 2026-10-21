@@ -17,6 +17,13 @@ export function createSkillsAdapter(records) {
   return { ...JSON.parse(encoded), tools: records.flatMap(record => record.tools ?? []) };
 }
 
+export async function loadSkillFile(path, options = {}) {
+  const encoded = execFileSync(defaultDriver, ['skill-file'], {
+    input: JSON.stringify({ path, resources: options.resources }), encoding: 'utf8', maxBuffer: 1024 * 1024,
+  });
+  return { ...JSON.parse(encoded), tools: options.tools ?? [] };
+}
+
 // Normalize JavaScript-only shapes at the test boundary. The Swift SDK has one
 // typed model value; capability and effort-string validation stay in its core.
 function swiftModel(options) {

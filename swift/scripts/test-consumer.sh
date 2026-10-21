@@ -134,7 +134,10 @@ struct SubscriptionHTTP: FxHTTPClient {
             guard input == toolInput else { throw FxError.protocolViolation("Incomplete tool arguments") }
             return "received"
         }
-        let skills = try FxSkills([FxSkill(name: "consumer", instructions: "SKILL_CONSUMER",
+        let skillFile = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        defer { try? FileManager.default.removeItem(at: skillFile) }
+        try Data("---\nname: consumer\ndescription: >-\n  Consumer skill\n---\nSKILL_CONSUMER".utf8).write(to: skillFile)
+        let skills = try FxSkills([try await FxSkill.load(from: skillFile,
             resources: [.init(uri: "memory://consumer", text: "RESOURCE_CONSUMER")], tools: [tool])])
         let toolEngine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "consumer-test-key", model: "swift/consumer",
             instructions: skills.instructions, tools: skills.tools, httpClient: ToolInputHTTP(input: toolInput)))

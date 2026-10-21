@@ -431,7 +431,7 @@
       "upstream": "sdk/tests/test-skills-adapter.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "partial: complete unchanged records/native mode through Swift instruction composition and actual core conversation; typed Swift records preserve resources and tool closures; disk SKILL.md loading remains pending"
+      "status": "passed: complete unchanged records/native and disk/native modes through Swift file loading, instruction composition and actual core conversation; host resources and original tool closures remain typed Swift values; YAML decoding uses Yams"
     },
     {
       "upstream": "sdk/tests/test-term-demo-package.mjs",
