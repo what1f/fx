@@ -11,7 +11,7 @@
       "upstream": "sdk/tests/test-agent-codex.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "partial: upstream engine sections 1 through 3 passed unchanged against JavaScript and Swift; durable agent/session and options sections pending"
     },
     {
       "upstream": "sdk/tests/test-agent-custom.mjs",
@@ -35,7 +35,7 @@
       "upstream": "sdk/tests/test-agent-grok.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "partial: upstream engine sections 1 through 4 passed unchanged against JavaScript and Swift; later durable agent/session, shared-agent and options sections pending; native tests cover shared refresh and host locks"
     },
     {
       "upstream": "sdk/tests/test-agent-images.mjs",

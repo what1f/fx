@@ -52,6 +52,7 @@ public struct FxConfiguration: Sendable {
             ]
             switch provider {
             case .gateway(let apiKey): fields["apiKey"] = .string(apiKey)
+            case .subscription(let subscription): fields["provider"] = .string(subscription.provider.rawValue)
             case .custom(let provider, _):
                 fields["provider"] = .string(provider.name)
                 fields["configuredProviders"] = .string(String(decoding: try JSONEncoder().encode(provider.definition), as: UTF8.self))

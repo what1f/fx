@@ -28,7 +28,7 @@ actor Driver: FxHTTPClient, FxPersistence {
     private var engine: FxEngine?
     private var store: (any FxPersistence)?
     private var turns: [String: FxTurn] = [:]
-    private var credentialWaiters: [String: CheckedContinuation<String, any Error>] = [:]
+    private var credentialWaiters: [String: CheckedContinuation<JSONValue, any Error>] = [:]
     private var nextFetchID = 1
     private var fetchWaiters: [Int: CheckedContinuation<FxHTTPResponse, any Error>] = [:]
     private var fetchBodies: [Int: AsyncThrowingStream<Data, any Error>.Continuation] = [:]
@@ -135,9 +135,31 @@ actor Driver: FxHTTPClient, FxPersistence {
                 if options["hasCredentials"] == .bool(true) {
                     config.provider = .custom(provider, credentials: { [weak self] request in
                         guard let self else { throw FxError.closed }
-                        return try await self.credentials(request)
+                        let value = try await self.credentials(request)
+                        guard let key = value["apiKey"]?.string else { throw FxError.invalidInput("Missing API key") }
+                        return key
                     })
                 } else { config.provider = .custom(provider) }
+            }
+            if let name = options["provider"]?.string, let provider = FxSubscriptionProvider(rawValue: name) {
+                guard options["hasCredentials"] == .bool(true) else { throw FxError.invalidInput("Subscription credentials are required") }
+                let save: (@Sendable (FxSubscriptionCredentials, FxCredentialRequest) async throws -> Void)?
+                if options["hasOnCredentials"] == .bool(true) {
+                    save = { [weak self] credentials, context in
+                        guard let self else { throw FxError.closed }
+                        _ = try await self.credentials(context, saving: credentials)
+                    }
+                } else { save = nil }
+                config.provider = .subscription(FxSubscription(provider: provider, credentials: { [weak self] context in
+                    guard let self else { throw FxError.closed }
+                    let value = try await self.credentials(context)
+                    guard let token = value["accessToken"]?.string else { throw FxError.invalidInput("Missing access token") }
+                    let expiry: Date?
+                    if case .number(let ms) = value["expiresAt"] { expiry = Date(timeIntervalSince1970: ms / 1000) }
+                    else { expiry = nil }
+                    return try FxSubscriptionCredentials(accessToken: token, refreshToken: value["refreshToken"]?.string,
+                                                         accountID: value["accountId"]?.string, expiresAt: expiry)
+                }, onRefresh: save))
             }
             if let url = options["gatewayChatUrl"]?.string, let endpoint = URL(string: url) { config.gatewayURL = endpoint }
             config.httpClient = self
@@ -294,7 +316,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             guard let token = value["token"]?.string, let waiter = credentialWaiters.removeValue(forKey: token) else {
                 throw FxError.invalidInput("Unknown credential request")
             }
-            if let key = value["key"]?.string { waiter.resume(returning: key) }
+            if let credentials = value["credentials"] { waiter.resume(returning: credentials) }
             else { waiter.resume(throwing: FxError.invalidInput("Credentials are unavailable")) }
             return .null
         case "toolResult":
@@ -417,14 +439,19 @@ actor Driver: FxHTTPClient, FxPersistence {
         emit(.object(["fetchCancelled": .number(Double(id))]))
     }
 
-    private func credentials(_ request: FxCredentialRequest) async throws -> String {
+    private func credentials(_ request: FxCredentialRequest, saving: FxSubscriptionCredentials? = nil) async throws -> JSONValue {
         let token = UUID().uuidString
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { waiter in
                 credentialWaiters[token] = waiter
                 emit(.object(["credentialRequest": .object([
-                    "token": .string(token), "provider": .string(request.provider), "sessionId": .string(request.sessionID),
+                    "token": .string(token), "provider": .string(request.provider), "sessionId": request.sessionID.map(JSONValue.string) ?? .null,
+                    "saving": saving.map { credentials in .object([
+                        "accessToken": .string(credentials.accessToken), "refreshToken": credentials.refreshToken.map(JSONValue.string) ?? .null,
+                        "accountId": credentials.accountID.map(JSONValue.string) ?? .null,
+                        "expiresAt": credentials.expiresAt.map { .number($0.timeIntervalSince1970 * 1000) } ?? .null,
+                    ]) } ?? .null,
                 ])]))
             }
         } onCancel: { Task { await self.cancelCredentials(token) } }

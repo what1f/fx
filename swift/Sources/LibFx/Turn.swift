@@ -58,9 +58,14 @@ public struct FxTurn: AsyncSequence, Sendable, Identifiable {
         get async throws {
             try await withTaskCancellationHandler {
                 try Task.checkCancellation()
-                let result = try await completion.value
-                try Task.checkCancellation()
-                return result
+                do {
+                    let result = try await completion.value
+                    try Task.checkCancellation()
+                    return result
+                } catch {
+                    try Task.checkCancellation()
+                    throw error
+                }
             } onCancel: { Task { await cancelAction() } }
         }
     }

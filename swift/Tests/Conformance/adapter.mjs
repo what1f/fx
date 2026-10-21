@@ -53,8 +53,11 @@ export async function createFxEngine(options = {}) {
     const value = JSON.parse(line);
     if (value.credentialRequest) {
       const call = value.credentialRequest;
-      Promise.resolve().then(() => options.credentials({ provider: call.provider, sessionId: call.sessionId }))
-        .then(value => request('credentialResult', { token: call.token, key: value?.apiKey }),
+      Promise.resolve().then(async () => {
+        const info = { provider: call.provider, sessionId: call.sessionId };
+        if (call.saving) { await options.onCredentials(call.saving, info); return {}; }
+        return options.credentials(info);
+      }).then(value => request('credentialResult', { token: call.token, credentials: value }),
           () => request('credentialResult', { token: call.token })).catch(() => {});
     } else if (value.observation) {
       try { Promise.resolve(options.hooks?.onEvent(value.observation)).catch(error => {
@@ -195,6 +198,7 @@ export async function createFxEngine(options = {}) {
     const opened = await request('open', { options: {
       ...configuration,
       hasCredentials: typeof options.credentials === 'function',
+      hasOnCredentials: typeof options.onCredentials === 'function',
       hasPersistence: Boolean(persistence),
       hasCheckpointPersistence: typeof persistence?.saveCheckpoint === 'function',
       ...(checkpoint ? { checkpoint: Buffer.from(checkpoint).toString('base64') } : {}),

@@ -2,11 +2,12 @@ import Foundation
 
 public struct FxCredentialRequest: Sendable {
     public let provider: String
-    public let sessionID: String
+    public let sessionID: String?
 }
 
 public enum FxProvider: Sendable {
     case gateway(apiKey: String)
+    case subscription(FxSubscription)
     case custom(FxCustomProvider, credentials: (@Sendable (FxCredentialRequest) async throws -> String)? = nil)
 }
 
@@ -103,6 +104,9 @@ actor ProviderHTTPClient: FxHTTPClient {
     func setSessionID(_ id: String) { sessionID = id }
 
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        if case .subscription(let subscription) = provider {
+            return try await subscription.send(request, sessionID: sessionID, client: client)
+        }
         var request = request
         var credential: String?
         if case .custom(let definition, let credentials) = provider,
@@ -119,40 +123,47 @@ actor ProviderHTTPClient: FxHTTPClient {
         }
         let response = try await client.send(request)
         guard response.statusCode >= 400, let credential else { return response }
-        // Normalize JSON before masking, so Unicode escapes cannot hide the key.
-        defer { response.cancel() }
-        var data = Data()
-        var body = "Provider error details are unavailable"
-        var exceeded = false
-        do {
-            for try await chunk in response.body {
-                try Task.checkCancellation()
-                guard chunk.count <= 64 * 1024 - data.count else { exceeded = true; break }
-                data.append(chunk)
-            }
-            if !exceeded {
-                body = String(decoding: data, as: UTF8.self)
-                if let first = body.first(where: { !$0.isWhitespace }), ["[", "{", "\""].contains(String(first)) {
-                    if let json = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
-                       let normalized = try? JSONSerialization.data(withJSONObject: json, options: [.fragmentsAllowed, .withoutEscapingSlashes]) {
-                        body = String(decoding: normalized, as: UTF8.self)
-                    } else { body = "Provider error details could not be decoded" }
-                }
-            }
-        } catch {
+        return try await redactingProviderResponse(response, secrets: [credential])
+    }
+}
+
+func redactingProviderResponse(_ response: FxHTTPResponse, secrets: [String]) async throws -> FxHTTPResponse {
+    guard response.statusCode >= 400 else { return response }
+    // Normalize JSON before masking, so Unicode escapes cannot hide the key.
+    defer { response.cancel() }
+    var data = Data()
+    var body = "Provider error details are unavailable"
+    var exceeded = false
+    do {
+        for try await chunk in response.body {
             try Task.checkCancellation()
-            // Headers arrived: a failed body must not trigger a request replay.
+            guard chunk.count <= 64 * 1024 - data.count else { exceeded = true; break }
+            data.append(chunk)
         }
-        let encoded = String(decoding: try JSONEncoder().encode(credential), as: UTF8.self)
+        if !exceeded {
+            body = String(decoding: data, as: UTF8.self)
+            if let first = body.first(where: { !$0.isWhitespace }), ["[", "{", "\""].contains(String(first)) {
+                if let json = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+                   let normalized = try? JSONSerialization.data(withJSONObject: json, options: [.fragmentsAllowed, .withoutEscapingSlashes]) {
+                    body = String(decoding: normalized, as: UTF8.self)
+                } else { body = "Provider error details could not be decoded" }
+            }
+        }
+    } catch {
+        try Task.checkCancellation()
+        // Headers arrived: a failed body must not trigger a request replay.
+    }
+    for credential in secrets {
+        let encoded = String(decoding: try JSONSerialization.data(withJSONObject: credential, options: [.fragmentsAllowed, .withoutEscapingSlashes]), as: UTF8.self)
         for form in [credential, String(encoded.dropFirst().dropLast())] {
             body = body.replacingOccurrences(of: form, with: String(repeating: "*", count: form.count))
         }
-        var headers = response.headers
-        headers.removeValue(forKey: "content-length")
-        headers.removeValue(forKey: "content-encoding")
-        let redacted = Data(body.utf8)
-        return FxHTTPResponse(statusCode: response.statusCode, headers: headers, body: AsyncThrowingStream {
-            $0.yield(redacted); $0.finish()
-        })
     }
+    var headers = response.headers
+    headers.removeValue(forKey: "content-length")
+    headers.removeValue(forKey: "content-encoding")
+    let redacted = Data(body.utf8)
+    return FxHTTPResponse(statusCode: response.statusCode, headers: headers, body: AsyncThrowingStream {
+        $0.yield(redacted); $0.finish()
+    })
 }

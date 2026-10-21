@@ -129,6 +129,26 @@ private actor CredentialLog {
         try await engine.close()
     }
 
+    @Test func errorRedactionPreservesDetailsAndMasksMixedJSONEscapes() async throws {
+        let secret = "key/\"unicode雪", refresh = "refresh/\"token"
+        let data = try JSONEncoder().encode(JSONValue.object([
+            "error": .object(["message": .string("rejected \(secret) and \(refresh)")]),
+        ]))
+        let original = FxHTTPResponse(statusCode: 403, headers: ["content-length": "900", "content-encoding": "gzip"],
+                                      body: AsyncThrowingStream { $0.yield(data); $0.finish() })
+        let response = try await redactingProviderResponse(original, secrets: [secret, refresh])
+        var redacted = Data()
+        for try await chunk in response.body { redacted.append(chunk) }
+        let value = try JSONDecoder().decode(JSONValue.self, from: redacted)
+        let message = try #require(value["error"]?["message"]?.string)
+        #expect(message.hasPrefix("rejected "))
+        #expect(message.contains("*"))
+        #expect(!message.contains(secret))
+        #expect(!message.contains(refresh))
+        #expect(response.headers["content-length"] == nil)
+        #expect(response.headers["content-encoding"] == nil)
+    }
+
     @Test func invalidDefinitionsAreRejectedBeforeStartingCore() throws {
         for name in ["", "Gateway", "1local", "a/b", String(repeating: "a", count: 65)] {
             #expect(throws: FxError.self) { try FxCustomProvider(name: name, baseURL: URL(string: "https://models.example")!) }

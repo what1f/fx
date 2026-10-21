@@ -138,13 +138,16 @@ private let identityStep = FxTool(
 }
 
 @Test func cancellingResultWaiterThrowsCancellationError() async throws {
-    let gateway = IdentityGateway(holdRequest: true)
-    let engine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "test-key", model: "swift/identity", httpClient: gateway))
-    let turn = try await engine.prompt("wait for cancellation")
-    let waiting = Task { try await turn.result }
-    await gateway.waitUntilRequested()
-    waiting.cancel()
-    await #expect(throws: CancellationError.self) { try await waiting.value }
-    try await engine.close()
-    #expect(await gateway.requests.count == 1)
+    // The core can settle cancellation as either a result or an RPC error.
+    for _ in 0..<20 {
+        let gateway = IdentityGateway(holdRequest: true)
+        let engine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "test-key", model: "swift/identity", httpClient: gateway))
+        let turn = try await engine.prompt("wait for cancellation")
+        let waiting = Task { try await turn.result }
+        await gateway.waitUntilRequested()
+        waiting.cancel()
+        await #expect(throws: CancellationError.self) { try await waiting.value }
+        try await engine.close()
+        #expect(await gateway.requests.count == 1)
+    }
 }

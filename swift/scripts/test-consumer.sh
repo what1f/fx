@@ -18,7 +18,7 @@ const directory = process.argv[2];
 const server = http.createServer((request, response) => {
     fs.appendFileSync(`${directory}/requests.jsonl`, JSON.stringify({url: request.url, auth: request.headers.authorization}) + '\n');
     request.resume();
-    if (request.url === '/redirect/chat/completions') {
+    if (request.url === '/redirect/chat/completions' || request.url === '/token') {
         response.writeHead(307, {location: '/other/chat/completions'}); response.end(); return;
     }
     response.writeHead(200, {'content-type': 'text/event-stream'});
@@ -56,6 +56,26 @@ struct MockHTTP: FxHTTPClient {
         })
     }
 }
+struct SubscriptionHTTP: FxHTTPClient {
+    func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        let text: String
+        switch request.url!.path {
+        case "/cli/stable": text = "1.0.50"
+        case "/v1/models":
+            text = #"{"data":[{"id":"grok-4.5","model":"grok-4.5","api_backend":"responses","context_window":500000,"supports_reasoning_effort":false,"reasoning_efforts":[]}]}"#
+        case "/v1/language-models":
+            text = #"{"models":[{"id":"grok-4.5","input_modalities":["text"],"output_modalities":["text"]}]}"#
+        case "/v1/responses":
+            guard request.value(forHTTPHeaderField: "Authorization") == "Bearer consumer-subscription-key",
+                  request.value(forHTTPHeaderField: "x-grok-user-id") == "consumer-account" else {
+                throw FxError.protocolViolation("Missing subscription authorization")
+            }
+            text = "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"subscription consumer ok\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+        default: throw FxError.protocolViolation("Unexpected subscription endpoint")
+        }
+        return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { $0.yield(Data(text.utf8)); $0.finish() })
+    }
+}
 @main struct Consumer {
     static func main() async throws {
         let models = try await FxModel.available(apiKey: "consumer-test-key", httpClient: MockHTTP())
@@ -90,6 +110,18 @@ struct MockHTTP: FxHTTPClient {
         guard try await duplicate.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
         try await restored.close()
         try await store.close()
+        let subscription = FxSubscription(provider: .grok, credentials: { _ in
+            try FxSubscriptionCredentials(accessToken: "consumer-subscription-key", accountID: "consumer-account")
+        })
+        let subscribed = try await FxEngine.open(configuration: FxConfiguration(
+            provider: .subscription(subscription), model: "grok-4.5", httpClient: SubscriptionHTTP()))
+        let subscriptionTurn = try await subscribed.prompt("hello")
+        var subscriptionText = ""
+        for try await event in subscriptionTurn { if case .text(let delta) = event { subscriptionText += delta } }
+        guard subscriptionText == "subscription consumer ok", try await subscriptionTurn.result.stopReason == .endTurn else {
+            throw FxError.protocolViolation("Unexpected subscription response")
+        }
+        try await subscribed.close()
         let port = ProcessInfo.processInfo.environment["LIBFX_PROVIDER_PORT"]!
         for prefix in ["v1", "redirect"] {
             let provider = try FxCustomProvider(name: "local", baseURL: URL(string: "http://127.0.0.1:\(port)/\(prefix)")!,
@@ -105,6 +137,12 @@ struct MockHTTP: FxHTTPClient {
             }
             try await native.close()
         }
+        var tokenRequest = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/token")!)
+        tokenRequest.httpMethod = "POST"
+        tokenRequest.httpBody = Data("refresh_token=consumer-refresh-token".utf8)
+        let tokenResponse = try await FxURLSessionHTTPClient().send(tokenRequest)
+        guard tokenResponse.statusCode == 307 else { throw FxError.protocolViolation("Token redirect was followed") }
+        tokenResponse.cancel()
         print("Swift package consumer passed")
     }
 }
@@ -114,7 +152,7 @@ LIBFX_PROVIDER_PORT="$provider_port" LIBFX_SWIFT_PACKAGE="$repo_root/swift" swif
 node - "$task_tmp/requests.jsonl" <<'JS'
 const assert = require('node:assert/strict');
 const requests = require('node:fs').readFileSync(process.argv[2], 'utf8').trim().split('\n').map(JSON.parse);
-assert.deepEqual(requests.map(request => request.url), ['/v1/chat/completions', '/redirect/chat/completions']);
-assert.ok(requests.every(request => request.auth === 'Bearer consumer-provider-key'));
+assert.deepEqual(requests.map(request => request.url), ['/v1/chat/completions', '/redirect/chat/completions', '/token']);
+assert.ok(requests.slice(0, 2).every(request => request.auth === 'Bearer consumer-provider-key'));
 console.log('Foundation HTTP consumer and credential redirect isolation passed');
 JS

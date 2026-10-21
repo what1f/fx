@@ -382,6 +382,16 @@ public actor FxEngine {
             } catch {
                 await dispatch.resolve(sent: false)
                 await transport.discardAttachments()
+                if turnID == id, turnCancelled, !closed,
+                   case FxError.rpc(_, "Cancelled", _) = error {
+                    do { try await journal?.check() }
+                    catch {
+                        self.finish(turn: id, error: error)
+                        throw error
+                    }
+                    self.finish(turn: id)
+                    return FxTurnResult(stopReason: .cancelled, usage: FxUsage(nil))
+                }
                 self.finish(turn: id, error: error)
                 throw error
             }

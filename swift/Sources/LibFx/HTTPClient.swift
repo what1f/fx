@@ -93,11 +93,14 @@ public struct FxURLSessionHTTPClient: FxHTTPClient {
     }
 }
 
-/// An authenticated API request is authorized for its original endpoint only.
+/// Keep API credentials and request bodies at their original endpoint.
 private final class CredentialRedirectPolicy: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest) async -> URLRequest? {
-        task.originalRequest?.value(forHTTPHeaderField: "Authorization") == nil ? request : nil
+        guard let original = task.originalRequest,
+              original.value(forHTTPHeaderField: "Authorization") == nil,
+              ["GET", "HEAD"].contains(original.httpMethod ?? "GET") else { return nil }
+        return request
     }
 }

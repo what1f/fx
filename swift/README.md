@@ -75,7 +75,32 @@ let engine = try await FxEngine.open(configuration: FxConfiguration(
 
 The asynchronous credentials closure receives the provider name and engine session ID and returns an API key. Omit it for a service that needs no key. Cancellation of the turn cancels a pending credential lookup. Keys are added only to the provider's chat endpoint and remain outside core configuration and saved records. Rejected keys are not refreshed or resent. Error details are bounded and mask the key, including JSON-escaped copies.
 
-The default Foundation HTTP client rejects redirects for authenticated requests. A custom `FxHTTPClient` must preserve that credential scope when handling redirects. Custom providers support HTTPS and HTTP on loopback addresses. Codex and Grok subscription providers remain pending.
+The default Foundation HTTP client follows redirects only for unauthenticated GET and HEAD requests. A custom `FxHTTPClient` must preserve that credential scope when handling redirects. Custom providers support HTTPS and HTTP on loopback addresses. Use `FxProvider.subscription` for Codex or Grok subscriptions.
+
+## Use subscription credentials
+
+Share one `FxSubscription` across engines that use the same credential store:
+
+```swift
+let subscription = FxSubscription(provider: .codex, credentials: { context in
+    try FxSubscriptionCredentials(
+        accessToken: accessToken,
+        refreshToken: refreshToken
+    )
+})
+let engine = try await FxEngine.open(configuration: FxConfiguration(
+    provider: .subscription(subscription),
+    model: "gpt-6.1-sol"
+))
+```
+
+Use `.grok` for a Grok subscription. Credentials can include an explicit `accountID` and `expiresAt`. Otherwise, the SDK reads routing metadata from the token's claims. This does not verify the token. An opaque token requires an explicit account ID. The credential request includes the provider and an optional session ID; catalog requests can lack a session identity.
+
+Provide `onRefresh` to persist rotated credentials in your host's credential store. Refresh runs within five minutes of expiry, or once after a 401 when a refresh token exists. Sessions using the shared actor reuse a rotation and each receive its save callback. A failed save can be retried without spending the old refresh token again. A Grok refresh verifies the account through userinfo before saving or sending the new token.
+
+For multiple processes or servers, supply `refreshLock`. Hold the account lock while awaiting the operation, and return its result. The SDK reloads credentials under that lock before exchanging a refresh token. Cancellation removes one waiting request; when the last waiter leaves, it cancels the refresh and pending save callback. Host closures and HTTP clients must cooperate with task cancellation.
+
+The SDK supplies authentication and token refresh for existing credentials. Sign-in helpers and the full durable agent/session provider suites remain pending.
 
 ## Provide tools and images
 

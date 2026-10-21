@@ -164,6 +164,7 @@ actor NativeTransport: CoreTransport {
             guard !closed else { throw FxError.closed }
             if error is CancellationError || error as? FxError == .cancelled { throw error }
             if case FxError.invalidInput = error { throw error }
+            if error is FxSubscriptionError { throw error }
             if let error = error as? URLError, error.code == .cancelled { throw error }
             // Retry only before response headers. Never replay a partial response.
             return try await httpClient.send(request)
