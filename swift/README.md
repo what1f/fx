@@ -47,6 +47,20 @@ Omit `model` in a Gateway configuration to use the core's default model. To set 
 
 Reasoning effort names must fit in 64 UTF-8 bytes. An oversized name throws `FxError.invalidInput` before loading saved history or creating the runtime. The core validates effort names and model support.
 
+## Compose skills
+
+Use `FxSkill` for host-supplied instructions, inline resources, and tools. `FxSkills` validates and combines records in order:
+
+```swift
+let skills = try FxSkills([
+    FxSkill(name: "review", description: "Review changes", instructions: "Check correctness first.",
+            resources: [.init(uri: "memory://review", text: "Prefer focused changes.")])
+])
+let configuration = FxConfiguration(apiKey: key, instructions: skills.instructions, tools: skills.tools)
+```
+
+The collection accepts at most 64 unique names and 64 KiB of rendered UTF-8 instructions, including resource text and framing. It throws `FxSkillError` for a duplicate name or exceeded limit. Tool closures and their order are preserved; the engine validates tool names when it opens. Resources stay inline and their URIs are not fetched. This API does not load `SKILL.md` files or execute skill scripts. File loading remains pending.
+
 ## Observe HTTP requests
 
 Set `onTransportEvent` in `FxConfiguration` to receive typed request metadata:

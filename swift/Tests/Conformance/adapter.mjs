@@ -10,6 +10,13 @@ const defaultDriver = process.env.LIBFX_SWIFT_DRIVER || join(execFileSync('swift
   'build', '--package-path', fileURLToPath(new URL('../..', import.meta.url)), '--show-bin-path',
 ], { encoding: 'utf8' }).trim(), 'FxSwiftDriver');
 
+export function createSkillsAdapter(records) {
+  const encoded = execFileSync(defaultDriver, ['skills'], {
+    input: JSON.stringify(records), encoding: 'utf8', maxBuffer: 1024 * 1024,
+  });
+  return { ...JSON.parse(encoded), tools: records.flatMap(record => record.tools ?? []) };
+}
+
 // Normalize JavaScript-only shapes at the test boundary. The Swift SDK has one
 // typed model value; capability and effort-string validation stay in its core.
 function swiftModel(options) {

@@ -839,6 +839,26 @@ actor Driver: FxHTTPClient, FxPersistence {
 
 @main struct FxSwiftDriver {
     static func main() async {
+        if CommandLine.arguments.dropFirst().first == "skills" {
+            struct Record: Decodable {
+                let name: String
+                let description: String?
+                let instructions: String
+                let resources: [FxSkill.Resource]?
+            }
+            do {
+                let records = try JSONDecoder().decode([Record].self, from: FileHandle.standardInput.readDataToEndOfFile())
+                let skills = try FxSkills(records.map {
+                    FxSkill(name: $0.name, description: $0.description ?? "", instructions: $0.instructions,
+                            resources: $0.resources ?? [])
+                })
+                FileHandle.standardOutput.write(try JSONEncoder().encode(["instructions": skills.instructions]))
+            } catch {
+                FileHandle.standardError.write(Data("Skill configuration failed: \(error)\n".utf8))
+                exit(1)
+            }
+            return
+        }
         let driver = Driver()
         do {
             for try await line in FileHandle.standardInput.bytes.lines {

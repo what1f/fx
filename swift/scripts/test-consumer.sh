@@ -81,6 +81,10 @@ actor ToolInputHTTP: FxHTTPClient {
     init(input: JSONValue) { self.input = input }
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         if request.httpMethod == "GET" { return try await ProviderSearchHTTP().send(request) }
+        let body = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+        guard body.contains("SKILL_CONSUMER"), body.contains("RESOURCE_CONSUMER") else {
+            throw FxError.protocolViolation("Missing skill context")
+        }
         posts += 1
         if posts != 1 { return try await MockHTTP().send(request) }
         let call = JSONValue.object(["type": .string("tool-call"), "toolCallId": .string("consumer-call"),
@@ -130,7 +134,10 @@ struct SubscriptionHTTP: FxHTTPClient {
             guard input == toolInput else { throw FxError.protocolViolation("Incomplete tool arguments") }
             return "received"
         }
-        let toolEngine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "consumer-test-key", model: "swift/consumer", tools: [tool], httpClient: ToolInputHTTP(input: toolInput)))
+        let skills = try FxSkills([FxSkill(name: "consumer", instructions: "SKILL_CONSUMER",
+            resources: [.init(uri: "memory://consumer", text: "RESOURCE_CONSUMER")], tools: [tool])])
+        let toolEngine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "consumer-test-key", model: "swift/consumer",
+            instructions: skills.instructions, tools: skills.tools, httpClient: ToolInputHTTP(input: toolInput)))
         let toolTurn = try await toolEngine.prompt("probe")
         var previews = 0
         for try await event in toolTurn {
