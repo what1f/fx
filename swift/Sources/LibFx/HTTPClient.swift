@@ -10,15 +10,18 @@ public protocol FxHTTPClient: Sendable {
 
 public struct FxHTTPResponse: Sendable {
     public let statusCode: Int
+    public let headers: [String: String]
     public let body: AsyncThrowingStream<Data, any Error>
     private let cancelBody: @Sendable () -> Void
 
     public init(
         statusCode: Int,
+        headers: [String: String] = [:],
         body: AsyncThrowingStream<Data, any Error>,
         cancel: @escaping @Sendable () -> Void = {}
     ) {
         self.statusCode = statusCode
+        self.headers = Dictionary(headers.map { ($0.key.lowercased(), $0.value) }, uniquingKeysWith: { _, new in new })
         self.body = body
         self.cancelBody = cancel
     }
@@ -70,7 +73,10 @@ public struct FxURLSessionHTTPClient: FxHTTPClient {
             bytes.task.cancel()
         }
         continuation.onTermination = { _ in cancel() }
-        return FxHTTPResponse(statusCode: response.statusCode, body: body, cancel: cancel)
+        let headers = response.allHeaderFields.reduce(into: [String: String]()) { fields, entry in
+            fields[String(describing: entry.key)] = String(describing: entry.value)
+        }
+        return FxHTTPResponse(statusCode: response.statusCode, headers: headers, body: body, cancel: cancel)
     }
 
     private static func yield(

@@ -41,11 +41,11 @@ Persistence preserves ordered append, expected cursor checks, durability barrier
 
 | Area | Upstream test owners | Required Swift proof | Status |
 | --- | --- | --- | --- |
-| Startup, configuration, model catalog | test-minimal-api, test-agent-bootstrap, test-list-models | Equivalent validation and isolation | Partial: engine startup and model option proof; public catalog API pending |
+| Startup, configuration, model catalog | test-minimal-api, test-agent-bootstrap, test-list-models | Equivalent validation and isolation | Partial: startup, model options and explicit model discovery; full bootstrap validation pending |
 | Stream and results | test-core-output, test-native-core-stream | Deltas, finish reasons, usage, provider errors | Partial: Unicode, text, reasoning and result smoke |
 | Tools | test-host-tools, test-tool-contract, test-agent-tool-start | Advertisements, calls, results, errors, parallel admission | Partial: upstream host-tools and Swift result tests |
 | Cancellation and shutdown | test-core-cancel, test-host-tool-cancel, test-native-host-tool-late-settle | No late callbacks, deadlocks, or stranded requests | Partial: upstream host-tool cancellation and native lifecycle tests |
-| Steering | test-agent-steering | Interrupt, wait, join, withdraw, handoff | Pending |
+| Steering | test-agent-steering | Interrupt, wait, join, withdraw, handoff | Partial: upstream steering, withdrawal and old-turn isolation; follow-up and handoff pending |
 | Model options and providers | test-agent-effort, test-agent-fast, test-agent-ultrafast-options, test-agent-custom, test-agent-codex, test-agent-grok | Matching request behavior and validation | Partial: effort and fast; provider APIs pending |
 | Images and limits | test-agent-images, test-instruction-limits, test-native-core-image-framing | Input, tool images, UTF-8, frame bounds | Partial: binary input; resizing and image storage pending |
 | Journal and checkpoints | test-journal, test-checkpoint | Swift and JS restore in both directions | Partial: bidirectional checkpoint and journal proof; full suite pending |

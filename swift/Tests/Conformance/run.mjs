@@ -4,10 +4,10 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const checks = [
-  ...['test-host-tools', 'test-agent-step-limit', 'test-host-tool-cancel'].map(name => ({
+  ...['test-host-tools', 'test-agent-step-limit', 'test-host-tool-cancel', 'test-agent-steering', 'test-list-models'].map(name => ({
     name: `upstream/${name}`, args: ['--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', `sdk/tests/${name}.mjs`, 'native'],
   })),
-  ...['smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery'].map(name => ({
+  ...['smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control'].map(name => ({
     name, args: [`swift/Tests/Conformance/${name}.mjs`],
   })),
 ];

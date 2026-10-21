@@ -41,6 +41,16 @@ do {
 
 Read a turn's events once. Await `result` to observe its completion. Call `cancel()` on the turn to stop model requests and cooperative tool tasks. Call `close()` on the engine to release the core; repeated close calls await the same shutdown and report the same persistence failure, if any.
 
+## Discover models and steer a turn
+
+```swift
+let models = try await FxModel.available(apiKey: key)
+let receipt = try await turn.steer("Focus on the tests")
+let withdrawal = try await turn.withdraw(receipt.id)
+```
+
+Model discovery does not create an engine. Steering joins the current turn at a safe boundary and carries an ID in the user-message event. A withdrawal returns `.withdrawn` if the model has not received that input, or `.alreadyPlaced` otherwise. With persistence, these operations wait for their journal records. Controls on an old turn cannot change a newer turn.
+
 ## Provide tools and images
 
 ```swift

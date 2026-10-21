@@ -19,7 +19,7 @@ import Foundation
 import LibFx
 struct MockHTTP: FxHTTPClient {
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
-        let text = "data: {\"type\":\"text-delta\",\"delta\":\"consumer ok\"}\n\ndata: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\",\"raw\":\"stop\"}}\n\ndata: [DONE]\n\n"
+        let text = request.httpMethod == "GET" ? #"{"data":[{"id":"swift/consumer","type":"language"}]}"# : "data: {\"type\":\"text-delta\",\"delta\":\"consumer ok\"}\n\ndata: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\",\"raw\":\"stop\"}}\n\ndata: [DONE]\n\n"
         return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { continuation in
             continuation.yield(Data(text.utf8)); continuation.finish()
         })
@@ -27,6 +27,8 @@ struct MockHTTP: FxHTTPClient {
 }
 @main struct Consumer {
     static func main() async throws {
+        let models = try await FxModel.available(apiKey: "consumer-test-key", httpClient: MockHTTP())
+        guard models.map(\.id) == ["swift/consumer"] else { throw FxModelCatalogError.malformedResponse }
         let engine = try await FxEngine.open(configuration: FxConfiguration(
             apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()
         ))

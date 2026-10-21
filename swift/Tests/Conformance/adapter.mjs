@@ -2,6 +2,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 const defaultDriver = process.env.LIBFX_SWIFT_DRIVER || join(execFileSync('swift', [
   'build', '--package-path', fileURLToPath(new URL('../..', import.meta.url)), '--show-bin-path',
@@ -14,10 +15,17 @@ export async function createFxEngine(options = {}) {
   const tools = new Map((options.tools || []).map(tool => [tool.name, tool]));
   const toolControllers = new Map();
   const fetchControllers = new Map();
+  const fetchReaders = new Map();
   let nextID = 1, turn = null, closed = false, stderr = '';
   let turnSignal = null, removeAbortListener = () => {};
   child.stderr.on('data', data => { stderr += data; });
+  child.stdin.on('error', error => {
+    for (const waiter of pending.values()) waiter.reject(error);
+    pending.clear();
+    turn?.fail(error);
+  });
   function request(op, args = {}) {
+    if (child.stdin.writableEnded || child.stdin.destroyed) return Promise.reject(new Error('Swift driver input is closed'));
     const id = nextID++;
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
@@ -44,7 +52,8 @@ export async function createFxEngine(options = {}) {
       const waiter = pending.get(value.id);
       pending.delete(value.id);
       if (value.error) {
-        const error = new Error(value.error.message);
+        const ErrorType = value.error.category === 'type' ? TypeError : value.error.category === 'range' ? RangeError : Error;
+        const error = new ErrorType(value.error.message);
         if (value.error.data) Object.assign(error, value.error.data);
         waiter?.reject(error);
       } else waiter?.resolve(value.result);
@@ -53,6 +62,7 @@ export async function createFxEngine(options = {}) {
     else if (value.failed) { removeAbortListener(); turn?.fail(new Error(value.failed)); turn = null; turnSignal = null; }
     else if (value.fetchCancelled) {
       fetchControllers.get(value.fetchCancelled)?.abort();
+      void fetchReaders.get(value.fetchCancelled)?.cancel().catch(() => {});
       fetchControllers.delete(value.fetchCancelled);
     } else if (value.persistenceRequest) {
       const call = value.persistenceRequest;
@@ -84,18 +94,19 @@ export async function createFxEngine(options = {}) {
             ...(call.body ? { body: new Uint8Array(Buffer.from(call.body, 'base64')) } : {}),
             signal: controller.signal,
           });
-          await request('fetchStart', { fetchID: call.id, status: response.status });
-          if (response.body) {
-            const reader = response.body.getReader();
-            try {
+          const reader = response.body?.getReader();
+          if (reader) fetchReaders.set(call.id, reader);
+          try {
+            await request('fetchStart', { fetchID: call.id, status: response.status, headers: Object.fromEntries(response.headers) });
+            if (reader) {
               for (;;) {
                 const { value: chunk, done } = await reader.read();
                 if (done) break;
                 await request('fetchChunk', { fetchID: call.id, data: Buffer.from(chunk).toString('base64') });
               }
-            } finally { reader.releaseLock(); }
-          }
-          await request('fetchEnd', { fetchID: call.id });
+            }
+            await request('fetchEnd', { fetchID: call.id });
+          } finally { fetchReaders.delete(call.id); reader?.releaseLock(); }
         } catch (error) {
           await request('fetchFailure', { fetchID: call.id, error: String(error) }).catch(() => {});
         } finally { fetchControllers.delete(call.id); }
@@ -119,6 +130,10 @@ export async function createFxEngine(options = {}) {
   });
   const { fetch, nativeAddon, backend, onEvent, tools: _tools, checkpoint, persistence, ...configuration } = options;
   try {
+    if (options.__listModels) {
+      try { return await request('listModels', { apiKey: options.apiKey }); }
+      finally { child.stdin.end(); await exited; lines.close(); }
+    }
     const opened = await request('open', { options: {
       ...configuration,
       hasPersistence: Boolean(persistence),
@@ -128,13 +143,18 @@ export async function createFxEngine(options = {}) {
     let resumable = opened.resumable;
     function begin(op, args, promptOptions = {}) {
       if (turn) throw new Error('a prompt is already running');
-      const state = createTurn(() => request('cancel'));
+      const turnToken = randomUUID();
+      const control = (op, args = {}) => request(op, { ...args, turnToken });
+      let ready;
+      const state = createTurn(() => ready.then(() => control('cancel')), (input, inputID) => ready.then(() => control('steer', {
+        text: Array.isArray(input) ? input.map(block => block.text).join('\n') : input, inputID,
+      })), inputID => ready.then(() => control('withdraw', { inputID })));
       turn = state;
       resumable = false;
       turnSignal = promptOptions.signal;
-      const ready = (op === 'prompt' ? encodePrompt(args.text).then(text => ({ text })) : Promise.resolve(args))
-        .then(args => request(op, args));
-      const abort = () => { void ready.then(() => request('cancel')).catch(error => state.fail(error)); };
+      ready = (op === 'prompt' ? encodePrompt(args.text).then(text => ({ text })) : Promise.resolve(args))
+        .then(args => control(op, args));
+      const abort = () => { void ready.then(() => control('cancel')).catch(error => state.fail(error)); };
       turnSignal?.addEventListener('abort', abort, { once: true });
       removeAbortListener = () => promptOptions.signal?.removeEventListener('abort', abort);
       if (turnSignal?.aborted) abort();
@@ -173,7 +193,7 @@ async function encodePrompt(input) {
   }));
 }
 
-function createTurn(cancel) {
+function createTurn(cancel, steer, withdraw) {
   const queue = [], waiters = [];
   let done = false, failure;
   let resolveResult, rejectResult;
@@ -186,6 +206,12 @@ function createTurn(cancel) {
     public: {
       result,
       cancel() { void cancel().catch(error => state.fail(error)); },
+      steer(input, id = randomUUID()) {
+        const receipt = steer(input, id);
+        receipt.id = id;
+        return receipt;
+      },
+      withdraw,
       [Symbol.asyncIterator]() { return {
         next() {
           if (queue.length) return Promise.resolve({ value: queue.shift(), done: false });
@@ -201,3 +227,4 @@ function createTurn(cancel) {
 }
 
 export function supportsJspi() { return false; }
+export function listModels(options = {}) { return createFxEngine({ ...options, __listModels: true }); }

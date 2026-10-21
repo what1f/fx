@@ -65,7 +65,7 @@
       "upstream": "sdk/tests/test-agent-steering.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed via Swift adapter on macOS arm64, Node.js 25.9.0"
     },
     {
       "upstream": "sdk/tests/test-agent-step-limit.mjs",
@@ -245,7 +245,7 @@
       "upstream": "sdk/tests/test-list-models.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed via Swift adapter on macOS arm64, Node.js 25.9.0"
     },
     {
       "upstream": "sdk/tests/test-mcp-adapter.mjs",

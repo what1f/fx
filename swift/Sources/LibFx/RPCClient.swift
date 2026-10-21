@@ -50,7 +50,7 @@ actor RPCClient {
         }
     }
 
-    func request(_ method: String, _ params: JSONValue = .object([:])) async throws -> JSONValue {
+    func request(_ method: String, _ params: JSONValue = .object([:]), onSent: (@Sendable () async -> Void)? = nil) async throws -> JSONValue {
         guard !closed else { throw FxError.closed }
         try Task.checkCancellation()
         let id = nextID
@@ -65,6 +65,7 @@ actor RPCClient {
                             "jsonrpc": .string("2.0"), "id": .number(Double(id)),
                             "method": .string(method), "params": params,
                         ]))
+                        await onSent?()
                     } catch { self.failRequest(id, error) }
                 }
             }

@@ -5,6 +5,7 @@ import Foundation
 actor Driver: FxHTTPClient, FxPersistence {
     private var engine: FxEngine?
     private var turn: FxTurn?
+    private var turnToken: String?
     private var nextFetchID = 1
     private var fetchWaiters: [Int: CheckedContinuation<FxHTTPResponse, any Error>] = [:]
     private var fetchBodies: [Int: AsyncThrowingStream<Data, any Error>.Continuation] = [:]
@@ -29,6 +30,15 @@ actor Driver: FxHTTPClient, FxPersistence {
             emit(.object(["id": id, "result": result]))
         } catch {
             var fields: [String: JSONValue] = ["message": .string(String(describing: error))]
+            if case FxError.noActiveTurn = error { fields["message"] = .string("no prompt is running") }
+            if let catalogError = error as? FxModelCatalogError {
+                fields["message"] = .string(catalogError.localizedDescription)
+                switch catalogError {
+                case .invalidAPIKey, .malformedResponse: fields["category"] = .string("type")
+                case .byteLimit, .entryLimit: fields["category"] = .string("range")
+                case .httpStatus: break
+                }
+            }
             if case FxError.rpc(let code, let message, let data) = error {
                 fields["message"] = .string(message)
                 fields["rpcCode"] = .number(Double(code))
@@ -87,6 +97,9 @@ actor Driver: FxHTTPClient, FxPersistence {
                     .object(["executionId": .string($0.executionID), "name": .string($0.name), "input": $0.input])
                 }),
             ])
+        case "listModels":
+            let models = try await FxModel.available(apiKey: value["apiKey"]?.string ?? "", httpClient: self)
+            return .array(models.map { .string($0.id) })
         case "prompt", "resume":
             guard let engine else { throw FxError.closed }
             let next: FxTurn
@@ -106,6 +119,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                 next = try await engine.prompt(content)
             } else { next = try await engine.prompt(value["text"]?.string ?? "") }
             turn = next
+            turnToken = value["turnToken"]?.string
             Task {
                 do {
                     for try await event in next { emit(.object(["event": encode(event)])) }
@@ -114,7 +128,16 @@ actor Driver: FxHTTPClient, FxPersistence {
                 } catch { emit(.object(["failed": .string(String(describing: error))])) }
             }
             return .null
-        case "cancel": await turn?.cancel(); return .null
+        case "cancel":
+            if value["turnToken"]?.string == turnToken { await turn?.cancel() }
+            return .null
+        case "steer":
+            guard let turn, value["turnToken"]?.string == turnToken else { throw FxError.noActiveTurn }
+            let receipt = try await turn.steer(value["text"]?.string ?? "", id: value["inputID"]?.string ?? UUID().uuidString)
+            return .object(["id": .string(receipt.id)])
+        case "withdraw":
+            guard let turn, value["turnToken"]?.string == turnToken else { return .string(FxWithdrawal.alreadyPlaced.rawValue) }
+            return .string(try await turn.withdraw(value["inputID"]?.string ?? "").rawValue)
         case "checkpoint":
             guard let engine else { throw FxError.closed }
             return .string(try await engine.checkpoint().base64EncodedString())
@@ -130,7 +153,12 @@ actor Driver: FxHTTPClient, FxPersistence {
                   let waiter = fetchWaiters.removeValue(forKey: id), let body = fetchStreams.removeValue(forKey: id) else {
                 throw FxError.invalidInput("Unknown fetch")
             }
-            waiter.resume(returning: FxHTTPResponse(statusCode: value["status"]?.integer ?? 500, body: body))
+            var headers: [String: String] = [:]
+            if case .object(let entries) = value["headers"] { headers = entries.compactMapValues(\.string) }
+            waiter.resume(returning: FxHTTPResponse(
+                statusCode: value["status"]?.integer ?? 500, headers: headers, body: body,
+                cancel: { [weak self] in Task { await self?.cancelFetch(id) } }
+            ))
             return .null
         case "fetchChunk":
             guard let id = value["fetchID"]?.integer, let body = fetchBodies[id],

@@ -51,6 +51,7 @@ public enum FxError: Error, Sendable, Equatable {
     case closed
     case cancelled
     case busy
+    case noActiveTurn
     case invalidInput(String)
     case protocolViolation(String)
     case rpc(code: Int, message: String, data: JSONValue?)

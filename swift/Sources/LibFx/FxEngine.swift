@@ -15,6 +15,7 @@ public actor FxEngine {
     private var closed = false
     private var cancelling = false
     private var turnCancelled = false
+    private var promptDispatch: PromptDispatch?
     private var checkpointing = false
     private var closingTask: Task<Void, any Error>?
 
@@ -171,6 +172,8 @@ public actor FxEngine {
         let id = UUID()
         turnID = id
         turnCancelled = false
+        let dispatch = PromptDispatch()
+        promptDispatch = dispatch
         toolNames.removeAll()
         let (events, continuation) = AsyncThrowingStream<FxEvent, any Error>.makeStream(bufferingPolicy: .bufferingOldest(4096))
         output = continuation
@@ -192,6 +195,7 @@ public actor FxEngine {
                     try await transport.putAttachment(bytes, id: UInt32(index + 1))
                 }
                 if turnCancelled {
+                    await dispatch.resolve(sent: false)
                     await transport.discardAttachments()
                     self.finish(turn: id)
                     return FxTurnResult(stopReason: .cancelled, usage: FxUsage(nil))
@@ -206,7 +210,7 @@ public actor FxEngine {
                         "rerun": .array(rerunning.sorted().map(JSONValue.string)),
                     ])])
                 }
-                let result = try await rpc.request("session/prompt", .object(params))
+                let result = try await rpc.request("session/prompt", .object(params), onSent: { await dispatch.resolve(sent: true) })
                 try await journal?.check()
                 try Task.checkCancellation()
                 recovery = nil
@@ -216,12 +220,24 @@ public actor FxEngine {
                     usage: FxUsage(result["usage"])
                 )
             } catch {
+                await dispatch.resolve(sent: false)
                 await transport.discardAttachments()
                 self.finish(turn: id, error: error)
                 throw error
             }
         }
-        return FxTurn(events: events, completion: task, cancelAction: { [weak self] in await self?.cancel(turn: id) })
+        return FxTurn(
+            events: events, completion: task,
+            cancelAction: { [weak self] in await self?.cancel(turn: id) },
+            steerAction: { [weak self] text, inputID in
+                guard let self else { throw FxError.closed }
+                return try await self.steer(turn: id, text: text, inputID: inputID)
+            },
+            withdrawAction: { [weak self] inputID in
+                guard let self else { throw FxError.closed }
+                return try await self.withdraw(turn: id, inputID: inputID)
+            }
+        )
     }
 
     private func handle(_ message: RPCMessage) async {
@@ -303,7 +319,7 @@ public actor FxEngine {
         }
     }
 
-    private func isActive(_ id: UUID?) -> Bool { id != nil && turnID == id && !closed }
+    private func isActive(_ id: UUID?) -> Bool { id != nil && turnID == id && !closed && !turnCancelled }
     private func removeTool(_ id: String) { toolTasks.removeValue(forKey: id) }
 
     private func cancel(turn id: UUID) async {
@@ -313,8 +329,32 @@ public actor FxEngine {
         defer { cancelling = false }
         for task in toolTasks.values { task.cancel() }
         toolTasks.removeAll()
+        guard await promptDispatch?.wait() == true, turnID == id, !closed else { return }
         try? await rpc.notify("session/cancel", .object(["sessionId": .string(sessionID)]))
         await transport.abortEffects()
+    }
+
+    private func steer(turn id: UUID, text: String, inputID: String) async throws -> FxSteeringReceipt {
+        guard !closed else { throw FxError.closed }
+        guard isActive(id) else { throw FxError.noActiveTurn }
+        guard !text.isEmpty, text.utf8.count <= 64 * 1024 else { throw FxError.invalidInput("Steering text must contain 1–65536 UTF-8 bytes") }
+        guard await promptDispatch?.wait() == true, isActive(id) else { throw FxError.noActiveTurn }
+        _ = try await rpc.request("libfx/steer", .object([
+            "sessionId": .string(sessionID), "text": .string(text), "id": .string(inputID),
+        ]))
+        try await journal?.check()
+        return FxSteeringReceipt(id: inputID)
+    }
+
+    private func withdraw(turn id: UUID, inputID: String) async throws -> FxWithdrawal {
+        guard !closed else { throw FxError.closed }
+        guard isActive(id) else { return .alreadyPlaced }
+        guard await promptDispatch?.wait() == true, isActive(id) else { return .alreadyPlaced }
+        let reply = try await rpc.request("libfx/withdraw", .object([
+            "sessionId": .string(sessionID), "id": .string(inputID),
+        ]))
+        try await journal?.check()
+        return reply["result"] == .string("withdrawn") ? .withdrawn : .alreadyPlaced
     }
 
     private func finish(turn id: UUID, error: (any Error)? = nil) {

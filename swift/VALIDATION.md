@@ -8,11 +8,12 @@ Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. 
 
 ## Implemented proof
 
-`swift test --package-path swift` passed 20 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
+`swift test --package-path swift` passed 23 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
 
 - Fragmented UTF-8 frames, host requests, cancellation, oversized frames, and pending requests during close.
 - HTTP response status, Unicode, bounded chunks, invalid responses, and cancellation before headers.
-- Seventy retained closed engines without native slot exhaustion, streaming and results, and checkpoint exclusion during other state transitions.
+- Seventy retained closed engines without native slot exhaustion, streaming and results, checkpoint exclusion during other state transitions, and old-turn control isolation.
+- One retry after a pre-header network failure; no replay after cancellation or body failure.
 - Model effort and fast options reaching provider requests, plus unsupported effort rejection.
 - Prompt image bytes traveling through attachments, and structured tool result images and error flags.
 - Journal conversation restore, stale-writer fencing, retry deduplication, malformed and future records, and persistence failure before a model request.
@@ -24,9 +25,11 @@ The following upstream tests passed through the Swift test driver with their ass
 node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-host-tools.mjs native
 node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-step-limit.mjs native
 node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-host-tool-cancel.mjs native
+node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-steering.mjs native
+node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-list-models.mjs
 ```
 
-All three passed again after the journal and XCFramework packaging changes. `test-agent-effort.mjs` passed its valid and unsupported capability cases, then stopped on a JavaScript error-class assertion. `test-agent-images.mjs` passed initial image transport cases, then stopped at the unimplemented resize hook. Neither file is counted as passed.
+These five pass through the Swift driver. Both surface labels in the model-discovery fixture are redirected to Swift; this does not qualify a browser runtime. The adapter translates typed Swift errors to JavaScript error classes for those assertions. `test-agent-effort.mjs` passed its valid and unsupported capability cases, then stopped on a JavaScript error-class assertion. `test-agent-images.mjs` passed initial image transport cases, then stopped at the unimplemented resize hook. Neither file is counted as passed.
 
 Additional executable checks passed:
 
@@ -34,6 +37,7 @@ Additional executable checks passed:
 - `checkpoint-interoperability.mjs`: JS to Swift to JS, preserving earlier turns and image bytes.
 - `journal-interoperability.mjs`: Swift to JS to Swift using one persistence store.
 - `recovery.mjs`: journal truncated at tool intent; ambiguous writes remain stopped by default, while explicit rerun preserves execution ID.
+- `turn-control.mjs`: withdrawal while a tool is running, plus controls from an old turn leaving a new turn unaffected.
 
 `node swift/Tests/Conformance/run.mjs` reruns the selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
 
@@ -41,7 +45,7 @@ Additional executable checks passed:
 
 ## Required remaining gates
 
-- Full classified upstream test coverage, including the SDK's providers, steering, hooks, model listing, image processing and storage, and durable agent and session behavior.
+- Full classified upstream test coverage, including the SDK's providers, follow-ups and handoff, hooks, image processing and storage, and durable agent and session behavior.
 - Persistent storage adapters, automatic checkpoints, durability barriers under slow storage, and process termination at effect boundaries.
 - Sanitizers and concurrency stress tests, especially cancellation during preparation and storage.
 - Runtime proof for x86_64 and final consumer validation against the release artifact.

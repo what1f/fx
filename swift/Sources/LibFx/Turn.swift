@@ -33,6 +33,15 @@ public struct FxTurnResult: Sendable, Equatable {
     public let usage: FxUsage
 }
 
+public struct FxSteeringReceipt: Sendable, Equatable {
+    public let id: String
+}
+
+public enum FxWithdrawal: String, Sendable {
+    case withdrawn
+    case alreadyPlaced = "already_placed"
+}
+
 /// Read events once. Await result to observe completion even when no events are consumed.
 public struct FxTurn: AsyncSequence, Sendable {
     public typealias Element = FxEvent
@@ -40,6 +49,8 @@ public struct FxTurn: AsyncSequence, Sendable {
     let events: AsyncThrowingStream<FxEvent, any Error>
     let completion: Task<FxTurnResult, any Error>
     let cancelAction: @Sendable () async -> Void
+    let steerAction: @Sendable (String, String) async throws -> FxSteeringReceipt
+    let withdrawAction: @Sendable (String) async throws -> FxWithdrawal
 
     public var result: FxTurnResult {
         get async throws {
@@ -51,4 +62,8 @@ public struct FxTurn: AsyncSequence, Sendable {
     }
     public func makeAsyncIterator() -> AsyncIterator { events.makeAsyncIterator() }
     public func cancel() async { await cancelAction() }
+    public func steer(_ text: String, id: String = UUID().uuidString) async throws -> FxSteeringReceipt {
+        try await steerAction(text, id)
+    }
+    public func withdraw(_ id: String) async throws -> FxWithdrawal { try await withdrawAction(id) }
 }

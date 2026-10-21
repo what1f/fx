@@ -130,7 +130,7 @@ actor NativeTransport: CoreTransport {
     private func fetch(_ request: URLRequest, id: Int32) async {
         defer { fetchTasks.removeValue(forKey: id) }
         do {
-            let response = try await httpClient.send(request)
+            let response = try await sendWithRetry(request)
             defer { response.cancel() }
             guard !closed, !Task.isCancelled else { return }
             guard let status = UInt16(exactly: response.statusCode) else {
@@ -151,6 +151,19 @@ actor NativeTransport: CoreTransport {
             if !closed { _ = fx_core_finish_fetch(handle.pointer, id) }
         } catch {
             if !closed { _ = fx_core_fail_fetch(handle.pointer, id) }
+        }
+    }
+
+    private func sendWithRetry(_ request: URLRequest) async throws -> FxHTTPResponse {
+        try Task.checkCancellation()
+        do { return try await httpClient.send(request) }
+        catch {
+            try Task.checkCancellation()
+            guard !closed else { throw FxError.closed }
+            if error is CancellationError || error as? FxError == .cancelled { throw error }
+            if let error = error as? URLError, error.code == .cancelled { throw error }
+            // Retry only before response headers. Never replay a partial response.
+            return try await httpClient.send(request)
         }
     }
 

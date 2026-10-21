@@ -74,4 +74,18 @@ private actor CheckpointGate {
         #expect(try await checkpoint.value.count > 0)
         try await engine.close()
     }
+
+    @Test func oldTurnControlsCannotAffectANewerTurn() async throws {
+        let engine = try await FxEngine.open(configuration: configuration())
+        let old = try await engine.prompt("first")
+        for try await _ in old {}
+        _ = try await old.result
+        let current = try await engine.prompt("second")
+        await #expect(throws: FxError.noActiveTurn) { try await old.steer("stale") }
+        #expect(try await old.withdraw("unknown") == .alreadyPlaced)
+        await old.cancel()
+        for try await _ in current {}
+        #expect(try await current.result.stopReason == .endTurn)
+        try await engine.close()
+    }
 }
