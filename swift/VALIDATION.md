@@ -90,6 +90,8 @@ Additional executable checks passed:
 
 `swift test --package-path swift --sanitize=thread` passed all 104 Swift tests without a sanitizer warning. The first focused run reported concurrent access to the native handle during shutdown. The transport now waits for the [Dispatch source's cancellation handler](https://developer.apple.com/documentation/dispatch/dispatch_source_set_cancel_handler) and destroys the handle on its actor. This check instruments Swift code; the precompiled Zig archive is not instrumented. The Swift CI workflow repeats the check after conformance testing.
 
+`swift test --package-path swift --sanitize=address` also passed all 104 tests. Its first run crashed when ASan tried to unmap a 256 KiB alternate signal stack during native thread teardown. A pure Swift validation test passed, while one real-core streaming test reproduced the crash alone. Zig's default thread setup had replaced the sanitizer's stack with a thread-local buffer. The C entry point now sets `std_options.signal_stack_size` to `null`, preserving host-installed signal stacks. Both archive targets were rebuilt; arm64 passed the original failing test and the full Swift suite under ASan. The x86_64 archive has build evidence only. The Swift workflow now runs ASan before Thread Sanitizer. This checks instrumented Swift and intercepted allocations; it does not instrument every instruction in the precompiled Zig core.
+
 The session byte decoder now looks up Base64 fields by name. Swift JSON encoding exposed its previous field-order dependency. A Zig regression test accepts both orders while retaining strict field, encoding, and decoded-byte validation.
 
 After this decoder change, `zig build test` passed. The original Node checkpoint and journal suites also passed for native to native, native to Wasm, and Wasm to native using newly built artifacts and Node's JSPI flag. These local Node 25 runs do not replace Node 24 CI.
@@ -100,7 +102,7 @@ After this decoder change, `zig build test` passed. The original Node checkpoint
 
 - Full classified upstream test coverage, including sign-in helpers, parent and tool-local observation scopes, image processing and storage, and full durable agent and session behavior.
 - External queue delivery and storage integrations, preparation-time limits, durability barriers under slow storage, and systematic termination across all effect boundaries.
-- Address Sanitizer, instrumentation of the native core, and concurrency stress tests, especially cancellation during preparation and storage.
+- Instrumentation of the native core and concurrency stress tests, especially cancellation during preparation and storage.
 - Runtime proof for x86_64 and final consumer validation against the release artifact.
 - Available-credential real-model integration and exact-commit CI, including macOS arm64.
 - Repository final ship gate before any release-readiness claim.

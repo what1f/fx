@@ -8,6 +8,8 @@ This record covers the C ABI and the extraction of the native transport from the
 
 The static archive bundles Zig's compiler runtime. A link test with Apple's C compiler exposed unresolved float128 helper symbols before this setting was added.
 
+The C entry point preserves the embedding host's signal stacks. It disables Zig's automatic alternate-stack installation on native threads. A Swift Address Sanitizer run exposed the previous conflict: native thread setup replaced ASan's mapped stack with a 256 KiB thread-local buffer, and sanitizer teardown attempted to unmap that buffer. One isolated real-core test reproduced the failure. With newly built archives, that test and all 104 Swift tests passed under ASan. This does not establish instruction-level sanitizer coverage of the Zig archive.
+
 ## Ownership review
 
 - Input bytes are copied before the C call returns.

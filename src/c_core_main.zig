@@ -1,4 +1,6 @@
 const std = @import("std");
+// The embedding host owns signal stacks, including those installed by sanitizers.
+pub const std_options: std.Options = .{ .signal_stack_size = null };
 const native = @import("native_core_runtime.zig");
 const io_mod = @import("core/shared/io.zig");
 const model_provider = @import("core/config/model_provider.zig");
