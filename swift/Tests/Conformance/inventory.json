@@ -11,13 +11,13 @@
       "upstream": "sdk/tests/test-agent-codex.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "partial: upstream engine sections 1 through 3 passed unchanged against JavaScript and Swift; durable agent/session and options sections pending"
+      "status": "passed: complete upstream native file unchanged against JavaScript and Swift through the provider-suite runner; Swift owns engine, session, storage, credentials and refresh behavior; adapter validates JavaScript-only input shapes"
     },
     {
       "upstream": "sdk/tests/test-agent-custom.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "partial: engine requests, tools, scoped credentials, rejected keys and error redaction passed against JS and Swift; full agent/session suite pending"
+      "status": "passed: complete upstream native file unchanged against JavaScript and Swift through the provider-suite runner; Swift owns engine, session, storage, credentials and refresh behavior; adapter validates JavaScript-only input shapes"
     },
     {
       "upstream": "sdk/tests/test-agent-effort.mjs",
@@ -35,7 +35,7 @@
       "upstream": "sdk/tests/test-agent-grok.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "partial: upstream engine sections 1 through 4 passed unchanged against JavaScript and Swift; later durable agent/session, shared-agent and options sections pending; native tests cover shared refresh and host locks"
+      "status": "passed: complete upstream native file unchanged against JavaScript and Swift through the provider-suite runner; Swift owns engine, session, storage, credentials and refresh behavior; adapter validates JavaScript-only input shapes"
     },
     {
       "upstream": "sdk/tests/test-agent-images.mjs",
@@ -179,7 +179,7 @@
       "upstream": "sdk/tests/test-durable-provider-crash.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "partial: separate Swift agent SIGKILL checks cover model streaming, ambiguous write skipping and idempotent tool rerun with stable execution identity; unchanged upstream file awaits local-world adapter support"
     },
     {
       "upstream": "sdk/tests/test-durable.mjs",

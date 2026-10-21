@@ -51,12 +51,16 @@ public actor FxEngine {
         if let bytes = configuration.checkpointAfterBytes, bytes < 0 {
             throw FxError.invalidInput("Checkpoint interval must not be negative")
         }
-        let loaded: LoadedJournal?
-        if let persistence { loaded = try LoadedJournal(try await persistence.load()) }
-        else { loaded = nil }
+        if case .gateway(let key) = configuration.provider,
+           key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw FxError.invalidInput("API key is required")
+        }
         guard !configuration.model.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw FxError.invalidInput("Model is required")
         }
+        let loaded: LoadedJournal?
+        if let persistence { loaded = try LoadedJournal(try await persistence.load()) }
+        else { loaded = nil }
         var tools: [String: FxTool] = [:]
         for tool in configuration.tools {
             guard !tool.name.isEmpty, tools[tool.name] == nil, case .object = tool.inputSchema else {

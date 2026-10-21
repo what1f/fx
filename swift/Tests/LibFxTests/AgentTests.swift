@@ -54,6 +54,7 @@ private actor SessionToolCapture {
         let http = SessionHTTP(), store = try FxSessionStore()
         let agent = try FxAgent(configuration: config(http), store: store)
         let session = try await agent.session(id: "logical-session")
+        #expect(try await session.resume() == nil)
         let first = try await session.prompt("first", id: "one")
         let second = try await session.prompt("second", id: "two")
         #expect(try await first.result.stopReason == .endTurn)
@@ -142,8 +143,10 @@ private actor SessionToolCapture {
         try await store.release(lease)
         let agent = try FxAgent(configuration: config(http), store: store)
         let session = try await agent.session(id: "s")
-        let turn = try await session.prompt("ignored duplicate", id: "m")
+        let turn = try #require(try await session.resume())
+        #expect(turn.id == "m")
         #expect(try await turn.result.stopReason == .endTurn)
+        #expect(try await session.resume() == nil)
         #expect(await http.count == 1)
         let entries = try await store.entries(session: "s", agent: "default", after: 0)
         #expect(entries.contains { $0.event == .resumed(id: "m", sessionID: "s") })
@@ -199,4 +202,37 @@ private actor SessionToolCapture {
     private func config(_ http: SessionHTTP) -> FxConfiguration {
         FxConfiguration(apiKey: "test-key", model: "swift/test", httpClient: http)
     }
+}
+
+private actor ValidationStore: FxPersistence {
+    private(set) var loads = 0
+    func load() async throws -> FxPersistenceSnapshot {
+        loads += 1
+        return FxPersistenceSnapshot()
+    }
+    func append(expected: String?, idempotencyKey: String, data: Data, barrier: Bool) async throws -> String {
+        throw FxPersistenceError.fenced
+    }
+}
+
+@Test func invalidConfigurationIsRejectedBeforeStorageOrNetwork() async throws {
+    let store = ValidationStore(), http = SessionHTTP()
+    for (key, model, message) in [("", "swift/test", "API key is required"), ("test-key", "", "Model is required")] {
+        let config = FxConfiguration(apiKey: key, model: FxModel(id: model), httpClient: http)
+        await #expect(throws: FxError.invalidInput(message)) { try await FxEngine.open(configuration: config, persistence: store) }
+    }
+    #expect(await store.loads == 0)
+    #expect(await http.count == 0)
+}
+
+@Test func durableConfigurationFailurePreservesSafeDiagnostic() async throws {
+    let store = try FxSessionStore(), http = SessionHTTP()
+    let agent = try FxAgent(configuration: .init(apiKey: "test-key", model: "", httpClient: http), store: store)
+    let session = try await agent.session(id: "invalid-model")
+    let turn = try await session.prompt("hello")
+    let result = try await turn.result
+    #expect(result.stopReason == .error && result.error == "Model is required")
+    #expect(await http.count == 0)
+    try await agent.close()
+    try await store.close()
 }

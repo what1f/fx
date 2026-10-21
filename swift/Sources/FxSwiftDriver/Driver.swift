@@ -25,6 +25,14 @@ private struct RelayedCheckpointStore: FxCheckpointPersistence {
 
 /// Test-only protocol adapter. Engine behavior stays in LibFx.
 actor Driver: FxHTTPClient, FxPersistence {
+    private var providerLabel = "gateway"
+    private var agent: FxAgent?
+    private var sessionStore: FxSessionStore?
+    private var sessionDeliveries: [String: Task<Void, Never>] = [:]
+    private var refreshTasks: [String: Task<FxSubscriptionCredentials, any Error>] = [:]
+    private var sessionTurns: [String: FxSessionTurn] = [:]
+    private var refreshOperations: [String: FxSubscription.RefreshOperation] = [:]
+    private var refreshWaiters: [String: CheckedContinuation<FxSubscriptionCredentials, any Error>] = [:]
     private var engine: FxEngine?
     private var store: (any FxPersistence)?
     private var turns: [String: FxTurn] = [:]
@@ -49,6 +57,10 @@ actor Driver: FxHTTPClient, FxPersistence {
             emit(.object(["id": id, "result": result]))
         } catch {
             var fields: [String: JSONValue] = ["message": .string(String(describing: error))]
+            if case FxError.invalidInput(let message) = error {
+                fields["message"] = .string(javascriptMessage(message))
+                fields["category"] = .string("type")
+            }
             if case FxError.noActiveTurn = error { fields["message"] = .string("no prompt is running") }
             if let catalogError = error as? FxModelCatalogError {
                 fields["message"] = .string(catalogError.localizedDescription)
@@ -91,8 +103,10 @@ actor Driver: FxHTTPClient, FxPersistence {
 
     private func run(_ value: JSONValue) async throws -> JSONValue {
         switch value["op"]?.string {
-        case "open":
+        case "open", "openAgent":
             let options = value["options"] ?? .null
+            providerLabel = options["provider"]?.string ?? options["provider"]?["name"]?.string ?? "gateway"
+            try validateRepresentation(options)
             var tools: [FxTool] = []
             if case .array(let descriptors) = options["tools"] {
                 for descriptor in descriptors {
@@ -150,6 +164,13 @@ actor Driver: FxHTTPClient, FxPersistence {
                         _ = try await self.credentials(context, saving: credentials)
                     }
                 } else { save = nil }
+                let refreshLock: FxSubscription.RefreshLock?
+                if options["hasRefreshLock"] == .bool(true) {
+                    refreshLock = { [weak self] context, operation in
+                        guard let self else { throw FxError.closed }
+                        return try await self.withRefreshLock(context, operation: operation)
+                    }
+                } else { refreshLock = nil }
                 config.provider = .subscription(FxSubscription(provider: provider, credentials: { [weak self] context in
                     guard let self else { throw FxError.closed }
                     let value = try await self.credentials(context)
@@ -159,7 +180,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                     else { expiry = nil }
                     return try FxSubscriptionCredentials(accessToken: token, refreshToken: value["refreshToken"]?.string,
                                                          accountID: value["accountId"]?.string, expiresAt: expiry)
-                }, onRefresh: save))
+                }, onRefresh: save, refreshLock: refreshLock))
             }
             if let url = options["gatewayChatUrl"]?.string, let endpoint = URL(string: url) { config.gatewayURL = endpoint }
             config.httpClient = self
@@ -190,6 +211,12 @@ actor Driver: FxHTTPClient, FxPersistence {
                     "type": .string(direction == .sent ? "acp.send" : "acp.receive"), "message": message,
                 ])]))
             }
+            if value["op"] == .string("openAgent") {
+                let sessionStore = try FxSessionStore(url: options["sessionStorePath"]?.string.map { URL(fileURLWithPath: $0) })
+                self.sessionStore = sessionStore
+                agent = try FxAgent(configuration: config, name: options["name"]?.string ?? "default", store: sessionStore)
+                return .object([:])
+            }
             let checkpoint = options["checkpoint"]?.string.flatMap { Data(base64Encoded: $0) }
             if let path = options["sqlitePath"]?.string {
                 store = try FxSQLitePersistence(url: URL(fileURLWithPath: path))
@@ -208,6 +235,70 @@ actor Driver: FxHTTPClient, FxPersistence {
                     .object(["executionId": .string($0.executionID), "name": .string($0.name), "input": $0.input])
                 }),
             ])
+        case "sessionPrompt", "sessionResume":
+            guard let agent, let sessionID = value["sessionID"]?.string else { throw FxError.closed }
+            let options = value["options"] ?? .null
+            let model = options["model"]
+            let sessionOptions = FxSessionOptions(model: model.map {
+                FxModel(id: $0.string ?? $0["id"]?.string ?? "", reasoningEffort: $0["effort"]?.string,
+                        fast: bool($0["fast"]), ultrafast: bool($0["ultrafast"]))
+            }, instructions: options["instructions"]?.string, context: options["context"])
+            let session = try await agent.session(id: sessionID, options: sessionOptions)
+            let content: [FxPromptContent]
+            if case .array(let blocks) = value["text"] {
+                content = try blocks.map { block in
+                    if block["type"] == .string("image") { return .image(try image(block)) }
+                    guard let text = block["text"]?.string else { throw FxError.invalidInput("Unsupported prompt content") }
+                    return .text(text)
+                }
+            } else { content = [.text(value["text"]?.string ?? "")] }
+            let next: FxSessionTurn
+            if value["op"] == .string("sessionResume") {
+                guard let resumed = try await session.resume() else { throw FxError.noActiveTurn }
+                next = resumed
+            } else { next = try await session.prompt(content, id: value["messageID"]?.string ?? UUID().uuidString) }
+            let token = value["turnToken"]?.string ?? next.id
+            sessionTurns[token] = next
+            emit(.object(["sessionAccepted": .string(token), "messageID": .string(next.id), "sessionID": .string(next.sessionID)]))
+            sessionDeliveries[token] = Task {
+                do {
+                    for try await event in next { emit(.object(["event": encode(event), "turnToken": .string(token)])) }
+                    let result = try await next.result
+                    var fields: [String: JSONValue] = [
+                        "id": .string(result.id), "stopReason": .string(result.stopReason.rawValue),
+                        "epoch": .number(Double(result.epoch)), "isRepeated": .bool(result.isRepeated),
+                    ]
+                    if let usage = result.usage {
+                        fields["usage"] = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(usage))
+                    }
+                    if let error = result.error { fields["error"] = .object(["message": .string(javascriptMessage(error))]) }
+                    emit(.object(["turnToken": .string(token), "completed": .object(fields)]))
+                } catch { emit(.object(["failed": .string(String(describing: error)), "turnToken": .string(token)])) }
+                sessionTurns.removeValue(forKey: token)
+                sessionDeliveries.removeValue(forKey: token)
+            }
+            return .object(["messageID": .string(next.id), "sessionID": .string(next.sessionID)])
+        case "refreshLockedOperation":
+            guard let token = value["token"]?.string, let operation = refreshOperations.removeValue(forKey: token) else { throw FxError.closed }
+            let task = Task { try await operation() }
+            refreshTasks[token] = task
+            defer { refreshTasks.removeValue(forKey: token) }
+            return encodeCredentials(try await task.value)
+        case "refreshLockResult":
+            guard let token = value["token"]?.string, let waiter = refreshWaiters.removeValue(forKey: token) else { throw FxError.closed }
+            refreshOperations.removeValue(forKey: token)
+            do { waiter.resume(returning: try decodeCredentials(value["credentials"] ?? .null)) }
+            catch { waiter.resume(throwing: error) }
+            return .null
+        case "inspectSession":
+            guard let path = value["path"]?.string, let id = value["sessionID"]?.string else { throw FxError.invalidInput("Missing inspection target") }
+            let store = try FxSessionStore(url: URL(fileURLWithPath: path))
+            do {
+                let inspected = try await store.inspect(sessionID: id, agent: value["agentName"]?.string ?? "default")
+                let entries = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(inspected.entries))
+                try await store.close()
+                return .object(["records": .array(inspected.records.map { .string($0.base64EncodedString()) }), "entries": entries])
+            } catch { try? await store.close(); throw error }
         case "listModels":
             let models = try await FxModel.available(apiKey: value["apiKey"]?.string ?? "", httpClient: self)
             return .array(models.map { .string($0.id) })
@@ -254,6 +345,10 @@ actor Driver: FxHTTPClient, FxPersistence {
             }
             return .object(["inputID": .string(receipt.id)])
         case "cancel":
+            if let token = value["turnToken"]?.string, let turn = sessionTurns[token] {
+                try await turn.cancel()
+                return .null
+            }
             if let token = value["turnToken"]?.string, let turn = turns[token] {
                 if value["reason"] == .string("handoff") { try await turn.handoff() }
                 else { await turn.cancel() }
@@ -274,6 +369,11 @@ actor Driver: FxHTTPClient, FxPersistence {
             try await engine.saveCheckpoint()
             return .null
         case "close":
+            try await agent?.close()
+            agent = nil
+            for task in Array(sessionDeliveries.values) { await task.value }
+            try await sessionStore?.close()
+            sessionStore = nil
             try await engine?.close()
             engine = nil
             if let sqlite = store as? FxSQLitePersistence { try await sqlite.close() }
@@ -343,6 +443,67 @@ actor Driver: FxHTTPClient, FxPersistence {
             } else { waiter.resume(returning: value["value"] ?? .null) }
             return .null
         default: throw FxError.invalidInput("Unknown driver operation")
+        }
+    }
+
+    // Reject shapes that cannot be represented by Swift's typed provider API.
+    private func validateRepresentation(_ options: JSONValue) throws {
+        let custom: Bool
+        if case .object = options["provider"] { custom = true } else { custom = false }
+        let subscription = ["codex", "grok"].contains(providerLabel) && !custom
+        if !custom, !["gateway", "codex", "grok"].contains(providerLabel) {
+            throw FxError.invalidInput("provider must be \"gateway\", \"codex\", \"grok\" or a custom provider")
+        }
+        for field in ["credentials", "onCredentials", "refreshLock"] {
+            if let kind = options[field + "Type"]?.string, !["function", "undefined"].contains(kind) {
+                throw FxError.invalidInput("\(field) must be a function")
+            }
+        }
+        if options["hasRefreshLock"] == .bool(true), !subscription {
+            throw FxError.invalidInput("refreshLock needs provider \"codex\" or \"grok\"")
+        }
+        if options["hasOnCredentials"] == .bool(true), !subscription {
+            throw FxError.invalidInput("onCredentials needs provider \"codex\" or \"grok\"")
+        }
+        if options["hasCredentials"] == .bool(true), !subscription, !custom {
+            throw FxError.invalidInput("credentials needs provider \"codex\" or \"grok\" or a custom provider")
+        }
+        if subscription, options["hasCredentials"] != .bool(true) {
+            throw FxError.invalidInput("provider \"\(providerLabel)\" needs a credentials() function")
+        }
+        if case .object(let fields) = options["provider"] {
+            for key in fields.keys.sorted() where !["name", "baseUrl", "models"].contains(key) {
+                throw FxError.invalidInput("unknown field \(key)")
+            }
+            if case .object(let models) = fields["models"] {
+                for model in models.values {
+                    if case .object(let capabilities) = model {
+                        for key in capabilities.keys.sorted() where !["contextWindow", "maxOutputTokens", "supportsVision", "supportsToolUse"].contains(key) {
+                            throw FxError.invalidInput("unknown field \(key)")
+                        }
+                        for key in ["supportsVision", "supportsToolUse"] {
+                            if let value = capabilities[key], bool(value) == nil { throw FxError.invalidInput("\(key) must be a boolean") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func javascriptMessage(_ message: String) -> String {
+        switch message {
+        case "Invalid provider name": return "provider.name must be 1 to 64 letters, digits, underscores or hyphens, starting with a letter"
+        case "Provider URL must use HTTPS or local HTTP, without credentials, query, or fragment":
+            return "provider URL must use https, or http on localhost, without credentials, a query or a fragment"
+        case "Output token limit must be less than the context window": return "maxOutputTokens must be less than contextWindow"
+        case "API key is required": return "apiKey is required"
+        case "Model is required":
+            if providerLabel == "gateway" { return "Model is required" }
+            if ["codex", "grok"].contains(providerLabel) {
+                return "provider \"\(providerLabel)\" needs a model; fx's default model is an AI Gateway id"
+            }
+            return "a custom provider needs a model"
+        default: return message
         }
     }
 
@@ -457,6 +618,39 @@ actor Driver: FxHTTPClient, FxPersistence {
         } onCancel: { Task { await self.cancelCredentials(token) } }
     }
 
+    private func encodeCredentials(_ value: FxSubscriptionCredentials) -> JSONValue {
+        .object(["accessToken": .string(value.accessToken), "refreshToken": value.refreshToken.map(JSONValue.string) ?? .null,
+                 "accountId": value.accountID.map(JSONValue.string) ?? .null,
+                 "expiresAt": value.expiresAt.map { .number($0.timeIntervalSince1970 * 1000) } ?? .null])
+    }
+
+    private func decodeCredentials(_ value: JSONValue) throws -> FxSubscriptionCredentials {
+        guard let token = value["accessToken"]?.string else { throw FxError.invalidInput("Refresh lock returned no credentials") }
+        let expiry: Date?
+        if case .number(let ms) = value["expiresAt"] { expiry = Date(timeIntervalSince1970: ms / 1000) } else { expiry = nil }
+        return try FxSubscriptionCredentials(accessToken: token, refreshToken: value["refreshToken"]?.string,
+                                             accountID: value["accountId"]?.string, expiresAt: expiry)
+    }
+
+    private func withRefreshLock(_ context: FxCredentialRequest, operation: @escaping FxSubscription.RefreshOperation) async throws -> FxSubscriptionCredentials {
+        let token = UUID().uuidString
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { waiter in
+                refreshOperations[token] = operation
+                refreshWaiters[token] = waiter
+                emit(.object(["refreshLockRequest": .object(["token": .string(token), "provider": .string(context.provider),
+                    "sessionId": context.sessionID.map(JSONValue.string) ?? .null])]))
+            }
+        } onCancel: { Task { await self.cancelRefreshLock(token) } }
+    }
+
+    private func cancelRefreshLock(_ token: String) {
+        refreshTasks.removeValue(forKey: token)?.cancel()
+        refreshOperations.removeValue(forKey: token)
+        refreshWaiters.removeValue(forKey: token)?.resume(throwing: FxError.cancelled)
+    }
+
     private func cancelCredentials(_ token: String) {
         credentialWaiters.removeValue(forKey: token)?.resume(throwing: FxError.cancelled)
     }
@@ -470,7 +664,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                 emit(.object(["toolRequest": .object([
                     "id": .number(Double(id)), "name": .string(name), "input": input,
                     "executionId": .string(context.executionID), "sessionId": .string(context.sessionID),
-                    "turnId": .string(context.turnID),
+                    "turnId": .string(context.turnID), "context": context.context ?? .null,
                 ])]))
             }
         } onCancel: { Task { await self.cancelTool(id) } }
@@ -520,6 +714,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                 Task { await driver.handle(value) }
             }
         } catch { await driver.emit(.object(["fatal": .string(String(describing: error))])) }
-        await driver.handle(.object(["op": .string("close")]))
+        // A graceful caller sends close before ending input. EOF without that
+        // request means the host died; do not wait for callbacks from a dead host.
     }
 }

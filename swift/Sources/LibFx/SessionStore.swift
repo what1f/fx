@@ -74,6 +74,14 @@ public actor FxSessionStore {
         }
     }
 
+    func pendingID(session: String, agent: String) throws -> String? {
+        try checkAgent(session, agent: agent)
+        return try database.statement("SELECT id FROM fx_inputs WHERE session=? AND result IS NULL ORDER BY sequence LIMIT 1", [.text(session)]) { statement in
+            guard try database.step(statement) else { return nil }
+            return database.text(statement, column: 0)
+        }
+    }
+
     func hasWork(session: String, agent: String) throws -> Bool {
         try checkAgent(session, agent: agent)
         return try database.statement("SELECT 1 FROM fx_inputs WHERE session=? AND result IS NULL LIMIT 1", [.text(session)]) { try database.step($0) }
@@ -221,6 +229,36 @@ public actor FxSessionStore {
                     event: try JSONDecoder().decode(FxSessionEvent.self, from: database.bytes(statement, column: 2))))
             }
             return entries
+        }
+    }
+
+    /// Raw stored payloads for the cross-language privacy assertions.
+    @_spi(Conformance) public func inspect(sessionID: String, agent: String) throws -> (records: [Data], entries: [FxSessionEntry]) {
+        try database.transaction(mode: "DEFERRED") {
+            try checkAgent(sessionID, agent: agent)
+            var records: [Data] = []
+            for (sql, columns) in [
+                ("SELECT content,options,result FROM fx_inputs WHERE session=? ORDER BY sequence", 3),
+                ("SELECT data FROM fx_session_events WHERE session=? ORDER BY cursor", 1),
+                ("SELECT data FROM fx_session_records WHERE session=? ORDER BY cursor", 1),
+                ("SELECT checkpoint FROM fx_sessions WHERE id=?", 1),
+            ] {
+                try database.statement(sql, [.text(sessionID)]) { statement in
+                    while try database.step(statement) {
+                        for column in 0..<Int32(columns) where sqlite3_column_type(statement, column) != SQLITE_NULL {
+                            records.append(database.bytes(statement, column: column))
+                        }
+                    }
+                }
+            }
+            var events: [FxSessionEntry] = [], cursor: Int64 = 0
+            while true {
+                let page = try entries(session: sessionID, agent: agent, after: cursor)
+                events.append(contentsOf: page)
+                guard let last = page.last, page.count == 128 else { break }
+                cursor = last.cursor
+            }
+            return (records, events)
         }
     }
 

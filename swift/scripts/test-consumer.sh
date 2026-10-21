@@ -122,6 +122,7 @@ struct SubscriptionHTTP: FxHTTPClient {
         }
         let repeated = try await session.prompt("ignored", id: durable.id)
         guard try await repeated.result.isRepeated else { throw FxPersistenceError.invalidJournal }
+        guard try await session.resume() == nil else { throw FxPersistenceError.invalidJournal }
         try await agent.close()
         try await sessions.close()
         let subscription = FxSubscription(provider: .grok, credentials: { _ in

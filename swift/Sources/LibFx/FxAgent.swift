@@ -36,11 +36,16 @@ public actor FxAgent {
         return FxSessionTurn(id: id, sessionID: session, isRepeated: repeated, agent: self)
     }
 
-    func resume(_ session: String) async throws {
+    func resume(_ session: String) async throws -> FxSessionTurn? {
         guard !closed else { throw FxError.closed }
         intakes += 1
         defer { intakes -= 1 }
-        if try await store.hasWork(session: session, agent: name) { kick(session) }
+        let pendingID: String?
+        do { pendingID = try await store.pendingID(session: session, agent: name) }
+        catch FxSessionError.notFound { return nil }
+        guard let id = pendingID else { return nil }
+        kick(session)
+        return FxSessionTurn(id: id, sessionID: session, isRepeated: false, agent: self)
     }
 
     func failure(_ session: String) throws {
@@ -103,7 +108,10 @@ public actor FxAgent {
             engine = try await FxEngine.open(configuration: config, sessionID: lease.sessionID,
                                              persistence: SessionPersistence(store: store, lease: lease))
         } catch let error as FxPersistenceError { throw error }
-        catch {
+        catch FxError.invalidInput(let message) {
+            try await finish(input, lease: lease, reason: .error, error: message)
+            return
+        } catch {
             try await finish(input, lease: lease, reason: .error, error: "Could not open conversation")
             return
         }

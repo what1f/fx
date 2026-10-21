@@ -3,6 +3,8 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 const defaultDriver = process.env.LIBFX_SWIFT_DRIVER || join(execFileSync('swift', [
   'build', '--package-path', fileURLToPath(new URL('../..', import.meta.url)), '--show-bin-path',
@@ -14,7 +16,8 @@ export async function createFxEngine(options = {}) {
   const pending = new Map();
   const tools = new Map((options.tools || []).map(tool => [tool.name, tool]));
   const toolControllers = new Map();
-  const turnStates = new Map(), followUps = new Map();
+  const turnStates = new Map(), followUps = new Map(), acceptedSessions = new Map();
+  const sessionIntakes = new Set();
   const fetchControllers = new Map();
   const fetchReaders = new Map();
   let nextID = 1, turn = null, closed = false, stderr = '';
@@ -25,6 +28,7 @@ export async function createFxEngine(options = {}) {
     for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
     for (const state of turnStates.values()) state.fail(error);
+    for (const waiter of acceptedSessions.values()) waiter.reject(error);
     for (const queued of followUps.values()) { queued.rejectAccepted(error); queued.rejectTurn(error); }
   });
   function request(op, args = {}) {
@@ -42,6 +46,7 @@ export async function createFxEngine(options = {}) {
     for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
     for (const state of turnStates.values()) state.fail(error);
+    for (const waiter of acceptedSessions.values()) waiter.reject(error);
     for (const queued of followUps.values()) { queued.rejectAccepted(error); queued.rejectTurn(error); }
     resolve({ code, signal });
   }));
@@ -51,7 +56,16 @@ export async function createFxEngine(options = {}) {
   });
   lines.on('line', line => {
     const value = JSON.parse(line);
-    if (value.credentialRequest) {
+    if (value.refreshLockRequest) {
+      const call = value.refreshLockRequest;
+      Promise.resolve().then(() => options.refreshLock({ provider: call.provider, sessionId: call.sessionId },
+        () => request('refreshLockedOperation', { token: call.token })))
+        .then(credentials => request('refreshLockResult', { token: call.token, credentials }),
+          () => request('refreshLockResult', { token: call.token })).catch(() => {});
+    } else if (value.sessionAccepted) {
+      acceptedSessions.get(value.sessionAccepted)?.resolve({ id: value.messageID, sessionId: value.sessionID });
+      acceptedSessions.delete(value.sessionAccepted);
+    } else if (value.credentialRequest) {
       const call = value.credentialRequest;
       Promise.resolve().then(async () => {
         const info = { provider: call.provider, sessionId: call.sessionId };
@@ -180,7 +194,7 @@ export async function createFxEngine(options = {}) {
       const owner = [...turnStates.values()].find(state => state.public.id === call.turnId);
       if (owner?.signal?.aborted) return;
       Promise.resolve().then(() => tools.get(call.name).execute(call.input, {
-        signal: controller.signal, executionId: call.executionId, sessionId: call.sessionId,
+        signal: controller.signal, executionId: call.executionId, sessionId: call.sessionId, context: call.context,
       })).then(result => controller.signal.aborted ? undefined : request('toolResult', { toolID: call.id,
         ...(result?.type === 'libfx.tool-result' ? { rich: result } : {
           content: typeof result === 'string' ? result : JSON.stringify(result) ?? 'null',
@@ -191,19 +205,63 @@ export async function createFxEngine(options = {}) {
   });
   const { fetch, nativeAddon, backend, onEvent, tools: _tools, checkpoint, persistence, ...configuration } = options;
   try {
+    if (options.__inspect) {
+      try { return await request('inspectSession', { path: options.sessionStorePath, sessionID: options.sessionID, agentName: options.name }); }
+      finally { child.stdin.end(); await exited; lines.close(); }
+    }
     if (options.__listModels) {
       try { return await request('listModels', { apiKey: options.apiKey }); }
       finally { child.stdin.end(); await exited; lines.close(); }
     }
-    const opened = await request('open', { options: {
+    const opened = await request(options.__agent ? 'openAgent' : 'open', { options: {
       ...configuration,
       hasCredentials: typeof options.credentials === 'function',
+      hasRefreshLock: typeof options.refreshLock === 'function',
+      credentialsType: typeof options.credentials, onCredentialsType: typeof options.onCredentials,
+      refreshLockType: typeof options.refreshLock,
       hasOnCredentials: typeof options.onCredentials === 'function',
       hasPersistence: Boolean(persistence),
       hasCheckpointPersistence: typeof persistence?.saveCheckpoint === 'function',
       ...(checkpoint ? { checkpoint: Buffer.from(checkpoint).toString('base64') } : {}),
       tools: (options.tools || []).map(({ execute, ...descriptor }) => descriptor),
     } });
+    if (options.__agent) return {
+      sessionPrompt(sessionID, text, messageID, sessionOptions = {}, resume = false) {
+        const token = randomUUID();
+        const state = createTurn(() => request('cancel', { turnToken: token }),
+          () => Promise.reject(new Error('Session steering is not implemented')),
+          () => Promise.reject(new Error('Session withdrawal is not implemented')));
+        state.public.id = messageID;
+        turnStates.set(token, state);
+        const accepted = new Promise((resolve, reject) => acceptedSessions.set(token, { resolve, reject }));
+        state.public.accepted = accepted;
+        accepted.catch(() => {});
+        const intake = encodePrompt(text).then(text => request(resume ? 'sessionResume' : 'sessionPrompt', { sessionID, text, messageID,
+          options: sessionOptions, turnToken: token })).catch(error => {
+          acceptedSessions.get(token)?.reject(error);
+          acceptedSessions.delete(token);
+          state.fail(error);
+          turnStates.delete(token);
+        }).finally(() => sessionIntakes.delete(intake));
+        sessionIntakes.add(intake);
+        return state.public;
+      },
+      async __killForTest() {
+        closed = true;
+        child.kill('SIGKILL');
+        const status = await exited;
+        lines.close();
+        if (stderr) throw new Error(stderr);
+        return status;
+      },
+      async close() {
+        if (closed) return;
+        closed = true;
+        await Promise.allSettled([...sessionIntakes]);
+        try { await request('close'); } finally { child.stdin.end(); await exited; lines.close(); }
+        if (stderr) throw new Error(stderr);
+      },
+    };
     resumable = opened.resumable;
     recoveryCalls = opened.runningCalls;
     recoveryTurnID = opened.openTurnId;
@@ -329,3 +387,62 @@ function createTurn(cancel, steer, withdraw) {
 
 export function supportsJspi() { return false; }
 export function listModels(options = {}) { return createFxEngine({ ...options, __listModels: true }); }
+
+
+const temporaryStores = new Set();
+process.once('exit', () => { for (const path of temporaryStores) rmSync(path, { recursive: true, force: true }); });
+
+// Test storage descriptors only. SQLite ownership and durable behavior stay in Swift.
+export function memory() {
+  const directory = mkdtempSync(join(tmpdir(), 'libfx-swift-session-'));
+  temporaryStores.add(directory);
+  const path = join(directory, 'sessions.sqlite');
+  return { __swiftSessionPath: path,
+    create() { return {
+      async session(sessionID) {
+        const snapshot = await createFxEngine({ __inspect: true, sessionStorePath: path, sessionID });
+        return {
+          async readSince(cursor) {
+            if (cursor !== 0) throw new Error('Inspection supports only a complete snapshot');
+            return snapshot.records.map(data => new Uint8Array(Buffer.from(data, 'base64')));
+          },
+          ui: {
+            async length() { return snapshot.entries.length; },
+            read(start = 0) { return new ReadableStream({ start(controller) {
+              for (const entry of snapshot.entries.slice(start)) controller.enqueue(new TextEncoder().encode(JSON.stringify(entry) + '\n'));
+              controller.close();
+            } }); },
+          },
+        };
+      },
+    }; },
+  };
+}
+
+export function createFxAgent(options = {}) {
+  const durability = options.durability ?? memory();
+  const ready = createFxEngine({ ...options, __agent: true, sessionStorePath: durability.__swiftSessionPath });
+  ready.catch(() => {});
+  function turnView(sessionID, sessionOptions, input, promptOptions = {}, resume = false) {
+    let id = promptOptions.id ?? randomUUID();
+    const started = ready.then(agent => agent.sessionPrompt(sessionID, input, id, sessionOptions, resume));
+    const accepted = started.then(turn => turn.accepted).then(receipt => { id = receipt.id; return receipt; });
+    const result = started.then(turn => turn.result);
+    accepted.catch(() => {}); result.catch(() => {});
+    return { get id() { return id; }, accepted, result,
+      cancel: () => started.then(turn => turn.cancel()),
+      async *[Symbol.asyncIterator]() { yield* await started; },
+    };
+  }
+  return {
+    session(sessionID = randomUUID(), sessionOptions = {}) {
+      return {
+        id: sessionID,
+        prompt(input, promptOptions) { return turnView(sessionID, sessionOptions, input, promptOptions); },
+        resume() { return turnView(sessionID, sessionOptions, '', {}, true); },
+      };
+    },
+    async __killForTest() { return (await ready).__killForTest(); },
+    async close() { await (await ready).close(); },
+  };
+}
