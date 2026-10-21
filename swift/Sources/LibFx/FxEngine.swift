@@ -61,6 +61,9 @@ public actor FxEngine {
         guard !configuration.model.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw FxError.invalidInput("Model is required")
         }
+        if let effort = configuration.model.reasoningEffort, effort.utf8.count > 64 {
+            throw FxError.invalidInput("Reasoning effort must not exceed 64 bytes")
+        }
         let loaded: LoadedJournal?
         if let persistence { loaded = try LoadedJournal(try await persistence.load()) }
         else { loaded = nil }

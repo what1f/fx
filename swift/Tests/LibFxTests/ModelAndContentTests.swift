@@ -5,10 +5,12 @@ import Testing
 private actor RequestRecorder: FxHTTPClient {
     var calls: [JSONValue] = []
     var frames: [JSONValue] = []
+    var catalogRequests = 0
     func record(_ frame: JSONValue) { frames.append(frame) }
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         let payload: String
         if request.httpMethod == "GET" {
+            catalogRequests += 1
             payload = #"{"data":[{"id":"swift/vision","type":"language","tags":["vision","tool-use","reasoning"],"reasoning_options":[{"type":"effort","values":["low","high"]}],"fast_options":[{"type":"toggle"}]}]}"#
         } else {
             calls.append(try JSONDecoder().decode(JSONValue.self, from: request.httpBody!))
@@ -43,6 +45,50 @@ private actor RequestRecorder: FxHTTPClient {
         #expect(data?["code"] == .string("LIBFX_MODEL_UNSUPPORTED_EFFORT"))
         #expect(data?["model"] == .string("swift/vision"))
     }
+}
+
+@Test(arguments: [String(repeating: "x", count: 65), String(repeating: "é", count: 33)])
+func oversizedEffortIsRejectedBeforeCoreAllocation(effort: String) async throws {
+    let recorder = RequestRecorder()
+    var configuration = FxConfiguration(apiKey: "test-key", model: FxModel(id: "swift/vision", reasoningEffort: effort), httpClient: recorder)
+    configuration.wireObserver = { direction, frame in
+        if direction == .sent { await recorder.record(frame) }
+    }
+    await #expect(throws: FxError.invalidInput("Reasoning effort must not exceed 64 bytes")) {
+        try await FxEngine.open(configuration: configuration)
+    }
+    #expect(await recorder.frames.isEmpty)
+    #expect(await recorder.catalogRequests == 0)
+    #expect(await recorder.calls.isEmpty)
+}
+
+@Test func malformedEffortIsRejectedByTheCoreWithoutNetwork() async throws {
+    let recorder = RequestRecorder()
+    do {
+        let engine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "test-key",
+            model: FxModel(id: "swift/vision", reasoningEffort: "turbo!"), httpClient: recorder))
+        try await engine.close()
+        Issue.record("Malformed effort was accepted")
+    } catch FxError.rpc(let code, let message, _) {
+        #expect(code == -32602)
+        #expect(message == "Invalid reasoning effort")
+    }
+    #expect(await recorder.catalogRequests == 0)
+    #expect(await recorder.calls.isEmpty)
+}
+
+@Test func defaultEffortAndDisabledFastAvoidCatalogAndProviderOverrides() async throws {
+    let recorder = RequestRecorder()
+    let engine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "test-key",
+        model: FxModel(id: "swift/vision", reasoningEffort: "default", fast: false), httpClient: recorder))
+    #expect(await recorder.catalogRequests == 0)
+    let turn = try await engine.prompt("hello")
+    #expect(try await turn.result.stopReason == .endTurn)
+    let requests = await recorder.calls
+    #expect(requests.count == 1)
+    #expect(requests.first?["reasoning"] == nil)
+    #expect(requests.first?["providerOptions"]?["gateway"]?["speed"] == nil)
+    try await engine.close()
 }
 
 @Test func imageBytesReachProviderWithoutEnteringACPFrames() async throws {

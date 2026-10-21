@@ -10,6 +10,29 @@ const defaultDriver = process.env.LIBFX_SWIFT_DRIVER || join(execFileSync('swift
   'build', '--package-path', fileURLToPath(new URL('../..', import.meta.url)), '--show-bin-path',
 ], { encoding: 'utf8' }).trim(), 'FxSwiftDriver');
 
+// Normalize JavaScript-only shapes at the test boundary. The Swift SDK has one
+// typed model value; capability and effort-string validation stay in its core.
+function swiftModel(options) {
+  const object = options.model !== null && typeof options.model === 'object';
+  if (object) {
+    if (['effort', 'fast', 'ultrafast'].some(key => Object.hasOwn(options, key))) {
+      throw new TypeError('model options cannot be mixed with top-level settings');
+    }
+    for (const key of Object.keys(options.model)) {
+      if (!['id', 'effort', 'fast', 'ultrafast'].includes(key)) throw new TypeError(`unsupported model option: ${key}`);
+    }
+    if (typeof options.model.id !== 'string') throw new TypeError('model.id must be a string');
+  } else if (options.model !== undefined && typeof options.model !== 'string') {
+    throw new TypeError('model must be a string or object');
+  }
+  const model = object ? options.model : { id: options.model, effort: options.effort, fast: options.fast, ultrafast: options.ultrafast };
+  if (model.effort !== undefined && typeof model.effort !== 'string') throw new TypeError('effort must be a string');
+  for (const key of ['fast', 'ultrafast']) {
+    if (model[key] !== undefined && typeof model[key] !== 'boolean') throw new TypeError(`${key} must be a boolean`);
+  }
+  return model;
+}
+
 export async function createFxEngine(options = {}) {
   const child = spawn(process.env.LIBFX_SWIFT_DRIVER || defaultDriver, [], { stdio: ['pipe', 'pipe', 'pipe'] });
   const lines = createInterface({ input: child.stdout });
@@ -91,8 +114,13 @@ export async function createFxEngine(options = {}) {
       const waiter = pending.get(value.id);
       pending.delete(value.id);
       if (value.error) {
-        const ErrorType = value.error.category === 'type' ? TypeError : value.error.category === 'range' ? RangeError : Error;
-        const error = new ErrorType(value.error.message);
+        let ErrorType = value.error.category === 'type' ? TypeError : value.error.category === 'range' ? RangeError : Error;
+        let message = value.error.message;
+        if (message === 'Invalid reasoning effort') {
+          ErrorType = TypeError;
+          message = 'effort must contain 1 to 64 letters, digits, periods, underscores or hyphens';
+        }
+        const error = new ErrorType(message);
         if (value.error.data) Object.assign(error, value.error.data);
         waiter?.reject(error);
       } else waiter?.resolve(value.result);
@@ -220,6 +248,7 @@ export async function createFxEngine(options = {}) {
     }
     const opened = await request(options.__agent ? 'openAgent' : 'open', { options: {
       ...configuration,
+      model: swiftModel(options),
       ...(options.hooks || typeof onEvent === 'function' ? { hooks: options.hooks ?? {} } : {}),
       hasCredentials: typeof options.credentials === 'function',
       hasRefreshLock: typeof options.refreshLock === 'function',

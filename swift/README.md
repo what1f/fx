@@ -43,6 +43,8 @@ Read a turn's events once. Await `result` to observe its completion. Call `cance
 
 Cancelling a Swift task that awaits `turn.result` cancels the turn and makes that waiter throw `CancellationError`.
 
+Reasoning effort names must fit in 64 UTF-8 bytes. An oversized name throws `FxError.invalidInput` before loading saved history or creating the runtime. The core validates effort names and model support.
+
 ## Discover models and steer a turn
 
 ```swift

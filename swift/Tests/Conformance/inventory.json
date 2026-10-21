@@ -23,13 +23,13 @@
       "upstream": "sdk/tests/test-agent-effort.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "partial: valid and unsupported capability cases passed; JavaScript error-class assertion differs"
+      "status": "passed: complete upstream native file unchanged through Swift; real core validates capabilities and effort strings; adapter alone translates JavaScript model shapes, deprecated top-level options, and error classes"
     },
     {
       "upstream": "sdk/tests/test-agent-fast.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete upstream native file unchanged through Swift; real core validates capabilities and effort strings; adapter alone translates JavaScript model shapes, deprecated top-level options, and error classes"
     },
     {
       "upstream": "sdk/tests/test-agent-grok.mjs",

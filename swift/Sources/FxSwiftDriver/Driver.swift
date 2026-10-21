@@ -60,7 +60,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             var fields: [String: JSONValue] = ["message": .string(String(describing: error))]
             if case FxError.invalidInput(let message) = error {
                 fields["message"] = .string(javascriptMessage(message))
-                fields["category"] = .string("type")
+                fields["category"] = .string(message == "Reasoning effort must not exceed 64 bytes" ? "range" : "type")
             }
             if case FxError.noActiveTurn = error { fields["message"] = .string("no prompt is running") }
             if case FxSessionError.messageIDInUse = error {
@@ -128,10 +128,10 @@ actor Driver: FxHTTPClient, FxPersistence {
             }
             let modelOption = options["model"] ?? .null
             let model = FxModel(
-                id: modelOption.string ?? modelOption["id"]?.string ?? "",
-                reasoningEffort: modelOption["effort"]?.string ?? options["effort"]?.string,
-                fast: bool(modelOption["fast"] ?? options["fast"]),
-                ultrafast: bool(modelOption["ultrafast"] ?? options["ultrafast"])
+                id: modelOption["id"]?.string ?? "",
+                reasoningEffort: modelOption["effort"]?.string,
+                fast: bool(modelOption["fast"]),
+                ultrafast: bool(modelOption["ultrafast"])
             )
             var config = FxConfiguration(
                 apiKey: options["apiKey"]?.string ?? "", model: model,
