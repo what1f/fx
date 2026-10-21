@@ -75,6 +75,20 @@ struct ProviderSearchHTTP: FxHTTPClient {
         return try await MockHTTP().send(request)
     }
 }
+actor ToolInputHTTP: FxHTTPClient {
+    private var posts = 0
+    let input: JSONValue
+    init(input: JSONValue) { self.input = input }
+    func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        if request.httpMethod == "GET" { return try await ProviderSearchHTTP().send(request) }
+        posts += 1
+        if posts != 1 { return try await MockHTTP().send(request) }
+        let call = JSONValue.object(["type": .string("tool-call"), "toolCallId": .string("consumer-call"),
+                                    "toolName": .string("probe"), "input": input])
+        let payload = "data: \(String(decoding: try JSONEncoder().encode(call), as: UTF8.self))\n\ndata: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"tool-calls\",\"raw\":\"tool-calls\"}}\n\ndata: [DONE]\n\n"
+        return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { $0.yield(Data(payload.utf8)); $0.finish() })
+    }
+}
 actor PreparingHTTP: FxHTTPClient {
     private var blocked = true
     func unblock() { blocked = false }
@@ -111,6 +125,24 @@ struct SubscriptionHTTP: FxHTTPClient {
     static func main() async throws {
         let models = try await FxModel.available(apiKey: "consumer-test-key", httpClient: MockHTTP())
         guard models.map(\.id) == ["swift/consumer"] else { throw FxModelCatalogError.malformedResponse }
+        let toolInput = JSONValue.object(["content": .string(String(repeating: "x", count: 128 * 1024))])
+        let tool = FxTool(name: "probe", description: "Probe", inputSchema: .object(["type": .string("object")]), isIdempotent: true) { input, _ in
+            guard input == toolInput else { throw FxError.protocolViolation("Incomplete tool arguments") }
+            return "received"
+        }
+        let toolEngine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "consumer-test-key", model: "swift/consumer", tools: [tool], httpClient: ToolInputHTTP(input: toolInput)))
+        let toolTurn = try await toolEngine.prompt("probe")
+        var previews = 0
+        for try await event in toolTurn {
+            if case .toolStarted(_, "probe", .truncated(let preview)) = event {
+                guard preview.utf8.count == 64 * 1024 else { throw FxError.protocolViolation("Unexpected preview size") }
+                previews += 1
+            }
+        }
+        guard previews == 1, try await toolTurn.result.stopReason == .endTurn else {
+            throw FxError.protocolViolation("Missing tool preview")
+        }
+        try await toolEngine.close()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try FxSQLitePersistence(url: directory.appendingPathComponent("conversation.sqlite"))

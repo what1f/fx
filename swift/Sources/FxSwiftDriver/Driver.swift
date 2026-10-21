@@ -779,7 +779,13 @@ actor Driver: FxHTTPClient, FxPersistence {
             return .object(value)
         case .toolStarted(let id, let name, let input):
             var value: [String: JSONValue] = ["type": .string("tool_start"), "id": .string(id), "name": .string(name)]
-            if let input { value["input"] = input }
+            switch input {
+            case .complete(let input): value["input"] = input
+            case .truncated(let preview):
+                value["inputTruncated"] = .bool(true)
+                value["inputPreview"] = .string(preview)
+            case nil: break
+            }
             return .object(value)
         case .toolFinished(let id, let name, let content, let isError):
             var value: [String: JSONValue] = ["type": .string("tool_end"), "id": .string(id), "name": .string(name), "isError": .bool(isError)]

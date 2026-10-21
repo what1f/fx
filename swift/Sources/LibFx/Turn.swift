@@ -4,8 +4,58 @@ public enum FxEvent: Sendable, Equatable, Codable {
     case text(String)
     case reasoning(String)
     case userMessage(String, id: String?)
-    case toolStarted(id: String, name: String, input: JSONValue?)
+    case toolStarted(id: String, name: String, input: FxToolInput?)
     case toolFinished(id: String, name: String, content: String?, isError: Bool)
+
+    // Keep the event record independent of the public display-input enum.
+    private enum Record: Codable {
+        case text(String)
+        case reasoning(String)
+        case userMessage(String, id: String?)
+        case toolStarted(id: String, name: String, input: JSONValue?, inputPreview: String?)
+        case toolFinished(id: String, name: String, content: String?, isError: Bool)
+    }
+
+    public init(from decoder: any Decoder) throws {
+        switch try Record(from: decoder) {
+        case .text(let text): self = .text(text)
+        case .reasoning(let text): self = .reasoning(text)
+        case .userMessage(let text, let id): self = .userMessage(text, id: id)
+        case .toolStarted(let id, let name, let input, let preview):
+            if let preview {
+                guard input == nil, preview.utf8.count <= 64 * 1024 else {
+                    throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid tool input preview"))
+                }
+                self = .toolStarted(id: id, name: name, input: .truncated(preview: preview))
+            } else {
+                self = .toolStarted(id: id, name: name, input: try FxToolInput.display(input))
+            }
+        case .toolFinished(let id, let name, let content, let isError):
+            self = .toolFinished(id: id, name: name, content: content, isError: isError)
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        let record: Record
+        switch self {
+        case .text(let text): record = .text(text)
+        case .reasoning(let text): record = .reasoning(text)
+        case .userMessage(let text, let id): record = .userMessage(text, id: id)
+        case .toolStarted(let id, let name, let input):
+            switch input {
+            case .complete(let value): record = .toolStarted(id: id, name: name, input: value, inputPreview: nil)
+            case .truncated(let preview):
+                guard preview.utf8.count <= 64 * 1024 else {
+                    throw EncodingError.invalidValue(preview, .init(codingPath: encoder.codingPath, debugDescription: "Tool input preview exceeds the size limit"))
+                }
+                record = .toolStarted(id: id, name: name, input: nil, inputPreview: preview)
+            case nil: record = .toolStarted(id: id, name: name, input: nil, inputPreview: nil)
+            }
+        case .toolFinished(let id, let name, let content, let isError):
+            record = .toolFinished(id: id, name: name, content: content, isError: isError)
+        }
+        try record.encode(to: encoder)
+    }
 }
 
 public struct FxUsage: Sendable, Equatable, Codable {

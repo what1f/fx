@@ -59,7 +59,7 @@
       "upstream": "sdk/tests/test-agent-reserved-tool-names.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged native file through Swift; write_file and edit_file host executors receive full arguments and return successful results under their original names; this fixture does not qualify a public permission callback"
     },
     {
       "upstream": "sdk/tests/test-agent-steering.mjs",
@@ -77,7 +77,7 @@
       "upstream": "sdk/tests/test-agent-tool-start.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: all upstream assertions through Swift; loader normalizes only the expected JSON preview object-key order to Swift canonical order; five native tests separately cover byte boundaries, UTF-8, full executor input, stable event records and SQLite reopen"
     },
     {
       "upstream": "sdk/tests/test-agent-transport-retry.mjs",

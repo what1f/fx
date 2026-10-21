@@ -470,11 +470,16 @@ public actor FxEngine {
             } catch { try? await rpc.respond(id: id, error: .transport(String(describing: error))) }
         } else if message.method == "session/update", message.params["sessionId"]?.string == sessionID {
             guard !handedOff else { return }
-            if let event = event(for: message.params["update"] ?? .null), let output {
-                if case .dropped = output.yield(event) {
-                    output.finish(throwing: FxError.outputOverflow)
-                    if let turnID { await cancel(turn: turnID) }
+            do {
+                if let event = try event(for: message.params["update"] ?? .null), let output {
+                    if case .dropped = output.yield(event) {
+                        output.finish(throwing: FxError.outputOverflow)
+                        if let turnID { await cancel(turn: turnID) }
+                    }
                 }
+            } catch {
+                output?.finish(throwing: error)
+                if let turnID { await cancel(turn: turnID) }
             }
         } else if message.method == "libfx/tool_call", let requestID = message.id {
             let params = message.params
@@ -512,7 +517,7 @@ public actor FxEngine {
         }
     }
 
-    private func event(for update: JSONValue) -> FxEvent? {
+    private func event(for update: JSONValue) throws -> FxEvent? {
         switch update["sessionUpdate"]?.string {
         case "agent_message_chunk":
             guard let text = update["content"]?["text"]?.string, !text.hasPrefix("[context]") else { return nil }
@@ -525,7 +530,7 @@ public actor FxEngine {
             guard let id = update["toolCallId"]?.string, toolNames[id] == nil else { return nil }
             let name = update["name"]?.string ?? update["toolName"]?.string ?? update["title"]?.string ?? "tool"
             toolNames[id] = name
-            return .toolStarted(id: id, name: name, input: update["rawInput"])
+            return .toolStarted(id: id, name: name, input: try FxToolInput.display(update["rawInput"]))
         case "tool_call_update":
             guard let id = update["toolCallId"]?.string, let status = update["status"]?.string,
                   status == "completed" || status == "failed" else { return nil }
