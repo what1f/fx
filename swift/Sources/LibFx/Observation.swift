@@ -15,6 +15,7 @@ public struct FxObservation: Sendable, Codable, Equatable {
         case journalCommitted = "journal.commit", journalRestored = "journal.restore", journalError = "journal.error"
         case checkpointSaved = "checkpoint.save", checkpointError = "checkpoint.error"
         case checkpointMismatch = "checkpoint.mismatch"
+        case sessionDeadline = "session.deadline"
     }
 
     public let version: Int

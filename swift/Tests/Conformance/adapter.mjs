@@ -75,7 +75,7 @@ export async function createFxEngine(options = {}) {
           () => request('credentialResult', { token: call.token })).catch(() => {});
     } else if (value.observation) {
       const event = value.observation;
-      if (['journal.restore', 'checkpoint.save', 'checkpoint.error', 'checkpoint.mismatch'].includes(event.type)) {
+      if (['journal.restore', 'checkpoint.save', 'checkpoint.error', 'checkpoint.mismatch', 'session.deadline'].includes(event.type)) {
         try { options.onEvent?.({ type: event.type === 'journal.restore' ? 'journal.open' : event.type,
           timestamp: event.timestamp, sessionId: event.sessionId, ...event.data }); } catch {}
       }
@@ -421,11 +421,11 @@ const temporaryStores = new Set();
 process.once('exit', () => { for (const path of temporaryStores) rmSync(path, { recursive: true, force: true }); });
 
 // Test storage descriptors only. SQLite ownership and durable behavior stay in Swift.
-export function memory() {
+export function memory({ maxDurationMs, reserveMs } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'libfx-swift-session-'));
   temporaryStores.add(directory);
   const path = join(directory, 'sessions.sqlite');
-  return { __swiftSessionPath: path,
+  return { __swiftSessionPath: path, __swiftMaximumDurationMs: maxDurationMs, __swiftReserveMs: reserveMs,
     create() { return {
       async session(sessionID) {
         const snapshot = await createFxEngine({ __inspect: true, sessionStorePath: path, sessionID });
@@ -450,7 +450,8 @@ export function memory() {
 export function createFxAgent(options = {}) {
   const durability = options.durability ?? memory();
   if (typeof durability.__swiftSessionPath !== 'string') throw new TypeError('Unsupported Swift conformance storage descriptor');
-  const ready = createFxEngine({ ...options, __agent: true, sessionStorePath: durability.__swiftSessionPath });
+  const ready = createFxEngine({ ...options, __agent: true, sessionStorePath: durability.__swiftSessionPath,
+    maximumDurationMs: durability.__swiftMaximumDurationMs, reserveMs: durability.__swiftReserveMs });
   ready.catch(() => {});
   function turnView(sessionID, sessionOptions, input, promptOptions = {}, resume = false) {
     let id = promptOptions.messageId ?? promptOptions.id ?? randomUUID();
@@ -465,6 +466,7 @@ export function createFxAgent(options = {}) {
   }
   let defaultSession;
   const agent = {
+    get sessionId() { defaultSession ??= agent.session(); return defaultSession.id; },
     session(sessionID = randomUUID(), sessionOptions = {}) {
       return {
         id: sessionID,

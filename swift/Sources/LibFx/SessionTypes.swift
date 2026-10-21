@@ -40,6 +40,7 @@ public struct FxSessionResult: Sendable, Codable, Equatable {
 public enum FxSessionEvent: Sendable, Codable, Equatable {
     case started(id: String, sessionID: String)
     case resumed(id: String, sessionID: String)
+    case yielded(id: String)
     case update(id: String, FxEvent)
     case ended(FxSessionResult)
 }

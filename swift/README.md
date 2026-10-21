@@ -224,6 +224,17 @@ Call `session.resume()` after reopening to get a turn view for pending work. It 
 
 An agent attempts a journal snapshot after a completed turn once new records reach 64 KiB. Set `FxAgent`'s `checkpointAfterBytes:` to another threshold, `0` to attempt after every turn, or `nil` to disable automatic saves. This setting is separate from the engine interval in `FxConfiguration`.
 
+To continue a long turn across bounded worker deliveries, pass a delivery policy:
+
+```swift
+let policy = try FxDeliveryPolicy(maximumDuration: .seconds(60), reserve: .seconds(10))
+let agent = try FxAgent(configuration: configuration, store: store, deliveryPolicy: policy)
+```
+
+The worker asks the core to yield at a safe boundary when the reserve begins. It saves a snapshot, releases ownership, and continues the same turn in another local delivery. If a request or tool remains active, it hands off before the deadline, leaving half the reserve, up to two seconds, for cleanup. Each delivery allows at least one model request. A zero reserve disables this active cutoff. The policy defaults to no time limit when omitted.
+
+The durable event sequence includes `.yielded` and `.resumed`, with one final `.ended` for the whole turn. Safe tools can resume with their original execution IDs; ambiguous writes remain stopped. After three consecutive deadline cutoffs at the same step, a tool is no longer rerun, or a stalled model turn is cancelled. Counts survive reopening the store and reset when the core advances to another step. Active cutoffs emit `.sessionDeadline` observations. Host transports and tools must cooperate with cancellation. This policy continues work locally; it does not provide an external queue or serverless delivery adapter.
+
 Call `try await session.checkpoint()` to export the conversation, including stored images, without changing the session or taking ownership from its worker. Export reads a consistent stored snapshot and sends no model request. While a worker runs, the export includes only progress already stored. Pass the bytes as `checkpoint:` to a new `FxAgent` to seed new sessions. Existing stored sessions retain their own history. Exporting an unused session creates no stored data.
 
-The agent/session surface is still partial. Deadline scheduling, external storage adapters, and full upstream durable-session qualification remain pending. Complete upstream custom-provider, Codex, and Grok test files have local proof. The session store's host event format is Swift-specific; core journal and checkpoint interoperability is a separate tested contract.
+The agent/session surface is still partial. External scheduling and storage adapters and full upstream durable-session qualification remain pending. Complete upstream custom-provider, Codex, and Grok test files have local proof. The session store's host event format is Swift-specific; core journal and checkpoint interoperability is a separate tested contract.

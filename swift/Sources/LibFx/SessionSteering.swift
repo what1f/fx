@@ -45,6 +45,7 @@ extension FxSessionStore {
         guard let record = try? JSONDecoder().decode(JSONValue.self, from: data),
               case .array(let events) = record["events"] else { throw FxPersistenceError.invalidJournal }
         for event in events {
+            try recordDeliveryProgress(event, session: session)
             if event["type"] == .string("input_accepted"), let id = event["data"]?["id"]?.string {
                 try database.execute("UPDATE fx_inputs SET accepted=1 WHERE session=? AND core_id=? AND kind='steer'", [.text(session), .text(id)])
             } else if event["type"] == .string("input_withdrawn"), let id = event["data"]?["id"]?.string {

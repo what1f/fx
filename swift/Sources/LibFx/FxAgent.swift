@@ -7,18 +7,20 @@ public actor FxAgent {
     private let configuration: FxConfiguration
     private let initialCheckpoint: Data?
     private let checkpointAfterBytes: Int?
+    private let deliveryPolicy: FxDeliveryPolicy?
     private var workers: [String: Task<Void, Never>] = [:]
     private var failures: [String: any Error] = [:]
     private var intakes = 0
     private var closed = false
 
-    public init(configuration: FxConfiguration, name: String = "default", store: FxSessionStore, checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024) throws {
+    public init(configuration: FxConfiguration, name: String = "default", store: FxSessionStore, checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024, deliveryPolicy: FxDeliveryPolicy? = nil) throws {
         guard validSessionIdentifier(name), name.utf8.count <= 64,
               let first = name.utf8.first, (48...57).contains(first) || (65...90).contains(first) || (97...122).contains(first) else { throw FxError.invalidInput("Invalid agent name") }
         self.configuration = configuration
         self.initialCheckpoint = checkpoint
         if let checkpointAfterBytes, checkpointAfterBytes < 0 { throw FxError.invalidInput("Checkpoint interval must not be negative") }
         self.checkpointAfterBytes = checkpointAfterBytes
+        self.deliveryPolicy = deliveryPolicy
         self.name = name
         self.store = store
     }
@@ -115,7 +117,9 @@ public actor FxAgent {
                     continue
                 }
                 do {
-                    while let input = try await store.next(lease) { try await execute(input, lease: lease) }
+                    while let input = try await store.next(lease) {
+                        if try await execute(input, lease: lease) { break }
+                    }
                     try await store.release(lease)
                 } catch {
                     try? await store.release(lease)
@@ -131,11 +135,12 @@ public actor FxAgent {
         }
     }
 
-    private func execute(_ input: SessionInput, lease: SessionLease) async throws {
+    private func execute(_ input: SessionInput, lease: SessionLease) async throws -> Bool {
+        let deadlines = deliveryPolicy?.deadlines()
         try await store.start(lease, input: input)
-        if input.cancelRequested {
+        if input.cancelRequested && !input.wasStarted {
             try await finish(input, lease: lease, reason: .cancelled)
-            return
+            return false
         }
         var config = configured(for: input.options)
         config.checkpointAfterBytes = checkpointAfterBytes
@@ -156,42 +161,51 @@ public actor FxAgent {
         } catch let error as FxPersistenceError { throw error }
         catch FxError.invalidInput(let message) {
             try await finish(input, lease: lease, reason: .error, error: message)
-            return
+            return false
         } catch {
             try await finish(input, lease: lease, reason: .error, error: "Could not open conversation")
-            return
+            return false
         }
         do {
             let turnID = sessionCoreInputID(input.id)
             let recovery = await engine.recoveryState
+            let spent = try await store.deliveryCutoffs(lease, id: input.id) >= 3
             let turn: FxTurn
             if let recovery {
                 guard input.wasStarted, recovery.turnID == turnID else { throw FxPersistenceError.invalidJournal }
                 let idempotent = Set(config.tools.filter(\.isIdempotent).map(\.name))
-                let rerun = Set(recovery.runningCalls.filter { idempotent.contains($0.name) }.map(\.executionID))
-                guard let resumed = try await engine.resume(rerunning: rerun) else { throw FxPersistenceError.invalidJournal }
+                let rerun = Set(recovery.runningCalls.filter { !spent && !input.cancelRequested && idempotent.contains($0.name) }.map(\.executionID))
+                guard let resumed = try await engine.resume(rerunning: rerun, yieldAt: deadlines?.yield) else { throw FxPersistenceError.invalidJournal }
                 turn = resumed
             } else if await engine.completedTurnID == turnID {
                 // The core committed completion, but the host result was not committed.
                 // Usage and final outcome cannot be inferred safely from an empty replay.
                 try await finish(input, lease: lease, reason: .unknown)
                 try await engine.close()
-                return
-            } else { turn = try await engine.prompt(input.content, id: turnID) }
-            let controls = Task {
+                return false
+            } else { turn = try await engine.prompt(input.content, id: turnID, yieldAt: deadlines?.yield) }
+            if input.cancelRequested || spent && recovery?.runningCalls.isEmpty == true { await turn.cancel() }
+            let controls = Task { () throws -> Bool in
                 var ending = false
                 do {
                     while !Task.isCancelled {
                         if try await store.cancelled(lease, id: input.id) {
                             await turn.cancel()
-                            return
+                            return false
+                        }
+                        if let stop = deadlines?.stop, ContinuousClock.now >= stop {
+                            let cutoffs = try await store.cutOffDelivery(lease, id: input.id)
+                            self.configuration.observation?.deliver(FxObservation(journal: .sessionDeadline, sessionID: lease.sessionID,
+                                data: .object(["epoch": .number(Double(lease.epoch)), "cutoffs": .number(Double(cutoffs))])))
+                            try await turn.handoff()
+                            return true
                         }
                         let steering = try await store.steering(lease, owner: input.id)
                         if !ending {
                             for steer in steering.pending {
                                 do { _ = try await turn.steer(steer.text, id: sessionCoreInputID(steer.id)) }
-                                catch FxError.noActiveTurn { return }
-                                catch FxError.rpc(_, "No prompt is running", _) { return }
+                                catch FxError.noActiveTurn { return false }
+                                catch FxError.rpc(_, "No prompt is running", _) { return false }
                                 catch FxError.rpc(_, "Steering queue is full", _) { break }
                             }
                             if steering.ends {
@@ -202,6 +216,7 @@ public actor FxAgent {
                         try await Task.sleep(for: .milliseconds(20))
                     }
                 } catch is CancellationError {} catch { await turn.cancel(); throw error }
+                return false
             }
             do {
                 for try await event in turn {
@@ -213,7 +228,13 @@ public actor FxAgent {
                 }
                 let result = try await turn.result
                 controls.cancel()
-                try await controls.value
+                let interrupted = try await controls.value
+                if result.stopReason == .yielded || interrupted && result.stopReason == .cancelled {
+                    try await store.appendEvent(lease, .yielded(id: input.id))
+                    if !interrupted { try await engine.saveCheckpoint() }
+                    try await engine.close()
+                    return true
+                }
                 try await finish(input, lease: lease, reason: result.stopReason, usage: result.usage)
             } catch {
                 controls.cancel()
@@ -227,6 +248,7 @@ public actor FxAgent {
             if error is FxPersistenceError || error is FxSQLiteError { throw error }
             try await finish(input, lease: lease, reason: .error, error: "Conversation failed")
         }
+        return false
     }
 
     private func finish(_ input: SessionInput, lease: SessionLease, reason: FxTurnResult.StopReason,

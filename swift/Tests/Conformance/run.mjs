@@ -30,6 +30,15 @@ const checks = [
   ].map(([kind, test]) => ({ name: `upstream/test-durable-steering-${kind}`, expected: '1/1 durable tests passed', env: { LIBFX_TEST_ONLY: test }, args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable.mjs', 'memory', 'native',
   ] })),
+  ...[
+    ['yield', "a turn longer than a function's time limit continues in the next delivery"],
+    ['safe-tool', 'a lookup call still running near the deadline is cut off, and the next delivery continues the turn'],
+    ['write', 'a send call still running near the deadline is cut off, and the next delivery continues the turn'],
+    ['repeated-tool', 'a call the deadline cuts off 3 times in a row is not run again, and the model hears it may have partly run'],
+    ['repeated-model', 'a model request the deadline cuts off 3 times in a row cancels its turn'],
+  ].map(([kind, test]) => ({ name: `upstream/test-durable-delivery-${kind}`, expected: '1/1 durable tests passed', env: { LIBFX_TEST_ONLY: test }, args: [
+    '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable.mjs', 'memory', 'native',
+  ] })),
   ...['smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing', 'turn-identity', 'handoff', 'follow-up', 'custom-provider', 'provider-suites', 'agent-crash', 'session-checkpoint', 'session-steering-crash'].map(name => ({
     name, args: [`swift/Tests/Conformance/${name}.mjs`],
   })),

@@ -112,7 +112,8 @@ struct SubscriptionHTTP: FxHTTPClient {
         try await store.close()
         let sessions = try FxSessionStore(url: directory.appendingPathComponent("sessions.sqlite"))
         let agent = try FxAgent(configuration: FxConfiguration(
-            apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()), store: sessions, checkpointAfterBytes: 0)
+            apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()), store: sessions, checkpointAfterBytes: 0,
+            deliveryPolicy: FxDeliveryPolicy(maximumDuration: .seconds(30), reserve: .seconds(5)))
         let session = try await agent.session(id: "consumer-session")
         let durable = try await session.prompt("hello", id: "durable-message")
         var durableText = ""

@@ -218,9 +218,13 @@ actor Driver: FxHTTPClient, FxPersistence {
             if value["op"] == .string("openAgent") {
                 let sessionStore = try FxSessionStore(url: options["sessionStorePath"]?.string.map { URL(fileURLWithPath: $0) })
                 self.sessionStore = sessionStore
+                let deliveryPolicy = try options["maximumDurationMs"]?.integer.map {
+                    try FxDeliveryPolicy(maximumDuration: .milliseconds($0), reserve: .milliseconds(options["reserveMs"]?.integer ?? 30_000))
+                }
                 agent = try FxAgent(configuration: config, name: options["name"]?.string ?? "default", store: sessionStore,
                                     checkpoint: options["checkpoint"]?.string.flatMap { Data(base64Encoded: $0) },
-                                    checkpointAfterBytes: options["checkpointAfterBytes"] == nil ? 64 * 1024 : config.checkpointAfterBytes)
+                                    checkpointAfterBytes: options["checkpointAfterBytes"] == nil ? 64 * 1024 : config.checkpointAfterBytes,
+                                    deliveryPolicy: deliveryPolicy)
                 return .object([:])
             }
             let checkpoint = options["checkpoint"]?.string.flatMap { Data(base64Encoded: $0) }
@@ -306,6 +310,9 @@ actor Driver: FxHTTPClient, FxPersistence {
                 case .resumed(let id, let session):
                     fields["type"] = .string("turn_resume")
                     fields["messageId"] = .string(id); fields["sessionId"] = .string(session)
+                case .yielded(let id):
+                    fields["type"] = .string("turn_yield")
+                    fields["messageId"] = .string(id)
                 case .update(let id, let event):
                     if case .object(let update) = encode(event) { fields.merge(update) { _, new in new } }
                     fields["messageId"] = .string(id)

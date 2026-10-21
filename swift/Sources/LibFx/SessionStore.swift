@@ -36,7 +36,7 @@ public actor FxSessionStore {
                 guard try database.step(statement) else { throw FxPersistenceError.invalidJournal }
                 return Int(sqlite3_column_int(statement, 0))
             }
-            guard version == 1 || version == 2 else { throw FxSQLiteError.unsupportedVersion(version) }
+            guard (1...3).contains(version) else { throw FxSQLiteError.unsupportedVersion(version) }
             try database.execute("CREATE TABLE IF NOT EXISTS fx_sessions (id TEXT PRIMARY KEY, agent TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0, owner TEXT, head INTEGER NOT NULL DEFAULT 0, checkpoint_cursor INTEGER, checkpoint BLOB)")
             try database.execute("CREATE TABLE IF NOT EXISTS fx_inputs (sequence INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, id TEXT NOT NULL, content BLOB NOT NULL, options BLOB NOT NULL, started INTEGER NOT NULL DEFAULT 0, cancelled INTEGER NOT NULL DEFAULT 0, result BLOB, UNIQUE(session,id))")
             try database.execute("CREATE TABLE IF NOT EXISTS fx_session_events (cursor INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, epoch INTEGER NOT NULL, data BLOB NOT NULL)")
@@ -53,6 +53,12 @@ public actor FxSessionStore {
                 try database.execute("UPDATE fx_agent_schema SET version=2 WHERE id=1")
             }
             try database.execute("CREATE INDEX IF NOT EXISTS fx_inputs_core ON fx_inputs(session,core_id)")
+            if version < 3 {
+                try database.execute("ALTER TABLE fx_inputs ADD COLUMN step TEXT")
+                try database.execute("ALTER TABLE fx_inputs ADD COLUMN cut_step TEXT")
+                try database.execute("ALTER TABLE fx_inputs ADD COLUMN cutoffs INTEGER NOT NULL DEFAULT 0")
+                try database.execute("UPDATE fx_agent_schema SET version=3 WHERE id=1")
+            }
         }
         self.database = database
         self.lockDirectory = canonicalURL.map { URL(fileURLWithPath: $0.path + ".locks", isDirectory: true) }

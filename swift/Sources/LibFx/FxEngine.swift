@@ -445,6 +445,7 @@ public actor FxEngine {
                 try await rpc.respond(id: id, result: .object([:]))
             } catch { try? await rpc.respond(id: id, error: .transport(String(describing: error))) }
         } else if message.method == "session/update", message.params["sessionId"]?.string == sessionID {
+            guard !handedOff else { return }
             if let event = event(for: message.params["update"] ?? .null), let output {
                 if case .dropped = output.yield(event) {
                     output.finish(throwing: FxError.outputOverflow)
