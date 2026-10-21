@@ -24,6 +24,8 @@ Use typed configuration, events, results, and errors with async/await and AsyncS
 
 These conditions are binding requirements for the active libfx-swift goal. Evaluate completion against both these conditions and the functional acceptance matrix below.
 
+Goal requirement update: the user's Swift design requirements and repository instructions are part of this goal's completion contract. Apply them to all remaining implementation and reviews. Functional parity, Swift API quality, and verification must all pass before the goal can be completed.
+
 The user's Swift requirements are mandatory acceptance criteria: follow Swift best practices, avoid a literal TypeScript port, omit historical TypeScript compatibility logic, and avoid overdesign. Cover current libfx behavior with working Swift functionality and recorded tests. Matching TypeScript API names or shapes is not a completion criterion.
 
 Before completing the goal, review both functional coverage and Swift API design. Passing upstream tests does not waive the Swift design requirements. A missing current libfx capability remains unfinished work; do not redefine it as out of scope without the user's agreement.
@@ -53,7 +55,7 @@ Persistence preserves ordered append, expected cursor checks, durability barrier
 
 | Area | Upstream test owners | Required Swift proof | Status |
 | --- | --- | --- | --- |
-| Startup, configuration, model catalog | test-minimal-api, test-agent-bootstrap, test-list-models | Equivalent validation and isolation | Partial: startup, model options and explicit model discovery; full bootstrap validation pending |
+| Startup, configuration, model catalog | test-minimal-api, test-agent-bootstrap, test-list-models | Equivalent validation and isolation | Partial: startup, model options, explicit model discovery and the complete upstream bootstrap file; full minimal API coverage pending |
 | Stream and results | test-core-output, test-native-core-stream | Deltas, finish reasons, usage, provider errors | Partial: Unicode, text, reasoning and result smoke |
 | Tools | test-host-tools, test-tool-contract, test-agent-tool-start, test-agent-provider-tools | Advertisements, calls, results, errors, parallel admission | Partial: complete upstream host-tools and provider-executed search files; Swift result, search restore and name-collision tests; full contract and parallel admission coverage pending |
 | Cancellation and shutdown | test-core-cancel, test-host-tool-cancel, test-native-host-tool-late-settle | No late callbacks, deadlocks, or stranded requests | Partial: upstream host-tool cancellation and native lifecycle tests |
@@ -64,6 +66,7 @@ Persistence preserves ordered append, expected cursor checks, durability barrier
 | Durable sessions | test-durable, test-durable-core, test-durable-provider-crash, test-world-persistence | Queue, deduplication, crash recovery, fencing | Partial: SQLite persistence, stable turn IDs, cooperative yield and repeated resume across Swift/JS snapshots, latest completed ID deduplication, cross-process writer fencing and two SIGKILL recovery boundaries; agent/session intake, event replay, local ownership, ordered workers, resumable turn views and three worker SIGKILL boundaries tested; full agent/session suites pending |
 | Delivery scheduling | test-durable | Safe yield, active cutoff, bounded retries, one logical turn | Partial: local duration policy, checkpointed yields, safe tool reruns, ambiguous-write suppression, persistent step cutoff counts, five unchanged upstream selections, and cooperative preparation deadlines with retained intake and explicit retry; external queue delivery and slow-storage stress pending |
 | Hooks | test-hooks | Event scopes and observation isolation | Partial: runtime and journal observations, content opt-in, error isolation, JS comparison and hooks-enabled steering; parent and tool-local scopes pending |
+| Request diagnostics | test-agent-request-context, test-agent-transport-retry | Request identity, privacy, retry counts, latency and streaming activity | Partial: public Swift transport events, six native tests, clean Release consumer and complete upstream request-context file; streaming activity and full upstream transport-retry coverage pending |
 | MCP and skills | test-mcp-adapter, test-skills-adapter | Host adapters and cancellation | Pending |
 | Swift package | Swift native tests and clean consumer | Import, link, release build, lifecycle and concurrency | Partial: XCFramework and independent release consumer on arm64; CI pending |
 

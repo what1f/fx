@@ -12,6 +12,7 @@ public struct FxHTTPResponse: Sendable {
     public let statusCode: Int
     public let headers: [String: String]
     public let body: AsyncThrowingStream<Data, any Error>
+    var diagnosticHeaders: [String: String]?
     private let cancelBody: @Sendable () -> Void
 
     public init(

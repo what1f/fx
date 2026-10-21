@@ -11,6 +11,8 @@ public struct FxConfiguration: Sendable {
     public var gatewayURL: URL
     public var httpClient: any FxHTTPClient
     public var observation: FxObservationOptions?
+    /// Receives ordered metadata on the transport actor. Keep this callback short.
+    public var onTransportEvent: (@Sendable (FxTransportEvent) -> Void)?
     /// Journal bytes between automatic snapshots. Nil disables automatic snapshots.
     public var checkpointAfterBytes: Int?
 
@@ -20,11 +22,12 @@ public struct FxConfiguration: Sendable {
         workspace: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         gatewayURL: URL = URL(string: "https://ai-gateway.vercel.sh/v4/ai/language-model")!,
         httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil,
-        checkpointAfterBytes: Int? = 1024 * 1024
+        checkpointAfterBytes: Int? = 1024 * 1024,
+        onTransportEvent: (@Sendable (FxTransportEvent) -> Void)? = nil
     ) {
         self.init(provider: .gateway(apiKey: apiKey), model: model, instructions: instructions,
                   tools: tools, providerTools: providerTools, workspace: workspace, httpClient: httpClient,
-                  observation: observation, checkpointAfterBytes: checkpointAfterBytes)
+                  observation: observation, checkpointAfterBytes: checkpointAfterBytes, onTransportEvent: onTransportEvent)
         self.gatewayURL = gatewayURL
     }
 
@@ -33,7 +36,8 @@ public struct FxConfiguration: Sendable {
         providerTools: [FxProviderTool] = [],
         workspace: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil,
-        checkpointAfterBytes: Int? = 1024 * 1024
+        checkpointAfterBytes: Int? = 1024 * 1024,
+        onTransportEvent: (@Sendable (FxTransportEvent) -> Void)? = nil
     ) {
         self.provider = provider
         self.model = model
@@ -43,6 +47,7 @@ public struct FxConfiguration: Sendable {
         self.workspace = workspace
         self.gatewayURL = URL(string: "https://ai-gateway.vercel.sh/v4/ai/language-model")!
         self.httpClient = httpClient
+        self.onTransportEvent = onTransportEvent
         self.observation = observation
         self.checkpointAfterBytes = checkpointAfterBytes
     }

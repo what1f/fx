@@ -8,7 +8,7 @@ Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. 
 
 ## Implemented proof
 
-`swift test --package-path swift` passed 121 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
+`swift test --package-path swift` passed 127 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
 
 - Fragmented UTF-8 frames, host requests, cancellation, oversized frames, and pending requests during close.
 - HTTP response status, Unicode, bounded chunks, invalid responses, and cancellation before headers.
@@ -62,12 +62,14 @@ node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-
 node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-fast.mjs native
 node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-provider-tools.mjs native
 node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-ultrafast-options.mjs native
+node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-request-context.mjs native
+node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-bootstrap.mjs native
 node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-custom.mjs native
 node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-codex.mjs native
 node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-grok.mjs native
 ```
 
-These twelve files, including a second steering run with hooks enabled, pass through the Swift driver. Both surface labels in the model-discovery fixture are redirected to Swift; this does not qualify a browser runtime. The adapter translates typed Swift errors to JavaScript error classes for those assertions.
+These fourteen files, including a second steering run with hooks enabled, pass through the Swift driver. Both surface labels in the model-discovery fixture are redirected to Swift; this does not qualify a browser runtime. The adapter translates typed Swift errors to JavaScript error classes for those assertions.
 
 The complete effort and fast files exercise advertised and intrinsic capabilities, unsupported modes, provider request fields, defaults, and disabled fast mode. JavaScript-only model shapes and deprecated top-level settings are normalized by the test adapter, which translates errors without providing model behavior. Swift receives one typed model value. Three native tests separately check ASCII and multibyte effort byte limits before runtime allocation, malformed effort rejection by the core without network access, and defaults without a creation-time catalog lookup or provider overrides.
 
@@ -75,7 +77,11 @@ The complete provider-tools file runs against a local HTTP service through Swift
 
 The complete ultrafast file now passes unchanged. It checks catalog pricing eligibility, OpenAI-only routing, explicit false and omitted model behavior, unsupported-model rejection, fast/ultrafast precedence, and the warning when serving is unconfirmed. A nil `FxModel.id` lets the Gateway core choose its default. Swift reads the selected model from the core response and uses it in checkpoint and snapshot metadata. Four native tests cover those resolved identities across checkpoint and journal restores, explicit-model requirements for other providers, both mode-precedence branches, and rejection before a chat request. The Release consumer also opens an engine without a model and exports its checkpoint.
 
-The adapter's `runtime.exit` event reports the actual Swift driver process exit after runtime activity. Creation failures now end its input and await graceful exit rather than sending a termination signal. This process diagnostic qualifies the test adapter; it does not establish a public Swift transport-diagnostics API.
+The adapter's `runtime.exit` event reports the actual Swift driver process exit after runtime activity. Creation failures now end its input and await graceful exit rather than sending a termination signal. This process diagnostic qualifies the test adapter; it does not establish a public Swift runtime-exit event.
+
+The complete request-context file passes through `FxConfiguration.onTransportEvent`. Public typed events report request identity, per-turn attempt numbers, header latency, selected response identifiers, and bounded failure categories. Six native tests cover correlation across turns, retry counts, cancellation and failed-body retry exclusion, late responses after close, URL privacy, and UTF-8 bounds. Diagnostics mask credentials in selected response headers and omit bodies, credential headers, and raw error descriptions. The independent Release consumer imports the event types and verifies request/response identities. Stream activity events remain pending.
+
+The new transport actor hop exposed a cancellation race during recovery: returning before dispatch left the core journal's old turn open. Recovery now reaches the core before cancellation, allowing the core to close that turn. Existing delivery tests verify both repeated model cutoffs and explicit cancellation between deliveries, followed by a fresh usable turn. The complete bootstrap file also passes 65 invalid checkpoint creations followed by a successful engine open and close.
 
 `test-agent-images.mjs` passed initial image transport cases, then stopped at the unimplemented resize hook. The image file is not counted as passed.
 
@@ -102,11 +108,11 @@ Additional executable checks passed:
 - `handoff.mjs`: Swift and JavaScript in both source and target roles; the source makes no later journal writes or automatic snapshots, the target receives the pending steer and skips the ambiguous write, and the source's turn-end observation marks the handoff.
 - `follow-up.mjs`: reference JavaScript and Swift automatic queues, durable acceptance and exactly one placement per input, plus recovery in both source and target roles; held inputs wait for explicit resume while current inputs run independently.
 
-`node swift/Tests/Conformance/run.mjs` reruns the 44 selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
+`node swift/Tests/Conformance/run.mjs` passed all 46 selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
 
-`swift test --package-path swift --sanitize=thread` passed all 121 Swift tests without a sanitizer warning. The first focused run reported concurrent access to the native handle during shutdown. The transport now waits for the [Dispatch source's cancellation handler](https://developer.apple.com/documentation/dispatch/dispatch_source_set_cancel_handler) and destroys the handle on its actor. This check instruments Swift code; the precompiled Zig archive is not instrumented. The Swift CI workflow repeats the check after conformance testing.
+`swift test --package-path swift --sanitize=thread` passed all 127 Swift tests without a sanitizer warning. The first focused run reported concurrent access to the native handle during shutdown. The transport now waits for the [Dispatch source's cancellation handler](https://developer.apple.com/documentation/dispatch/dispatch_source_set_cancel_handler) and destroys the handle on its actor. This check instruments Swift code; the precompiled Zig archive is not instrumented. The Swift CI workflow repeats the check after conformance testing.
 
-`swift test --package-path swift --sanitize=address` also passed all 121 tests. Its first run crashed when ASan tried to unmap a 256 KiB alternate signal stack during native thread teardown. A pure Swift validation test passed, while one real-core streaming test reproduced the crash alone. Zig's default thread setup had replaced the sanitizer's stack with a thread-local buffer. The C entry point now sets `std_options.signal_stack_size` to `null`, preserving host-installed signal stacks. Both archive targets were rebuilt; arm64 passed the original failing test and the full Swift suite under ASan. The x86_64 archive has build evidence only. The Swift workflow now runs ASan before Thread Sanitizer. This checks instrumented Swift and intercepted allocations; it does not instrument every instruction in the precompiled Zig core.
+`swift test --package-path swift --sanitize=address` also passed all 127 tests. Its first run crashed when ASan tried to unmap a 256 KiB alternate signal stack during native thread teardown. A pure Swift validation test passed, while one real-core streaming test reproduced the crash alone. Zig's default thread setup had replaced the sanitizer's stack with a thread-local buffer. The C entry point now sets `std_options.signal_stack_size` to `null`, preserving host-installed signal stacks. Both archive targets were rebuilt; arm64 passed the original failing test and the full Swift suite under ASan. The x86_64 archive has build evidence only. The Swift workflow now runs ASan before Thread Sanitizer. This checks instrumented Swift and intercepted allocations; it does not instrument every instruction in the precompiled Zig core.
 
 The session byte decoder now looks up Base64 fields by name. Swift JSON encoding exposed its previous field-order dependency. A Zig regression test accepts both orders while retaining strict field, encoding, and decoded-byte validation.
 

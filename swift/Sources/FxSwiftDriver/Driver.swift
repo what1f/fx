@@ -216,6 +216,9 @@ actor Driver: FxHTTPClient, FxPersistence {
                     DriverOutput.emit(.object(["observationError": .string(String(describing: error))]))
                 }
             }
+            config.onTransportEvent = { event in
+                DriverOutput.emit(.object(["diagnostic": encodeTransportEvent(event)]))
+            }
             config.wireObserver = { [weak self] direction, message in
                 await self?.emit(.object(["diagnostic": .object([
                     "type": .string(direction == .sent ? "acp.send" : "acp.receive"), "message": message,
@@ -790,4 +793,29 @@ actor Driver: FxHTTPClient, FxPersistence {
         // A graceful caller sends close before ending input. EOF without that
         // request means the host died; do not wait for callbacks from a dead host.
     }
+}
+
+private func encodeTransportEvent(_ event: FxTransportEvent) -> JSONValue {
+    func milliseconds(_ elapsed: Duration) -> JSONValue {
+        .number(Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15)
+    }
+    func optional(_ text: String?) -> JSONValue { text.map(JSONValue.string) ?? .null }
+    var fields: [String: JSONValue]
+    switch event {
+    case .started(let request):
+        fields = ["type": .string("transport.start"), "attempt": .number(Double(request.number)),
+                  "method": .string(request.method), "endpoint": optional(request.endpoint?.absoluteString), "model": optional(request.modelID)]
+    case .response(let request, let response):
+        fields = ["type": .string("transport.response"), "attempt": .number(Double(request.number)),
+                  "status": .number(Double(response.statusCode)), "elapsedMs": milliseconds(response.elapsed),
+                  "requestId": optional(response.requestID), "generationId": optional(response.generationID),
+                  "model": optional(response.modelID), "provider": optional(response.provider)]
+    case .failed(let request, let elapsed, let reason):
+        fields = ["type": .string("transport.error"), "attempt": .number(Double(request.number)),
+                  "elapsedMs": milliseconds(elapsed), "error": .string(reason == .cancelled ? "AbortError" : "Error")]
+    case .retrying(let request):
+        fields = ["type": .string("transport.retry"), "attempt": .number(Double(request.number)),
+                  "nextAttempt": .number(Double(request.number + 1))]
+    }
+    return .object(fields)
 }

@@ -24,15 +24,22 @@ actor NativeTransport: CoreTransport {
     private let continuation: AsyncThrowingStream<Data, any Error>.Continuation
     private let handle: CoreHandle
     private let httpClient: any FxHTTPClient
+    private let onTransportEvent: (@Sendable (FxTransportEvent) -> Void)?
+    private var requestNumber = 0
+    private var sessionID: String?
+    private var modelID: String?
     private var source: (any DispatchSourceRead)?
     private var fetchTasks: [Int32: Task<Void, Never>] = [:]
     private var closed = false
     private let sourceClosed: AsyncStream<Void>
     private let sourceClosedContinuation: AsyncStream<Void>.Continuation
 
-    init(options: JSONValue, httpClient: any FxHTTPClient = FxURLSessionHTTPClient()) throws {
+    init(options: JSONValue, httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), modelID: String? = nil,
+         onTransportEvent: (@Sendable (FxTransportEvent) -> Void)? = nil) throws {
         guard fx_core_abi_version() == 1 else { throw FxError.protocolViolation("Unsupported core ABI version") }
         self.httpClient = httpClient
+        self.modelID = modelID
+        self.onTransportEvent = onTransportEvent
         let data = try JSONEncoder().encode(options)
         var failure = FxBuffer()
         let pointer = data.withUnsafeBytes {
@@ -47,6 +54,9 @@ actor NativeTransport: CoreTransport {
         (sourceClosed, sourceClosedContinuation) = AsyncStream.makeStream()
         (output, continuation) = AsyncThrowingStream.makeStream(bufferingPolicy: .bufferingOldest(256))
     }
+
+    func setContext(sessionID: String, modelID: String) { self.sessionID = sessionID; self.modelID = modelID }
+    func beginTurn() { requestNumber = 0 }
 
     func start() throws {
         guard source == nil, !closed else { return }
@@ -158,7 +168,8 @@ actor NativeTransport: CoreTransport {
 
     private func sendWithRetry(_ request: URLRequest) async throws -> FxHTTPResponse {
         try Task.checkCancellation()
-        do { return try await httpClient.send(request) }
+        let first = beginRequest(request)
+        do { return try await send(request, context: first) }
         catch {
             try Task.checkCancellation()
             guard !closed else { throw FxError.closed }
@@ -167,7 +178,42 @@ actor NativeTransport: CoreTransport {
             if error is FxSubscriptionError { throw error }
             if let error = error as? URLError, error.code == .cancelled { throw error }
             // Retry only before response headers. Never replay a partial response.
-            return try await httpClient.send(request)
+            emitTransport(.retrying(first))
+            return try await send(request, context: beginRequest(request))
+        }
+    }
+
+    private func emitTransport(_ event: FxTransportEvent) {
+        if !closed { onTransportEvent?(event) }
+    }
+
+    private func beginRequest(_ request: URLRequest) -> FxTransportEvent.Request {
+        requestNumber += 1
+        let context = FxTransportEvent.Request(id: UUID(), number: requestNumber, sessionID: sessionID,
+            method: request.httpMethod ?? "GET", endpoint: transportEndpoint(request.url),
+            modelID: boundedTransportText(request.value(forHTTPHeaderField: "ai-language-model-id") ?? modelID))
+        emitTransport(.started(context))
+        return context
+    }
+
+    private func send(_ request: URLRequest, context: FxTransportEvent.Request) async throws -> FxHTTPResponse {
+        let started = ContinuousClock.now
+        do {
+            let response = try await httpClient.send(request)
+            let headers = response.diagnosticHeaders ?? response.headers
+            emitTransport(.response(context, .init(statusCode: response.statusCode, elapsed: started.duration(to: .now),
+                requestID: boundedTransportText(headers["x-vercel-id"]), generationID: boundedTransportText(headers["x-generation-id"]),
+                modelID: boundedTransportText(headers["x-model-id"]) ?? context.modelID,
+                provider: boundedTransportText(headers["x-vercel-ai-gateway-provider"] ?? headers["x-ai-gateway-provider"]))))
+            return response
+        } catch {
+            let reason: FxTransportEvent.Failure
+            if error is CancellationError || error as? FxError == .cancelled || (error as? URLError)?.code == .cancelled { reason = .cancelled }
+            else if error is FxSubscriptionError { reason = .credentials }
+            else if case FxError.invalidInput = error { reason = .invalidRequest }
+            else { reason = .requestFailed }
+            emitTransport(.failed(context, elapsed: started.duration(to: .now), reason: reason))
+            throw error
         }
     }
 

@@ -83,7 +83,7 @@ public actor FxEngine {
         }
         let httpClient = ProviderHTTPClient(client: configuration.httpClient, provider: configuration.provider)
         try Task.checkCancellation()
-        let transport = try NativeTransport(options: configuration.nativeOptions, httpClient: httpClient)
+        let transport = try NativeTransport(options: configuration.nativeOptions, httpClient: httpClient, modelID: configuration.model.id, onTransportEvent: configuration.onTransportEvent)
         let rpc = RPCClient(transport: transport, observer: configuration.wireObserver)
         do {
             try await transport.start()
@@ -115,6 +115,7 @@ public actor FxEngine {
             }
             let checkpointMetadata = try CheckpointMetadata(configuration: configuration, modelID: modelID)
             await httpClient.setSessionID(id)
+            await transport.setContext(sessionID: id, modelID: modelID)
             if configuration.observation != nil, session["_meta"]?["fx"]?["hooksVersion"] != .number(1) {
                 throw FxError.protocolViolation("Runtime does not support observation")
             }
@@ -342,10 +343,13 @@ public actor FxEngine {
         }
         let task = Task {
             do {
+                await transport.beginTurn()
                 for (index, bytes) in images.enumerated() {
                     try await transport.putAttachment(bytes, id: UInt32(index + 1))
                 }
-                if turnCancelled {
+                // Recovery must reach the core before cancellation so its open
+                // journal turn is closed rather than left pending.
+                if turnCancelled && !resuming {
                     await dispatch.resolve(sent: false)
                     await transport.discardAttachments()
                     self.finish(turn: id)

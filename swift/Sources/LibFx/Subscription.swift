@@ -125,7 +125,7 @@ public actor FxSubscription {
             secrets += [used.credentials.accessToken, used.credentials.refreshToken].compactMap { $0 }
             response = try await client.send(authorize(request, with: used.credentials))
         }
-        return try await redactingProviderResponse(response, secrets: secrets)
+        return try await redactingProviderResponse(response, secrets: secrets).withDiagnosticSecrets(secrets)
     }
 
     private func authorize(_ original: URLRequest, with credentials: FxSubscriptionCredentials) -> URLRequest {

@@ -48,6 +48,12 @@ SWIFT
 cat > "$task_tmp/Sources/Consumer/Consumer.swift" <<'SWIFT'
 import Foundation
 import LibFx
+final class TransportEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [FxTransportEvent] = []
+    var values: [FxTransportEvent] { lock.withLock { recorded } }
+    func record(_ event: FxTransportEvent) { lock.withLock { recorded.append(event) } }
+}
 struct MockHTTP: FxHTTPClient {
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         let text = request.httpMethod == "GET" ? #"{"data":[{"id":"swift/consumer","type":"language"}]}"# : "data: {\"type\":\"text-delta\",\"delta\":\"consumer ok\"}\n\ndata: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\",\"raw\":\"stop\"}}\n\ndata: [DONE]\n\n"
@@ -108,8 +114,10 @@ struct SubscriptionHTTP: FxHTTPClient {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try FxSQLitePersistence(url: directory.appendingPathComponent("conversation.sqlite"))
+        let transportEvents = TransportEvents()
         let engine = try await FxEngine.open(configuration: FxConfiguration(
-            apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP(), checkpointAfterBytes: 0
+            apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP(), checkpointAfterBytes: 0,
+            onTransportEvent: { transportEvents.record($0) }
         ), persistence: store)
         let turn = try await engine.prompt("hello", id: "consumer-turn")
         var text = ""
@@ -125,6 +133,16 @@ struct SubscriptionHTTP: FxHTTPClient {
             throw FxError.protocolViolation("Unexpected follow-up response")
         }
         try await engine.close()
+        let requests = transportEvents.values.compactMap { event -> FxTransportEvent.Request? in
+            if case .started(let request) = event { return request }; return nil
+        }
+        let responses = transportEvents.values.compactMap { event -> FxTransportEvent.Request? in
+            if case .response(let request, let response) = event, response.statusCode == 200 { return request }; return nil
+        }
+        guard requests.map(\.number) == [1, 2, 1], responses.map(\.id) == requests.map(\.id),
+              requests.allSatisfy({ $0.sessionID == engine.sessionID && $0.modelID == "swift/consumer" }) else {
+            throw FxError.protocolViolation("Unexpected transport events")
+        }
         let saved = try await store.load()
         guard saved.checkpoint != nil, saved.journal.isEmpty else { throw FxPersistenceError.invalidJournal }
         let restored = try await FxEngine.open(configuration: FxConfiguration(

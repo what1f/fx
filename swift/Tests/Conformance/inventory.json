@@ -5,7 +5,7 @@
       "upstream": "sdk/tests/test-agent-bootstrap.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged upstream native file through Swift; 65 invalid checkpoint creations fail before a later engine opens and closes successfully"
     },
     {
       "upstream": "sdk/tests/test-agent-codex.mjs",
@@ -53,7 +53,7 @@
       "upstream": "sdk/tests/test-agent-request-context.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged upstream native file through Swift; instructions, session affinity, host fetch ownership, request attempts, response identifiers and credential exclusion use the public Swift transport observer"
     },
     {
       "upstream": "sdk/tests/test-agent-reserved-tool-names.mjs",

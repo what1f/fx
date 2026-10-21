@@ -122,8 +122,11 @@ actor ProviderHTTPClient: FxHTTPClient {
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         }
         let response = try await client.send(request)
-        guard response.statusCode >= 400, let credential else { return response }
-        return try await redactingProviderResponse(response, secrets: [credential])
+        if let credential {
+            return try await redactingProviderResponse(response, secrets: [credential]).withDiagnosticSecrets([credential])
+        }
+        if case .gateway(let key) = provider { return response.withDiagnosticSecrets([key]) }
+        return response
     }
 }
 

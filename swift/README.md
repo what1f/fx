@@ -47,6 +47,22 @@ Omit `model` in a Gateway configuration to use the core's default model. To set 
 
 Reasoning effort names must fit in 64 UTF-8 bytes. An oversized name throws `FxError.invalidInput` before loading saved history or creating the runtime. The core validates effort names and model support.
 
+## Observe HTTP requests
+
+Set `onTransportEvent` in `FxConfiguration` to receive typed request metadata:
+
+```swift
+let configuration = FxConfiguration(apiKey: key, onTransportEvent: { event in
+    if case .response(let request, let response) = event {
+        print(request.id, response.statusCode, response.elapsed)
+    }
+})
+```
+
+Events include `.started`, `.response`, `.failed`, and `.retrying`. Each request has a UUID and a number that starts at one for each turn. Retries count as separate requests. Responses include selected request, generation, model, and provider identifiers when available. A response event means headers arrived; it does not mean the body completed. Credential refresh requests made inside a subscription are not separate transport events.
+
+The SDK removes URL credentials, query parameters, and fragments. It excludes bodies, credential headers, and raw error descriptions. Selected response values mask the credentials used for that request and are bounded to 512 UTF-8 bytes. Host-defined endpoint paths and model names remain visible. Callbacks run in order on the transport actor; keep them short. No events are delivered after the engine closes.
+
 ## Discover models and steer a turn
 
 ```swift
