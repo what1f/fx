@@ -1,0 +1,327 @@
+import Foundation
+@_spi(Conformance) import LibFx
+
+/// Test-only protocol adapter. Engine behavior stays in LibFx.
+actor Driver: FxHTTPClient, FxPersistence {
+    private var engine: FxEngine?
+    private var turn: FxTurn?
+    private var nextFetchID = 1
+    private var fetchWaiters: [Int: CheckedContinuation<FxHTTPResponse, any Error>] = [:]
+    private var fetchBodies: [Int: AsyncThrowingStream<Data, any Error>.Continuation] = [:]
+    private var fetchStreams: [Int: AsyncThrowingStream<Data, any Error>] = [:]
+    private var nextToolID = 1
+    private var toolWaiters: [Int: CheckedContinuation<FxToolResult, any Error>] = [:]
+    private var nextPersistenceID = 1
+    private var persistenceWaiters: [Int: CheckedContinuation<JSONValue, any Error>] = [:]
+
+    func emit(_ value: JSONValue) {
+        do {
+            var data = try JSONEncoder().encode(value)
+            data.append(10)
+            try FileHandle.standardOutput.write(contentsOf: data)
+        } catch { /* A closed test pipe is handled by process teardown. */ }
+    }
+
+    func handle(_ value: JSONValue) async {
+        let id = value["id"] ?? .null
+        do {
+            let result = try await run(value)
+            emit(.object(["id": id, "result": result]))
+        } catch {
+            var fields: [String: JSONValue] = ["message": .string(String(describing: error))]
+            if case FxError.rpc(let code, let message, let data) = error {
+                fields["message"] = .string(message)
+                fields["rpcCode"] = .number(Double(code))
+                fields["data"] = data
+            }
+            emit(.object(["id": id, "error": .object(fields)]))
+        }
+    }
+
+    private func run(_ value: JSONValue) async throws -> JSONValue {
+        switch value["op"]?.string {
+        case "open":
+            let options = value["options"] ?? .null
+            var tools: [FxTool] = []
+            if case .array(let descriptors) = options["tools"] {
+                for descriptor in descriptors {
+                    let name = descriptor["name"]?.string ?? ""
+                    tools.append(FxTool(
+                        name: name, description: descriptor["description"]?.string ?? "",
+                        inputSchema: descriptor["inputSchema"] ?? .object([:]),
+                        isIdempotent: descriptor["idempotent"] == .bool(true),
+                        writes: descriptor["writes"] == nil ? nil : descriptor["writes"] == .bool(true)
+                    ) { [weak self] input, context in
+                        guard let self else { throw FxError.closed }
+                        return try await self.callTool(name, input: input, context: context)
+                    })
+                }
+            }
+            let modelOption = options["model"] ?? .null
+            let model = FxModel(
+                id: modelOption.string ?? modelOption["id"]?.string ?? "",
+                reasoningEffort: modelOption["effort"]?.string ?? options["effort"]?.string,
+                fast: bool(modelOption["fast"] ?? options["fast"]),
+                ultrafast: bool(modelOption["ultrafast"] ?? options["ultrafast"])
+            )
+            var config = FxConfiguration(
+                apiKey: options["apiKey"]?.string ?? "", model: model,
+                instructions: options["instructions"]?.string ?? "", tools: tools
+            )
+            if let url = options["gatewayChatUrl"]?.string, let endpoint = URL(string: url) { config.gatewayURL = endpoint }
+            config.httpClient = self
+            config.wireObserver = { [weak self] direction, message in
+                await self?.emit(.object(["diagnostic": .object([
+                    "type": .string(direction == .sent ? "acp.send" : "acp.receive"), "message": message,
+                ])]))
+            }
+            let checkpoint = options["checkpoint"]?.string.flatMap { Data(base64Encoded: $0) }
+            engine = try await FxEngine.open(
+                configuration: config, checkpoint: checkpoint,
+                persistence: options["hasPersistence"] == .bool(true) ? self : nil
+            )
+            let recovery = await engine!.recoveryState
+            return .object([
+                "sessionId": .string(engine!.sessionID), "resumable": .bool(recovery != nil),
+                "runningCalls": .array((recovery?.runningCalls ?? []).map {
+                    .object(["executionId": .string($0.executionID), "name": .string($0.name), "input": $0.input])
+                }),
+            ])
+        case "prompt", "resume":
+            guard let engine else { throw FxError.closed }
+            let next: FxTurn
+            if value["op"] == .string("resume") {
+                var ids: Set<String> = []
+                if case .array(let values) = value["rerun"] { ids = Set(values.compactMap(\.string)) }
+                guard let resumed = try await engine.resume(rerunning: ids) else { return .null }
+                next = resumed
+            } else if case .array(let blocks) = value["text"] {
+                let content = try blocks.map { block -> FxPromptContent in
+                    if block["type"] == .string("image") { return .image(try image(block)) }
+                    guard block["type"] == .string("text"), let text = block["text"]?.string else {
+                        throw FxError.invalidInput("Unsupported prompt content")
+                    }
+                    return .text(text)
+                }
+                next = try await engine.prompt(content)
+            } else { next = try await engine.prompt(value["text"]?.string ?? "") }
+            turn = next
+            Task {
+                do {
+                    for try await event in next { emit(.object(["event": encode(event)])) }
+                    let result = try await next.result
+                    emit(.object(["completed": encode(result)]))
+                } catch { emit(.object(["failed": .string(String(describing: error))])) }
+            }
+            return .null
+        case "cancel": await turn?.cancel(); return .null
+        case "checkpoint":
+            guard let engine else { throw FxError.closed }
+            return .string(try await engine.checkpoint().base64EncodedString())
+        case "close":
+            try await engine?.close()
+            engine = nil
+            for id in Array(fetchBodies.keys) { cancelFetch(id) }
+            for waiter in toolWaiters.values { waiter.resume(throwing: FxError.closed) }
+            toolWaiters.removeAll()
+            return .null
+        case "fetchStart":
+            guard let id = value["fetchID"]?.integer,
+                  let waiter = fetchWaiters.removeValue(forKey: id), let body = fetchStreams.removeValue(forKey: id) else {
+                throw FxError.invalidInput("Unknown fetch")
+            }
+            waiter.resume(returning: FxHTTPResponse(statusCode: value["status"]?.integer ?? 500, body: body))
+            return .null
+        case "fetchChunk":
+            guard let id = value["fetchID"]?.integer, let body = fetchBodies[id],
+                  let text = value["data"]?.string, let bytes = Data(base64Encoded: text) else {
+                throw FxError.invalidInput("Unknown fetch body")
+            }
+            if case .dropped = body.yield(bytes) { throw FxError.outputOverflow }
+            return .null
+        case "fetchEnd":
+            if let id = value["fetchID"]?.integer { fetchBodies.removeValue(forKey: id)?.finish() }
+            return .null
+        case "fetchFailure":
+            if let id = value["fetchID"]?.integer {
+                let error = FxError.transport(value["error"]?.string ?? "Fetch failed")
+                fetchWaiters.removeValue(forKey: id)?.resume(throwing: error)
+                fetchBodies.removeValue(forKey: id)?.finish(throwing: error)
+                fetchStreams.removeValue(forKey: id)
+            }
+            return .null
+        case "toolResult":
+            guard let requestID = value["toolID"]?.integer,
+                  let waiter = toolWaiters.removeValue(forKey: requestID) else { throw FxError.invalidInput("Unknown tool result") }
+            if let error = value["error"]?.string { waiter.resume(throwing: FxError.transport(error)) }
+            else if let result = value["rich"] {
+                do {
+                    let images: [FxImage]
+                    if case .array(let entries) = result["images"] { images = try entries.map(image) }
+                    else { images = [] }
+                    waiter.resume(returning: FxToolResult(
+                        text: result["text"]?.string ?? "", images: images, isError: result["isError"] == .bool(true)
+                    ))
+                } catch { waiter.resume(throwing: error) }
+            } else { waiter.resume(returning: FxToolResult(text: value["content"]?.string ?? "")) }
+            return .null
+        case "persistenceResult":
+            guard let id = value["persistenceID"]?.integer, let waiter = persistenceWaiters.removeValue(forKey: id) else {
+                throw FxError.invalidInput("Unknown persistence operation")
+            }
+            if let error = value["error"]?.string {
+                waiter.resume(throwing: value["code"] == .string("FX_FENCED") ? FxPersistenceError.fenced : FxError.transport(error))
+            } else { waiter.resume(returning: value["value"] ?? .null) }
+            return .null
+        default: throw FxError.invalidInput("Unknown driver operation")
+        }
+    }
+
+    private func persistenceRequest(_ kind: String, _ fields: [String: JSONValue] = [:]) async throws -> JSONValue {
+        let id = nextPersistenceID
+        nextPersistenceID += 1
+        return try await withCheckedThrowingContinuation { continuation in
+            persistenceWaiters[id] = continuation
+            var request = fields
+            request["id"] = .number(Double(id))
+            request["kind"] = .string(kind)
+            emit(.object(["persistenceRequest": .object(request)]))
+        }
+    }
+
+    func load() async throws -> FxPersistenceSnapshot {
+        let value = try await persistenceRequest("load")
+        var records: [FxJournalRecord] = []
+        if case .array(let entries) = value["journal"] {
+            for entry in entries {
+                guard let cursor = entry["cursor"]?.string, let encoded = entry["data"]?.string,
+                      let data = Data(base64Encoded: encoded) else { throw FxPersistenceError.invalidJournal }
+                records.append(.init(cursor: cursor, data: data))
+            }
+        }
+        var checkpoint: FxStoredCheckpoint?
+        if let saved = value["checkpoint"], saved != .null {
+            guard let through = saved["through"]?.string, let encoded = saved["data"]?.string,
+                  let data = Data(base64Encoded: encoded) else { throw FxPersistenceError.invalidJournal }
+            checkpoint = .init(through: through, data: data)
+        }
+        return FxPersistenceSnapshot(checkpoint: checkpoint, journal: records, head: value["head"]?.string)
+    }
+
+    func append(expected: String?, idempotencyKey: String, data: Data, barrier: Bool) async throws -> String {
+        let value = try await persistenceRequest("append", [
+            "expected": expected.map(JSONValue.string) ?? .null, "idempotencyKey": .string(idempotencyKey),
+            "data": .string(data.base64EncodedString()), "barrier": .bool(barrier),
+        ])
+        guard let cursor = value["cursor"]?.string else { throw FxPersistenceError.invalidCursor }
+        return cursor
+    }
+
+    private func bool(_ value: JSONValue?) -> Bool? {
+        guard case .bool(let flag) = value else { return nil }
+        return flag
+    }
+
+    private func image(_ value: JSONValue) throws -> FxImage {
+        guard let mime = value["mimeType"]?.string, let format = FxImageFormat(rawValue: mime) else {
+            throw FxError.invalidInput("Unsupported image format")
+        }
+        let reference = value["sourceRef"]?.string
+        if let encoded = value["data"]?.string, let data = Data(base64Encoded: encoded) {
+            return FxImage(data: data, format: format, sourceReference: reference)
+        }
+        if let reference { return FxImage(reference: reference, format: format) }
+        throw FxError.invalidInput("Image data or reference is required")
+    }
+
+    func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        let id = nextFetchID
+        nextFetchID += 1
+        let (body, continuation) = AsyncThrowingStream<Data, any Error>.makeStream(bufferingPolicy: .bufferingOldest(256))
+        fetchBodies[id] = continuation
+        fetchStreams[id] = body
+        continuation.onTermination = { [weak self] termination in
+            if case .cancelled = termination { Task { await self?.cancelFetch(id) } }
+        }
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { waiter in
+                fetchWaiters[id] = waiter
+                emit(.object(["fetchRequest": .object([
+                    "id": .number(Double(id)), "url": .string(request.url!.absoluteString),
+                    "method": .string(request.httpMethod ?? "GET"),
+                    "headers": .object((request.allHTTPHeaderFields ?? [:]).mapValues(JSONValue.string)),
+                    "body": .string((request.httpBody ?? Data()).base64EncodedString()),
+                ])]))
+            }
+        } onCancel: { Task { await self.cancelFetch(id) } }
+    }
+
+    private func cancelFetch(_ id: Int) {
+        fetchWaiters.removeValue(forKey: id)?.resume(throwing: FxError.cancelled)
+        fetchBodies.removeValue(forKey: id)?.finish(throwing: FxError.cancelled)
+        fetchStreams.removeValue(forKey: id)
+        emit(.object(["fetchCancelled": .number(Double(id))]))
+    }
+
+    private func callTool(_ name: String, input: JSONValue, context: FxToolContext) async throws -> FxToolResult {
+        let id = nextToolID
+        nextToolID += 1
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { waiter in
+                toolWaiters[id] = waiter
+                emit(.object(["toolRequest": .object([
+                    "id": .number(Double(id)), "name": .string(name), "input": input,
+                    "executionId": .string(context.executionID), "sessionId": .string(context.sessionID),
+                ])]))
+            }
+        } onCancel: { Task { await self.cancelTool(id) } }
+    }
+
+    private func cancelTool(_ id: Int) {
+        toolWaiters.removeValue(forKey: id)?.resume(throwing: FxError.cancelled)
+        emit(.object(["toolCancelled": .number(Double(id))]))
+    }
+
+    private func encode(_ event: FxEvent) -> JSONValue {
+        switch event {
+        case .text(let delta): return .object(["type": .string("text_delta"), "delta": .string(delta)])
+        case .reasoning(let delta): return .object(["type": .string("reasoning_delta"), "delta": .string(delta)])
+        case .userMessage(let text, let id):
+            var value: [String: JSONValue] = ["type": .string("user_message"), "text": .string(text)]
+            if let id { value["id"] = .string(id) }
+            return .object(value)
+        case .toolStarted(let id, let name, let input):
+            var value: [String: JSONValue] = ["type": .string("tool_start"), "id": .string(id), "name": .string(name)]
+            if let input { value["input"] = input }
+            return .object(value)
+        case .toolFinished(let id, let name, let content, let isError):
+            var value: [String: JSONValue] = ["type": .string("tool_end"), "id": .string(id), "name": .string(name), "isError": .bool(isError)]
+            if let content { value["content"] = .string(content) }
+            return .object(value)
+        }
+    }
+
+    private func encode(_ result: FxTurnResult) -> JSONValue {
+        var usage: [String: JSONValue] = [:]
+        for (name, value) in [
+            ("inputTokens", result.usage.inputTokens), ("outputTokens", result.usage.outputTokens),
+            ("cacheReadTokens", result.usage.cacheReadTokens), ("cacheWriteTokens", result.usage.cacheWriteTokens),
+            ("reasoningTokens", result.usage.reasoningTokens),
+        ] { if let value { usage[name] = .number(Double(value)) } }
+        return .object(["stopReason": .string(result.stopReason.rawValue), "usage": .object(usage)])
+    }
+}
+
+@main struct FxSwiftDriver {
+    static func main() async {
+        let driver = Driver()
+        do {
+            for try await line in FileHandle.standardInput.bytes.lines {
+                let value = try JSONDecoder().decode(JSONValue.self, from: Data(line.utf8))
+                Task { await driver.handle(value) }
+            }
+        } catch { await driver.emit(.object(["fatal": .string(String(describing: error))])) }
+        await driver.handle(.object(["op": .string("close")]))
+    }
+}

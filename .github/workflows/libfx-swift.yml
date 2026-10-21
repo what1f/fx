@@ -1,0 +1,42 @@
+name: libfx Swift
+
+on:
+  pull_request:
+    paths:
+      - 'swift/**'
+      - 'src/c_core_main.zig'
+      - 'src/native_core_runtime.zig'
+      - 'src/napi_core_main.zig'
+      - 'src/acp/**'
+      - 'src/core/**'
+      - 'build.zig'
+      - '.github/workflows/libfx-swift.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: libfx-swift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift:
+    name: Swift SDK (macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-zig
+        with:
+          version: '0.17.0'
+          cache-key: libfx-swift
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Build C archive and XCFramework
+        run: swift/scripts/build-xcframework.sh
+      - name: Test Swift SDK
+        run: swift test --package-path swift
+      - name: Test independent release consumer
+        run: swift/scripts/test-consumer.sh
+      - name: Build Node comparison backend
+        run: zig build libfx-napi -Dnapi-surface=core
+      - name: Run conformance checks
+        run: node swift/Tests/Conformance/run.mjs

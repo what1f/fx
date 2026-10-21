@@ -1,0 +1,76 @@
+# libfx-swift migration plan
+
+Status: implementation in progress. No Swift capability is qualified until its proof is recorded below.
+
+## Target
+
+Build a Swift package that runs the existing fx Zig agent core in process through a C ABI. Keep model orchestration, compaction, journal formats, and recovery decisions in their current Zig owners. Provide Swift interfaces for engines, turns, tools, streaming, sessions, and persistence.
+
+The first qualification platform is macOS arm64 with Swift 6. Linux and other Apple targets require their own build and runtime evidence. iOS support is not implied by a macOS build.
+
+## Architecture
+
+1. Extract the native runtime from the Node-API entry point into a shared Zig owner. Preserve queue limits, attachment limits, fetch cancellation, and shutdown rules.
+2. Expose that runtime through a versioned C ABI with opaque handles and explicit byte ownership. The Node backend continues using the same runtime.
+3. Implement a Swift transport and JSON-RPC client. Bridge HTTP through Foundation, tools through async closures, and output through asynchronous streams.
+4. Provide `FxEngine` for one conversation. Add `FxAgent`, `FxSession`, and durable storage without substituting a JavaScript implementation for Swift behavior.
+5. Add a JavaScript test adapter that forwards public operations to a Swift executable. Forward tool requests back to test closures. Preserve upstream assertions and use the actual Swift SDK for all engine behavior.
+
+## Swift design principles
+
+Use typed configuration, events, results, and errors with async/await and AsyncSequence. Keep JSON-RPC and JSON field names internal, except JSON values for tool schemas and dynamic tool inputs. Use actors where mutable state requires serialization. The JavaScript adapter translates API shape and reuses assertions; it must not implement missing Swift behavior. Target the current protocol only. Do not copy historical JavaScript compatibility branches or platform fallbacks.
+
+### Required goal acceptance conditions
+
+- Design the public API for Swift callers. Use Swift naming, value types, enums, structured concurrency, and explicit ownership where each fits. Do not translate TypeScript interfaces line by line.
+- Support current libfx functionality through idiomatic Swift operations. API names and shapes may differ; required behavior must have acceptance evidence in the matrix below.
+- Exclude historical TypeScript compatibility branches, deprecated API aliases, and JavaScript platform workarounds. Preserve current protocol contracts and persistence compatibility where required.
+- Keep the implementation small. Add abstractions only for current behavior, ownership, or a verified test need. Do not add speculative extension systems or compatibility layers.
+- Reuse upstream behavioral tests through a thin adapter. The adapter must call the Swift SDK for the behavior under test. Add Swift-native tests for concurrency, cancellation, memory ownership, and package integration.
+- Do not complete the goal while required functionality or verification remains missing. Record unsupported scope and unverified gates explicitly.
+
+## Contracts
+
+C calls report errors without unwinding across the ABI. Buffers have explicit lengths, and their producer supplies the matching free operation. Handles have a documented close and destroy order. No callback may retain an unowned Swift object. A single owner serializes runtime access and shutdown.
+
+Swift values crossing concurrency boundaries are Sendable. Cancellation must reach model transport and tool tasks. Closing rejects pending requests, terminates event streams, stops effects, and joins runtime work. Streaming has bounded buffering with an explicit overflow failure.
+
+Persistence preserves ordered append, expected cursor checks, durability barriers, version errors, and uncertain tool outcomes. Recovery must not blindly repeat a write. Checkpoint compatibility with JavaScript is a separate acceptance gate from ordinary Swift save and load.
+
+## Functional acceptance matrix
+
+| Area | Upstream test owners | Required Swift proof | Status |
+| --- | --- | --- | --- |
+| Startup, configuration, model catalog | test-minimal-api, test-agent-bootstrap, test-list-models | Equivalent validation and isolation | Partial: engine startup and model option proof; public catalog API pending |
+| Stream and results | test-core-output, test-native-core-stream | Deltas, finish reasons, usage, provider errors | Partial: Unicode, text, reasoning and result smoke |
+| Tools | test-host-tools, test-tool-contract, test-agent-tool-start | Advertisements, calls, results, errors, parallel admission | Partial: upstream host-tools and Swift result tests |
+| Cancellation and shutdown | test-core-cancel, test-host-tool-cancel, test-native-host-tool-late-settle | No late callbacks, deadlocks, or stranded requests | Partial: upstream host-tool cancellation and native lifecycle tests |
+| Steering | test-agent-steering | Interrupt, wait, join, withdraw, handoff | Pending |
+| Model options and providers | test-agent-effort, test-agent-fast, test-agent-ultrafast-options, test-agent-custom, test-agent-codex, test-agent-grok | Matching request behavior and validation | Partial: effort and fast; provider APIs pending |
+| Images and limits | test-agent-images, test-instruction-limits, test-native-core-image-framing | Input, tool images, UTF-8, frame bounds | Partial: binary input; resizing and image storage pending |
+| Journal and checkpoints | test-journal, test-checkpoint | Swift and JS restore in both directions | Partial: bidirectional checkpoint and journal proof; full suite pending |
+| Durable sessions | test-durable, test-durable-core, test-durable-provider-crash, test-world-persistence | Queue, deduplication, crash recovery, fencing | Pending |
+| Hooks | test-hooks | Event scopes and observation isolation | Pending |
+| MCP and skills | test-mcp-adapter, test-skills-adapter | Host adapters and cancellation | Pending |
+| Swift package | Swift native tests and clean consumer | Import, link, release build, lifecycle and concurrency | Partial: XCFramework and independent release consumer on arm64; CI pending |
+
+A generated inventory records every upstream SDK test file. Each test must be classified as reusable, adapted, or platform-specific with a reason. Platform-specific exclusions include Node/Wasm loading, npm packaging, browser terminal rendering, and Vercel deployment packaging. These exclusions do not silently remove engine behavior.
+
+## Verification strategy
+
+Run the unchanged Node backend tests after shared-runtime changes. Run the reusable upstream scenarios through both backends against the same scripted HTTP services. Compare semantic events and provider requests after normalizing random identifiers and timestamps. Preserve causal ordering without imposing a total order on concurrent tools.
+
+Add Swift-native tests for C buffer ownership, repeated close, object destruction, concurrent cancellation, malformed frames, and resource cleanup. Use Address Sanitizer and Thread Sanitizer in supported builds. Force process exit at tool and journal boundaries; check safe recovery and uncertain write handling.
+
+Run real-model smoke tests only with available credentials. Report unavailable credentials as an unverified gate. Build and run a clean Swift Package consumer using the packaged artifacts. Follow repository CI and runtime qualification before declaring the SDK complete.
+
+## Delivery sequence
+
+- [ ] Shared native runtime and C ABI, with Node regression proof.
+- [ ] Swift package, transport, JSON-RPC, lifecycle tests.
+- [ ] Engine, streaming, tools, cancellation, initial upstream adapter tests.
+- [ ] Providers, images, steering, hooks, context and checkpoints.
+- [ ] Durable sessions, crash recovery, MCP and skills adapters.
+- [ ] Full classified conformance report, real runtime proof, clean consumer and CI.
+
+A milestone is progress, not completion of the migration. Keep the goal active while required scope remains.
