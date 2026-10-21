@@ -29,6 +29,7 @@ actor Driver: FxHTTPClient, FxPersistence {
     private var agent: FxAgent?
     private var sessionStore: FxSessionStore?
     private var sessionDeliveries: [String: Task<Void, Never>] = [:]
+    private var sessionReaders: [String: Task<JSONValue, any Error>] = [:]
     private var refreshTasks: [String: Task<FxSubscriptionCredentials, any Error>] = [:]
     private var sessionTurns: [String: FxSessionTurn] = [:]
     private var refreshOperations: [String: FxSubscription.RefreshOperation] = [:]
@@ -62,6 +63,9 @@ actor Driver: FxHTTPClient, FxPersistence {
                 fields["category"] = .string("type")
             }
             if case FxError.noActiveTurn = error { fields["message"] = .string("no prompt is running") }
+            if case FxSessionError.messageIDInUse = error {
+                fields["data"] = .object(["code": .string("FX_MESSAGE_ID_IN_USE")])
+            }
             if let catalogError = error as? FxModelCatalogError {
                 fields["message"] = .string(catalogError.localizedDescription)
                 switch catalogError {
@@ -237,7 +241,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                     .object(["executionId": .string($0.executionID), "name": .string($0.name), "input": $0.input])
                 }),
             ])
-        case "sessionPrompt", "sessionResume":
+        case "sessionPrompt", "sessionResume", "sessionSteer":
             guard let agent, let sessionID = value["sessionID"]?.string else { throw FxError.closed }
             let session = try await agent.session(id: sessionID, options: sessionOptions(value["options"] ?? .null))
             let content: [FxPromptContent]
@@ -248,6 +252,10 @@ actor Driver: FxHTTPClient, FxPersistence {
                     return .text(text)
                 }
             } else { content = [.text(value["text"]?.string ?? "")] }
+            if value["op"] == .string("sessionSteer") {
+                let receipt = try await session.steer(content, id: value["messageID"]?.string ?? UUID().uuidString)
+                return .object(["messageId": .string(receipt.id)])
+            }
             let next: FxSessionTurn
             if value["op"] == .string("sessionResume") {
                 guard let resumed = try await session.resume() else { throw FxError.noActiveTurn }
@@ -278,6 +286,46 @@ actor Driver: FxHTTPClient, FxPersistence {
             guard let agent, let id = value["sessionID"]?.string else { throw FxError.closed }
             let session = try await agent.session(id: id, options: sessionOptions(value["options"] ?? .null))
             return .string(try await session.checkpoint().base64EncodedString())
+        case "sessionCancel":
+            guard let agent, let id = value["sessionID"]?.string else { throw FxError.closed }
+            let session = try await agent.session(id: id)
+            try await session.cancel()
+            return .null
+        case "sessionNextEvent":
+            guard let agent, let id = value["sessionID"]?.string, let token = value["readToken"]?.string else { throw FxError.closed }
+            let session = try await agent.session(id: id)
+            let cursor = Int64(value["cursor"]?.integer ?? 0)
+            let read = Task {
+                var iterator = session.events(after: cursor).makeAsyncIterator()
+                guard let entry = try await iterator.next() else { return JSONValue.null }
+                var fields: [String: JSONValue] = ["cursor": .number(Double(entry.cursor)), "epoch": .number(Double(entry.epoch))]
+                switch entry.event {
+                case .started(let id, let session):
+                    fields["type"] = .string("turn_start")
+                    fields["messageId"] = .string(id); fields["sessionId"] = .string(session)
+                case .resumed(let id, let session):
+                    fields["type"] = .string("turn_resume")
+                    fields["messageId"] = .string(id); fields["sessionId"] = .string(session)
+                case .update(let id, let event):
+                    if case .object(let update) = encode(event) { fields.merge(update) { _, new in new } }
+                    fields["messageId"] = .string(id)
+                case .ended(let result):
+                    fields["type"] = .string("turn_end"); fields["messageId"] = .string(result.id)
+                    fields["stopReason"] = .string(result.stopReason.rawValue)
+                    fields["usage"] = try result.usage.map { try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode($0)) } ?? .object([:])
+                    if let error = result.error { fields["error"] = .object(["message": .string(error)]) }
+                }
+                return JSONValue.object(fields)
+            }
+            sessionReaders[token] = read
+            defer { sessionReaders.removeValue(forKey: token) }
+            return try await read.value
+        case "sessionReadCancel":
+            if let token = value["readToken"]?.string, let read = sessionReaders[token] {
+                read.cancel()
+                _ = await read.result
+            }
+            return .null
         case "refreshLockedOperation":
             guard let token = value["token"]?.string, let operation = refreshOperations.removeValue(forKey: token) else { throw FxError.closed }
             let task = Task { try await operation() }
@@ -369,6 +417,8 @@ actor Driver: FxHTTPClient, FxPersistence {
             try await engine.saveCheckpoint()
             return .null
         case "close":
+            for read in sessionReaders.values { read.cancel() }
+            for read in Array(sessionReaders.values) { _ = await read.result }
             try await agent?.close()
             agent = nil
             for task in Array(sessionDeliveries.values) { await task.value }

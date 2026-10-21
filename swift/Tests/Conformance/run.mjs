@@ -19,7 +19,18 @@ const checks = [
   ].map(([kind, test]) => ({ name: `upstream/test-durable-checkpoint-${kind}`, expected: '1/1 durable tests passed', env: { LIBFX_TEST_ONLY: test }, args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable.mjs', 'memory', 'native',
   ] })),
-  ...['smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing', 'turn-identity', 'handoff', 'follow-up', 'custom-provider', 'provider-suites', 'agent-crash', 'session-checkpoint'].map(name => ({
+  ...[
+    ['tool', 'a steer reaches the running turn at its next model request'],
+    ['stream', 'a steer cuts a streaming reply short, and the turn goes on with it'],
+    ['quiet', 'a steer cuts short a reply that has gone quiet'],
+    ['image', 'a steer with an image ends the streaming turn, and runs as the next turn'],
+    ['cancel', 'a cancel keeps the steer its turn never took, and it runs next'],
+    ['tool-cancel', 'a cancel while the model writes a tool call keeps the steer waiting for the call, and it runs next'],
+    ['dedup', "a steer's messageId makes a retry add nothing, and names no prompt"],
+  ].map(([kind, test]) => ({ name: `upstream/test-durable-steering-${kind}`, expected: '1/1 durable tests passed', env: { LIBFX_TEST_ONLY: test }, args: [
+    '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable.mjs', 'memory', 'native',
+  ] })),
+  ...['smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing', 'turn-identity', 'handoff', 'follow-up', 'custom-provider', 'provider-suites', 'agent-crash', 'session-checkpoint', 'session-steering-crash'].map(name => ({
     name, args: [`swift/Tests/Conformance/${name}.mjs`],
   })),
 ];

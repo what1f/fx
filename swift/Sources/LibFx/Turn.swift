@@ -51,6 +51,7 @@ public struct FxTurn: AsyncSequence, Sendable, Identifiable {
     let completion: Task<FxTurnResult, any Error>
     let cancelAction: @Sendable () async -> Void
     let handoffAction: @Sendable () async throws -> Void
+    let endForSteeringAction: @Sendable () async throws -> Void
     let steerAction: @Sendable (String, String) async throws -> FxSteeringReceipt
     let withdrawAction: @Sendable (String) async throws -> FxWithdrawal
 
@@ -84,7 +85,7 @@ public struct FxTurn: AsyncSequence, Sendable, Identifiable {
         return FxTurn(
             id: id, events: events,
             completion: Task<FxTurnResult, any Error> { FxTurnResult(stopReason: .endTurn, usage: FxUsage(nil)) },
-            cancelAction: {}, handoffAction: {}, steerAction: { _, _ in throw FxError.noActiveTurn },
+            cancelAction: {}, handoffAction: {}, endForSteeringAction: {}, steerAction: { _, _ in throw FxError.noActiveTurn },
             withdrawAction: { _ in .alreadyPlaced }
         )
     }

@@ -383,6 +383,10 @@ public actor FxEngine {
                 guard let self else { throw FxError.closed }
                 try await self.handoff(turn: id)
             },
+            endForSteeringAction: { [weak self] in
+                guard let self else { throw FxError.closed }
+                try await self.endForSteering(turn: id)
+            },
             steerAction: { [weak self] text, inputID in
                 guard let self else { throw FxError.closed }
                 return try await self.steer(turn: id, text: text, inputID: inputID)
@@ -545,6 +549,13 @@ public actor FxEngine {
         ]))
         try await journal?.check()
         return FxSteeringReceipt(id: inputID)
+    }
+
+    private func endForSteering(turn id: UUID) async throws {
+        guard !closed else { throw FxError.closed }
+        guard isActive(id), await promptDispatch?.wait() == true, isActive(id) else { return }
+        _ = try await rpc.request("libfx/handoff", .object(["sessionId": .string(sessionID)]))
+        try await journal?.check()
     }
 
     private func withdraw(turn id: UUID, inputID: String) async throws -> FxWithdrawal {

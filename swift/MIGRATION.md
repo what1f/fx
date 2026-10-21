@@ -24,6 +24,8 @@ Use typed configuration, events, results, and errors with async/await and AsyncS
 
 These conditions are binding requirements for the active libfx-swift goal. Evaluate completion against both these conditions and the functional acceptance matrix below.
 
+The user's Swift requirements are mandatory acceptance criteria: follow Swift best practices, avoid a literal TypeScript port, omit historical TypeScript compatibility logic, and avoid overdesign. Cover current libfx behavior with working Swift functionality and recorded tests. Matching TypeScript API names or shapes is not a completion criterion.
+
 Treat the user's current repository instructions as execution requirements throughout this goal. A passing JavaScript conformance suite alone does not establish completion: the Swift implementation must also pass its native ownership, concurrency, recovery, and package-consumer gates.
 
 - Design the public API for Swift callers. Use Swift naming, value types, enums, structured concurrency, and explicit ownership where each fits. Do not translate TypeScript interfaces line by line.
@@ -53,7 +55,7 @@ Persistence preserves ordered append, expected cursor checks, durability barrier
 | Stream and results | test-core-output, test-native-core-stream | Deltas, finish reasons, usage, provider errors | Partial: Unicode, text, reasoning and result smoke |
 | Tools | test-host-tools, test-tool-contract, test-agent-tool-start | Advertisements, calls, results, errors, parallel admission | Partial: upstream host-tools and Swift result tests |
 | Cancellation and shutdown | test-core-cancel, test-host-tool-cancel, test-native-host-tool-late-settle | No late callbacks, deadlocks, or stranded requests | Partial: upstream host-tool cancellation and native lifecycle tests |
-| Steering | test-agent-steering | Interrupt, wait, join, withdraw, handoff | Partial: upstream steering, withdrawal, old-turn isolation, persisted handoff and queued follow-ups across Swift/JS engines; durable image handoff pending |
+| Steering | test-agent-steering | Interrupt, wait, join, withdraw, handoff | Partial: upstream engine steering, withdrawal, old-turn isolation, persisted handoff and queued follow-ups across Swift/JS engines; seven selected durable steering scenarios, including image handoff and cancellation, plus two worker SIGKILL boundaries; full durable suite pending |
 | Model options and providers | test-agent-effort, test-agent-fast, test-agent-ultrafast-options, test-agent-custom, test-agent-codex, test-agent-grok | Matching request behavior and validation | Partial: effort and fast, complete upstream custom-provider, Codex and Grok files, shared rotations and host locks, error redaction and Foundation redirect isolation; sign-in helpers and remaining model-option suites pending |
 | Images and limits | test-agent-images, test-instruction-limits, test-native-core-image-framing | Input, tool images, UTF-8, frame bounds | Partial: binary input; resizing and image storage pending |
 | Journal and checkpoints | test-journal, test-checkpoint | Swift and JS restore in both directions | Partial: bidirectional checkpoint and journal proof, explicit and automatic snapshot save and restore, read-only session exports and new-agent seeds with images, metadata mismatch notifications and five upstream durable checkpoint scenarios; full suite pending |

@@ -9,7 +9,7 @@ import Glibc
 
 /// Durable intake, event history, and core journals. A nil URL keeps all data in memory.
 public actor FxSessionStore {
-    private let database: SQLiteDatabase
+    let database: SQLiteDatabase
     private let lockDirectory: URL?
     private struct HeldLease { let lease: SessionLease; let descriptor: Int32? }
     private var held: [String: HeldLease] = [:]
@@ -36,13 +36,23 @@ public actor FxSessionStore {
                 guard try database.step(statement) else { throw FxPersistenceError.invalidJournal }
                 return Int(sqlite3_column_int(statement, 0))
             }
-            guard version == 1 else { throw FxSQLiteError.unsupportedVersion(version) }
+            guard version == 1 || version == 2 else { throw FxSQLiteError.unsupportedVersion(version) }
             try database.execute("CREATE TABLE IF NOT EXISTS fx_sessions (id TEXT PRIMARY KEY, agent TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0, owner TEXT, head INTEGER NOT NULL DEFAULT 0, checkpoint_cursor INTEGER, checkpoint BLOB)")
             try database.execute("CREATE TABLE IF NOT EXISTS fx_inputs (sequence INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, id TEXT NOT NULL, content BLOB NOT NULL, options BLOB NOT NULL, started INTEGER NOT NULL DEFAULT 0, cancelled INTEGER NOT NULL DEFAULT 0, result BLOB, UNIQUE(session,id))")
             try database.execute("CREATE TABLE IF NOT EXISTS fx_session_events (cursor INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, epoch INTEGER NOT NULL, data BLOB NOT NULL)")
             try database.execute("CREATE INDEX IF NOT EXISTS fx_session_events_read ON fx_session_events(session,cursor)")
             try database.execute("CREATE TABLE IF NOT EXISTS fx_session_records (session TEXT NOT NULL, cursor INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY(session,cursor))")
             try database.execute("CREATE TABLE IF NOT EXISTS fx_session_writes (session TEXT NOT NULL, key TEXT NOT NULL, cursor INTEGER NOT NULL, digest BLOB NOT NULL, PRIMARY KEY(session,key))")
+            if version == 1 {
+                try database.execute("ALTER TABLE fx_inputs ADD COLUMN kind TEXT NOT NULL DEFAULT 'prompt'")
+                try database.execute("ALTER TABLE fx_inputs ADD COLUMN target TEXT")
+                try database.execute("ALTER TABLE fx_inputs ADD COLUMN accepted INTEGER NOT NULL DEFAULT 0")
+                try database.execute("ALTER TABLE fx_inputs ADD COLUMN placed INTEGER NOT NULL DEFAULT 0")
+                try database.execute("ALTER TABLE fx_inputs ADD COLUMN ends INTEGER NOT NULL DEFAULT 0")
+                try database.execute("ALTER TABLE fx_inputs ADD COLUMN core_id TEXT")
+                try database.execute("UPDATE fx_agent_schema SET version=2 WHERE id=1")
+            }
+            try database.execute("CREATE INDEX IF NOT EXISTS fx_inputs_core ON fx_inputs(session,core_id)")
         }
         self.database = database
         self.lockDirectory = canonicalURL.map { URL(fileURLWithPath: $0.path + ".locks", isDirectory: true) }
@@ -58,7 +68,7 @@ public actor FxSessionStore {
         try database.close()
     }
 
-    func accept(session: String, agent: String, id: String, content: [FxPromptContent], options: FxSessionOptions, checkpoint: Data? = nil) throws -> Bool {
+    func accept(session: String, agent: String, id: String, content: [FxPromptContent], options: FxSessionOptions, checkpoint: Data? = nil, steering: Bool = false) throws -> Bool {
         guard validSessionIdentifier(session), validSessionIdentifier(id) else { throw FxError.invalidInput("Invalid session or message ID") }
         _ = try PreparedPrompt(content)
         let data = try JSONEncoder().encode(content), settings = try JSONEncoder().encode(options)
@@ -74,9 +84,23 @@ public actor FxSessionStore {
                 try database.execute("UPDATE fx_sessions SET head=1,checkpoint_cursor=1,checkpoint=? WHERE id=?", [.blob(sessionSeed(checkpoint)), .text(session)])
             }
             try checkAgent(session, agent: agent)
-            let prior = try database.statement("SELECT 1 FROM fx_inputs WHERE session=? AND id=?", [.text(session), .text(id)]) { try database.step($0) }
+            let prior = try database.statement("SELECT kind FROM fx_inputs WHERE session=? AND id=?", [.text(session), .text(id)]) { statement in
+                guard try database.step(statement) else { return false }
+                guard database.text(statement, column: 0) == (steering ? "steer" : "prompt") else { throw FxSessionError.messageIDInUse }
+                return true
+            }
             if prior { return true }
-            try database.execute("INSERT INTO fx_inputs(session,id,content,options) VALUES (?,?,?,?)", [.text(session), .text(id), .blob(data), .blob(settings)])
+            let owner = steering ? try steeringOwner(session: session) : nil
+            let joinable = content.allSatisfy { if case .text = $0 { return true }; return false }
+            if steering, joinable {
+                let text = content.compactMap { if case .text(let text) = $0 { return text }; return nil }.joined(separator: "\n")
+                guard text.utf8.count <= 64 * 1024 else { throw FxError.invalidInput("Steering text exceeds the size limit") }
+            }
+            if steering, !joinable, let owner {
+                try database.execute("UPDATE fx_inputs SET ends=1 WHERE session=? AND id=?", [.text(session), .text(owner)])
+            }
+            let target: SQLiteDatabase.Value = steering && joinable ? owner.map(SQLiteDatabase.Value.text) ?? .null : .null
+            try database.execute("INSERT INTO fx_inputs(session,id,content,options,kind,target,core_id) VALUES (?,?,?,?,?,?,?)", [.text(session), .text(id), .blob(data), .blob(settings), .text(steering ? "steer" : "prompt"), target, .text(sessionCoreInputID(id))])
             return false
         }
     }
@@ -141,11 +165,11 @@ public actor FxSessionStore {
         guard valid else { throw FxPersistenceError.fenced }
     }
 
-    private func checkAgent(_ session: String, agent: String) throws {
+    func checkAgent(_ session: String, agent: String) throws {
         guard try agentName(session) == agent else { throw FxSessionError.wrongAgent }
     }
 
-    private func agentName(_ session: String) throws -> String {
+    func agentName(_ session: String) throws -> String {
         try database.statement("SELECT agent FROM fx_sessions WHERE id=?", [.text(session)]) { statement in
             guard try database.step(statement) else { throw FxSessionError.notFound }
             return database.text(statement, column: 0)
@@ -155,7 +179,7 @@ public actor FxSessionStore {
     func next(_ lease: SessionLease) throws -> SessionInput? {
         try database.transaction {
             try checkLease(lease)
-            return try database.statement("SELECT id,content,options,started,cancelled FROM fx_inputs WHERE session=? AND result IS NULL ORDER BY sequence LIMIT 1", [.text(lease.sessionID)]) { statement in
+            return try database.statement("SELECT id,content,options,started,cancelled FROM fx_inputs WHERE session=? AND result IS NULL AND target IS NULL ORDER BY sequence LIMIT 1", [.text(lease.sessionID)]) { statement in
                 guard try database.step(statement) else { return nil }
                 return SessionInput(id: database.text(statement, column: 0),
                     content: try JSONDecoder().decode([FxPromptContent].self, from: database.bytes(statement, column: 1)),
@@ -195,6 +219,7 @@ public actor FxSessionStore {
             }
             try insertEvent(lease, .ended(result))
             try database.execute("UPDATE fx_inputs SET result=? WHERE session=? AND id=? AND result IS NULL", [.blob(try JSONEncoder().encode(result)), .text(lease.sessionID), .text(id)])
+            try finishSteering(lease, owner: id, result: result)
         }
     }
 
@@ -309,6 +334,7 @@ public actor FxSessionStore {
             guard state.head < Int64.max else { throw FxPersistenceError.sizeLimit }
             let cursor = state.head + 1
             try database.execute("INSERT INTO fx_session_records VALUES (?,?,?)", [.text(lease.sessionID), .integer(cursor), .blob(data)])
+            try recordSteering(data, session: lease.sessionID)
             try database.execute("INSERT INTO fx_session_writes VALUES (?,?,?,?)", [.text(lease.sessionID), .text(key), .integer(cursor), .blob(digest)])
             try database.execute("UPDATE fx_sessions SET head=? WHERE id=?", [.integer(cursor), .text(lease.sessionID)])
             return String(cursor)

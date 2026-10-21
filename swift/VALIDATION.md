@@ -8,7 +8,7 @@ Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. 
 
 ## Implemented proof
 
-`swift test --package-path swift` passed 92 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
+`swift test --package-path swift` passed 99 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
 
 - Fragmented UTF-8 frames, host requests, cancellation, oversized frames, and pending requests during close.
 - HTTP response status, Unicode, bounded chunks, invalid responses, and cancellation before headers.
@@ -29,7 +29,9 @@ Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. 
 
 The agent/session implementation has 20 native tests. They cover durable ordered intake, historical message-ID deduplication, per-reader replay, scoped queued cancellation, graceful close, competing local connections and agents, stale-owner rejection, snapshot rollback, wrong-agent rejection, persisted tool context and public identities, and configuration failures before storage or network access. Two recovery fixtures distinguish a started input with no core dispatch from a completed core turn with no saved host result. The former runs normally; the latter returns `.unknown` without another model call. These fixtures simulate those boundaries in process; they are not SIGKILL qualification of the new session store.
 
-`FxSessionStore` stores intake, events, and core journals in one SQLite database. Ownership checks and writes share an immediate transaction, following [SQLite's documented isolation rules](https://www.sqlite.org/isolation.html). A separate local file lock covers the worker lifetime. The Release consumer also imports the public agent/session API, runs a durable turn, replays its events, and checks historical-ID deduplication. Full upstream durable-session coverage, steering and deadlines remain pending.
+`FxSessionStore` stores intake, events, and core journals in one SQLite database. Ownership checks and writes share an immediate transaction, following [SQLite's documented isolation rules](https://www.sqlite.org/isolation.html). A separate local file lock covers the worker lifetime. The Release consumer also imports the public agent/session API, runs a durable turn, accepts steering, replays its events, and checks historical-ID deduplication. Full upstream durable-session coverage and deadlines remain pending.
+
+Five native steering tests cover streamed text interruption, idle execution, deduplication and prompt/steer ID conflicts, multiple unplaced inputs after cancellation, image handoff with later text, and steering from another store connection and agent. Two additional store tests verify that steering marks roll back with a failed journal append, retrying an old append does not reapply its marks, and migration from schema version 1 preserves queued inputs and their options. The store is now at schema version 2. Acceptance and placement marks commit in the same transaction as their core journal records.
 
 Native observation tests verify metadata on exports and snapshots, continued restoration after a change, stable tool identity despite dictionary and tool ordering, changed model and replay flags, credential omission, and containment of an observer error. New-agent seed validation suppresses duplicate notices; the worker that restores the seed emits the notice. Agent interval tests check explicit zero and nil settings and rejection of negative intervals.
 
@@ -61,11 +63,14 @@ These eight files, including a second steering run with hooks enabled, pass thro
 
 Five selected tests from the unchanged upstream `test-durable.mjs` passed: automatic snapshots at the durable threshold, changed replay declarations, metadata changes, restoring a conversation in a new agent, and carrying an image through a checkpoint. This is selected coverage, not qualification of the full durable suite. The runner requires one executed passing test per selection, so a renamed or missing test cannot produce a passing empty selection. Two other checkpoint-named tests use the shared scripted JavaScript harness; they are not counted as Swift SDK proof.
 
+Seven further selections from that file passed: steering during a tool, interrupting a streaming response, interrupting a quiet response, moving image steering to the next turn, retaining unplaced steering after cancellation, retaining it while cancelling a streamed tool call, and enforcing retry deduplication and the shared prompt/steer ID namespace. The adapter forwards steering, cancellation, and persisted event reads to Swift. Unsupported storage descriptors fail explicitly; queue and world-shaped fixtures cannot silently use the local memory store.
+
 Additional executable checks passed:
 
 - `smoke.mjs`: local HTTP server, Unicode and reasoning, host tool execution, checkpoint restore, and repeated close.
 - `checkpoint-interoperability.mjs`: JS to Swift to JS, preserving earlier turns and image bytes.
 - `session-checkpoint.mjs`: JavaScript, Swift journal, and Swift snapshot sources restored in both JavaScript and Swift; exports preserve text, responses, and image bytes without a model request.
+- `session-steering-crash.mjs`: SIGKILL after persisted acceptance before placement, and after placement during a partial model response. A new Swift process restores each session, places guidance once, preserves turn and tool execution IDs, and does not create an extra steering turn. The accepted boundary reruns its declared idempotent tool; the placed boundary retains its completed result.
 - `journal-interoperability.mjs`: Swift to JS to Swift using one persistence store.
 - `recovery.mjs`: journal truncated at tool intent; ambiguous writes remain stopped by default, while explicit rerun preserves execution ID.
 - `turn-control.mjs`: withdrawal while a tool is running, plus controls from an old turn leaving a new turn unaffected.
@@ -77,9 +82,9 @@ Additional executable checks passed:
 - `handoff.mjs`: Swift and JavaScript in both source and target roles; the source makes no later journal writes or automatic snapshots, the target receives the pending steer and skips the ambiguous write, and the source's turn-end observation marks the handoff.
 - `follow-up.mjs`: reference JavaScript and Swift automatic queues, durable acceptance and exactly one placement per input, plus recovery in both source and target roles; held inputs wait for explicit resume while current inputs run independently.
 
-`node swift/Tests/Conformance/run.mjs` reruns the 27 selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
+`node swift/Tests/Conformance/run.mjs` reruns the 35 selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
 
-`swift test --package-path swift --sanitize=thread` passed all 92 Swift tests without a sanitizer warning. The first focused run reported concurrent access to the native handle during shutdown. The transport now waits for the [Dispatch source's cancellation handler](https://developer.apple.com/documentation/dispatch/dispatch_source_set_cancel_handler) and destroys the handle on its actor. This check instruments Swift code; the precompiled Zig archive is not instrumented. The Swift CI workflow repeats the check after conformance testing.
+`swift test --package-path swift --sanitize=thread` passed all 99 Swift tests without a sanitizer warning. The first focused run reported concurrent access to the native handle during shutdown. The transport now waits for the [Dispatch source's cancellation handler](https://developer.apple.com/documentation/dispatch/dispatch_source_set_cancel_handler) and destroys the handle on its actor. This check instruments Swift code; the precompiled Zig archive is not instrumented. The Swift CI workflow repeats the check after conformance testing.
 
 The session byte decoder now looks up Base64 fields by name. Swift JSON encoding exposed its previous field-order dependency. A Zig regression test accepts both orders while retaining strict field, encoding, and decoded-byte validation.
 
@@ -89,7 +94,7 @@ After this decoder change, `zig build test` passed. The original Node checkpoint
 
 ## Required remaining gates
 
-- Full classified upstream test coverage, including sign-in helpers, durable image handoff, parent and tool-local observation scopes, image processing and storage, and full durable agent and session behavior.
+- Full classified upstream test coverage, including sign-in helpers, parent and tool-local observation scopes, image processing and storage, and full durable agent and session behavior.
 - Additional storage integrations, durability barriers under slow storage, and systematic termination across all effect boundaries.
 - Address Sanitizer, instrumentation of the native core, and concurrency stress tests, especially cancellation during preparation and storage.
 - Runtime proof for x86_64 and final consumer validation against the release artifact.

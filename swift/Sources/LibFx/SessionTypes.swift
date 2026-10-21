@@ -1,4 +1,9 @@
 import Foundation
+import CryptoKit
+
+func sessionCoreInputID(_ id: String) -> String {
+    "turn_" + SHA256.hash(data: Data(id.utf8)).map { String(format: "%02x", $0) }.joined()
+}
 
 func validSessionIdentifier(_ value: String) -> Bool {
     !value.isEmpty && value.utf8.count <= 255 && value.utf8.allSatisfy {
@@ -10,6 +15,7 @@ public enum FxSessionError: Error, Sendable, Equatable {
     case wrongAgent
     case notFound
     case invalidCursor
+    case messageIDInUse
 }
 
 public struct FxSessionOptions: Sendable, Codable, Equatable {

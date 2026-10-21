@@ -63,7 +63,7 @@ export async function createFxEngine(options = {}) {
         .then(credentials => request('refreshLockResult', { token: call.token, credentials }),
           () => request('refreshLockResult', { token: call.token })).catch(() => {});
     } else if (value.sessionAccepted) {
-      acceptedSessions.get(value.sessionAccepted)?.resolve({ id: value.messageID, sessionId: value.sessionID });
+      acceptedSessions.get(value.sessionAccepted)?.resolve({ id: value.messageID, messageId: value.messageID, sessionId: value.sessionID });
       acceptedSessions.delete(value.sessionAccepted);
     } else if (value.credentialRequest) {
       const call = value.credentialRequest;
@@ -255,6 +255,25 @@ export async function createFxEngine(options = {}) {
       async sessionCheckpoint(sessionID, sessionOptions) {
         return new Uint8Array(Buffer.from(await request('sessionCheckpoint', { sessionID, options: sessionOptions }), 'base64'));
       },
+      async sessionSteer(sessionID, input, id, sessionOptions) {
+        return request('sessionSteer', { sessionID, text: input, messageID: id, options: sessionOptions });
+      },
+      async sessionCancel(sessionID) { return request('sessionCancel', { sessionID }); },
+      sessionStream(sessionID, cursor = 0) {
+        const readToken = randomUUID();
+        let cancelled = false;
+        return new ReadableStream({
+          async pull(controller) {
+            if (cancelled) return;
+            const event = await request('sessionNextEvent', { sessionID, cursor, readToken });
+            if (cancelled) return;
+            if (!event) { controller.close(); return; }
+            cursor = event.cursor;
+            controller.enqueue(new TextEncoder().encode(JSON.stringify(event) + '\n'));
+          },
+          async cancel() { cancelled = true; await request('sessionReadCancel', { readToken }); },
+        });
+      },
       async __killForTest() {
         closed = true;
         child.kill('SIGKILL');
@@ -430,10 +449,11 @@ export function memory() {
 
 export function createFxAgent(options = {}) {
   const durability = options.durability ?? memory();
+  if (typeof durability.__swiftSessionPath !== 'string') throw new TypeError('Unsupported Swift conformance storage descriptor');
   const ready = createFxEngine({ ...options, __agent: true, sessionStorePath: durability.__swiftSessionPath });
   ready.catch(() => {});
   function turnView(sessionID, sessionOptions, input, promptOptions = {}, resume = false) {
-    let id = promptOptions.id ?? randomUUID();
+    let id = promptOptions.messageId ?? promptOptions.id ?? randomUUID();
     const started = ready.then(agent => agent.sessionPrompt(sessionID, input, id, sessionOptions, resume));
     const accepted = started.then(turn => turn.accepted).then(receipt => { id = receipt.id; return receipt; });
     const result = started.then(turn => turn.result);
@@ -451,6 +471,25 @@ export function createFxAgent(options = {}) {
         prompt(input, promptOptions) { return turnView(sessionID, sessionOptions, input, promptOptions); },
         resume() { return turnView(sessionID, sessionOptions, '', {}, true); },
         async checkpoint() { return (await ready).sessionCheckpoint(sessionID, sessionOptions); },
+        async steer(input, { messageId = randomUUID() } = {}) {
+          return (await ready).sessionSteer(sessionID, input, messageId, sessionOptions);
+        },
+        async cancel() { return (await ready).sessionCancel(sessionID); },
+        stream(cursor = 0) {
+          let reader;
+          let cancelled = false;
+          return new ReadableStream({
+            async pull(controller) {
+              const remote = await ready;
+              if (cancelled) return;
+              reader ??= remote.sessionStream(sessionID, cursor).getReader();
+              const { value, done } = await reader.read();
+              if (cancelled) return;
+              if (done) controller.close(); else controller.enqueue(value);
+            },
+            async cancel() { cancelled = true; await reader?.cancel(); },
+          });
+        },
       };
     },
     prompt(input, promptOptions) {

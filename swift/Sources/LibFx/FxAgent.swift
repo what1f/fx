@@ -1,5 +1,4 @@
 import Foundation
-import CryptoKit
 
 /// Owns workers for durable conversations. The caller owns the session store.
 public actor FxAgent {
@@ -31,7 +30,7 @@ public actor FxAgent {
         return FxSession(id: id, options: options, agent: self)
     }
 
-    func accept(session: String, options: FxSessionOptions, content: [FxPromptContent], id: String) async throws -> FxSessionTurn {
+    func accept(session: String, options: FxSessionOptions, content: [FxPromptContent], id: String, steering: Bool = false) async throws -> FxSessionTurn {
         guard !closed else { throw FxError.closed }
         intakes += 1
         defer { intakes -= 1 }
@@ -46,7 +45,7 @@ public actor FxAgent {
             }
         }
         try Task.checkCancellation()
-        let repeated = try await store.accept(session: session, agent: name, id: id, content: content, options: options, checkpoint: initialCheckpoint)
+        let repeated = try await store.accept(session: session, agent: name, id: id, content: content, options: options, checkpoint: initialCheckpoint, steering: steering)
         kick(session)
         return FxSessionTurn(id: id, sessionID: session, isRepeated: repeated, agent: self)
     }
@@ -163,7 +162,7 @@ public actor FxAgent {
             return
         }
         do {
-            let turnID = "turn_" + SHA256.hash(data: Data(input.id.utf8)).map { String(format: "%02x", $0) }.joined()
+            let turnID = sessionCoreInputID(input.id)
             let recovery = await engine.recoveryState
             let turn: FxTurn
             if let recovery {
@@ -179,24 +178,46 @@ public actor FxAgent {
                 try await engine.close()
                 return
             } else { turn = try await engine.prompt(input.content, id: turnID) }
-            let cancellation = Task {
-                while !Task.isCancelled {
-                    if try await store.cancelled(lease, id: input.id) {
-                        await turn.cancel()
-                        return
+            let controls = Task {
+                var ending = false
+                do {
+                    while !Task.isCancelled {
+                        if try await store.cancelled(lease, id: input.id) {
+                            await turn.cancel()
+                            return
+                        }
+                        let steering = try await store.steering(lease, owner: input.id)
+                        if !ending {
+                            for steer in steering.pending {
+                                do { _ = try await turn.steer(steer.text, id: sessionCoreInputID(steer.id)) }
+                                catch FxError.noActiveTurn { return }
+                                catch FxError.rpc(_, "No prompt is running", _) { return }
+                                catch FxError.rpc(_, "Steering queue is full", _) { break }
+                            }
+                            if steering.ends {
+                                ending = true
+                                try await turn.endForSteeringAction()
+                            }
+                        }
+                        try await Task.sleep(for: .milliseconds(20))
                     }
-                    try await Task.sleep(for: .milliseconds(20))
-                }
+                } catch is CancellationError {} catch { await turn.cancel(); throw error }
             }
             do {
-                for try await event in turn { try await store.appendEvent(lease, .update(id: input.id, event)) }
+                for try await event in turn {
+                    var event = event
+                    if case .userMessage(let text, let id?) = event {
+                        event = .userMessage(text, id: try await store.publicInputID(id, session: lease.sessionID) ?? id)
+                    }
+                    try await store.appendEvent(lease, .update(id: input.id, event))
+                }
                 let result = try await turn.result
-                cancellation.cancel()
-                _ = await cancellation.result
+                controls.cancel()
+                try await controls.value
                 try await finish(input, lease: lease, reason: result.stopReason, usage: result.usage)
             } catch {
-                cancellation.cancel()
-                _ = await cancellation.result
+                controls.cancel()
+                _ = await controls.result
                 await turn.cancel()
                 throw error
             }
