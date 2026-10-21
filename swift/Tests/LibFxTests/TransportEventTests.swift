@@ -10,7 +10,7 @@ private final class TransportEvents: @unchecked Sendable {
 }
 
 private actor DiagnosticHTTP: FxHTTPClient {
-    enum Mode { case normal, retry, cancelled, bodyFailure, late }
+    enum Mode { case normal, retry, cancelled, bodyFailure, late, progress }
     struct PrivateFailure: Error, CustomStringConvertible {
         var description: String { "transport-private-key private-input" }
     }
@@ -42,6 +42,26 @@ private actor DiagnosticHTTP: FxHTTPClient {
         if mode == .retry && posts == 1 { throw PrivateFailure() }
         if mode == .cancelled { throw CancellationError() }
         if mode == .late { await withCheckedContinuation { release = $0 } }
+        if mode == .progress {
+            let chunks = [
+                "data: {\"type\":\"text-delta\",\"delta\":\"complete\"}\n\n",
+                "data: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\",\"raw\":\"stop\"}}\n\n",
+                "data: [DONE]\n\n",
+            ]
+            return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { continuation in
+                let producer = Task {
+                    do {
+                        for chunk in chunks {
+                            continuation.yield(Data())
+                            continuation.yield(Data(chunk.utf8))
+                            try await Task.sleep(for: .milliseconds(300))
+                        }
+                        continuation.finish()
+                    } catch { continuation.finish(throwing: error) }
+                }
+                continuation.onTermination = { _ in producer.cancel() }
+            })
+        }
         let continuation = responseCancelledContinuation
         return FxHTTPResponse(statusCode: 200, headers: [
             "x-vercel-id": "request-transport-private-key", "x-generation-id": "generation",
@@ -103,6 +123,63 @@ private func diagnosticConfiguration(_ http: DiagnosticHTTP, _ events: Transport
     #expect(text.utf8.count <= 512)
     #expect(boundedTransportText(nil) == nil)
     #expect(boundedTransportText("") == "")
+}
+
+@Test func transportActivityCountsNonemptyChunksPerRequest() async throws {
+    let http = DiagnosticHTTP(.progress), events = TransportEvents()
+    let engine = try await FxEngine.open(configuration: diagnosticConfiguration(http, events))
+    for _ in 0..<2 {
+        let turn = try await engine.prompt("private-input")
+        #expect(try await turn.result.stopReason == .endTurn)
+    }
+    try await engine.close()
+    let activity = events.values.compactMap { event -> (FxTransportEvent.Request, Int, Int)? in
+        if case .activity(let request, let chunkBytes, let totalBytes) = event, request.method == "POST" {
+            return (request, chunkBytes, totalBytes)
+        }
+        return nil
+    }
+    let groups = Dictionary(grouping: activity, by: { $0.0.id })
+    #expect(groups.count == 2)
+    for values in groups.values {
+        #expect(values.count >= 2)
+        #expect(values.allSatisfy { $0.1 > 0 && $0.2 >= $0.1 })
+        #expect(values.first?.1 == values.first?.2)
+        #expect(values.map { $0.2 } == values.map { $0.2 }.sorted())
+        #expect(try #require(values.last).2 > #require(values.first).2)
+    }
+}
+
+private actor ObserverTurn {
+    private var turn: FxTurn?
+    private var waiter: CheckedContinuation<FxTurn, Never>?
+    func install(_ turn: FxTurn) {
+        if let waiter { self.waiter = nil; waiter.resume(returning: turn) }
+        else { self.turn = turn }
+    }
+    func cancel() async {
+        let current: FxTurn
+        if let turn { current = turn; self.turn = nil }
+        else { current = await withCheckedContinuation { waiter = $0 } }
+        await current.cancel()
+    }
+}
+
+@Test func cancellingFromRetryObserverPreventsNextRequest() async throws {
+    let http = DiagnosticHTTP(.retry), events = TransportEvents(), control = ObserverTurn()
+    var configuration = diagnosticConfiguration(http, events)
+    configuration.onTransportEvent = { event in
+        events.record(event)
+        if case .retrying = event { await control.cancel() }
+    }
+    let engine = try await FxEngine.open(configuration: configuration)
+    let turn = try await engine.prompt("private-input")
+    await control.install(turn)
+    #expect(try await turn.result.stopReason == .cancelled)
+    try await engine.close()
+    #expect(await http.posts == 1)
+    let starts = events.values.compactMap { if case .started(let request) = $0 { return request.number }; return nil }
+    #expect(starts == [1, 2])
 }
 
 @Test func retryEventsCountActualAttemptsWithoutCopyingErrors() async throws {

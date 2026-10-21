@@ -24,7 +24,7 @@ actor NativeTransport: CoreTransport {
     private let continuation: AsyncThrowingStream<Data, any Error>.Continuation
     private let handle: CoreHandle
     private let httpClient: any FxHTTPClient
-    private let onTransportEvent: (@Sendable (FxTransportEvent) -> Void)?
+    private let onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)?
     private var requestNumber = 0
     private var sessionID: String?
     private var modelID: String?
@@ -35,7 +35,7 @@ actor NativeTransport: CoreTransport {
     private let sourceClosedContinuation: AsyncStream<Void>.Continuation
 
     init(options: JSONValue, httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), modelID: String? = nil,
-         onTransportEvent: (@Sendable (FxTransportEvent) -> Void)? = nil) throws {
+         onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)? = nil) throws {
         guard fx_core_abi_version() == 1 else { throw FxError.protocolViolation("Unsupported core ABI version") }
         self.httpClient = httpClient
         self.modelID = modelID
@@ -142,16 +142,28 @@ actor NativeTransport: CoreTransport {
     private func fetch(_ request: URLRequest, id: Int32) async {
         defer { fetchTasks.removeValue(forKey: id) }
         do {
-            let response = try await sendWithRetry(request)
+            let (response, context) = try await sendWithRetry(request)
             defer { response.cancel() }
             guard !closed, !Task.isCancelled else { return }
             guard let status = UInt16(exactly: response.statusCode) else {
                 throw FxError.transport("Invalid HTTP response status")
             }
             guard fx_core_start_fetch(handle.pointer, id, status) == 1 else { return }
+            var totalBytes = 0
+            var lastActivity: ContinuousClock.Instant?
             for try await data in response.body {
                 try Task.checkCancellation()
                 guard !closed else { return }
+                if !data.isEmpty {
+                    totalBytes += data.count
+                    let now = ContinuousClock.now
+                    if lastActivity.map({ $0.duration(to: now) >= .milliseconds(250) }) ?? true {
+                        lastActivity = now
+                        await emitTransport(.activity(context, chunkBytes: data.count, totalBytes: totalBytes))
+                        try Task.checkCancellation()
+                        guard !closed else { return }
+                    }
+                }
                 // Host clients may provide a larger chunk than the bounded C queue.
                 var offset = 0
                 while offset < data.count {
@@ -166,10 +178,10 @@ actor NativeTransport: CoreTransport {
         }
     }
 
-    private func sendWithRetry(_ request: URLRequest) async throws -> FxHTTPResponse {
+    private func sendWithRetry(_ request: URLRequest) async throws -> (FxHTTPResponse, FxTransportEvent.Request) {
         try Task.checkCancellation()
-        let first = beginRequest(request)
-        do { return try await send(request, context: first) }
+        let first = await beginRequest(request)
+        do { return (try await send(request, context: first), first) }
         catch {
             try Task.checkCancellation()
             guard !closed else { throw FxError.closed }
@@ -178,30 +190,35 @@ actor NativeTransport: CoreTransport {
             if error is FxSubscriptionError { throw error }
             if let error = error as? URLError, error.code == .cancelled { throw error }
             // Retry only before response headers. Never replay a partial response.
-            emitTransport(.retrying(first))
-            return try await send(request, context: beginRequest(request))
+            await emitTransport(.retrying(first))
+            try Task.checkCancellation()
+            guard !closed else { throw FxError.closed }
+            let retry = await beginRequest(request)
+            return (try await send(request, context: retry), retry)
         }
     }
 
-    private func emitTransport(_ event: FxTransportEvent) {
-        if !closed { onTransportEvent?(event) }
+    private func emitTransport(_ event: FxTransportEvent) async {
+        if !closed { await onTransportEvent?(event) }
     }
 
-    private func beginRequest(_ request: URLRequest) -> FxTransportEvent.Request {
+    private func beginRequest(_ request: URLRequest) async -> FxTransportEvent.Request {
         requestNumber += 1
         let context = FxTransportEvent.Request(id: UUID(), number: requestNumber, sessionID: sessionID,
             method: request.httpMethod ?? "GET", endpoint: transportEndpoint(request.url),
             modelID: boundedTransportText(request.value(forHTTPHeaderField: "ai-language-model-id") ?? modelID))
-        emitTransport(.started(context))
+        await emitTransport(.started(context))
         return context
     }
 
     private func send(_ request: URLRequest, context: FxTransportEvent.Request) async throws -> FxHTTPResponse {
         let started = ContinuousClock.now
         do {
+            try Task.checkCancellation()
+            guard !closed else { throw FxError.closed }
             let response = try await httpClient.send(request)
             let headers = response.diagnosticHeaders ?? response.headers
-            emitTransport(.response(context, .init(statusCode: response.statusCode, elapsed: started.duration(to: .now),
+            await emitTransport(.response(context, .init(statusCode: response.statusCode, elapsed: started.duration(to: .now),
                 requestID: boundedTransportText(headers["x-vercel-id"]), generationID: boundedTransportText(headers["x-generation-id"]),
                 modelID: boundedTransportText(headers["x-model-id"]) ?? context.modelID,
                 provider: boundedTransportText(headers["x-vercel-ai-gateway-provider"] ?? headers["x-ai-gateway-provider"]))))
@@ -212,7 +229,7 @@ actor NativeTransport: CoreTransport {
             else if error is FxSubscriptionError { reason = .credentials }
             else if case FxError.invalidInput = error { reason = .invalidRequest }
             else { reason = .requestFailed }
-            emitTransport(.failed(context, elapsed: started.duration(to: .now), reason: reason))
+            await emitTransport(.failed(context, elapsed: started.duration(to: .now), reason: reason))
             throw error
         }
     }

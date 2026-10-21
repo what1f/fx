@@ -11,8 +11,8 @@ public struct FxConfiguration: Sendable {
     public var gatewayURL: URL
     public var httpClient: any FxHTTPClient
     public var observation: FxObservationOptions?
-    /// Receives ordered metadata on the transport actor. Keep this callback short.
-    public var onTransportEvent: (@Sendable (FxTransportEvent) -> Void)?
+    /// Receives request metadata. The transport awaits this callback before advancing.
+    public var onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)?
     /// Journal bytes between automatic snapshots. Nil disables automatic snapshots.
     public var checkpointAfterBytes: Int?
 
@@ -23,7 +23,7 @@ public struct FxConfiguration: Sendable {
         gatewayURL: URL = URL(string: "https://ai-gateway.vercel.sh/v4/ai/language-model")!,
         httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil,
         checkpointAfterBytes: Int? = 1024 * 1024,
-        onTransportEvent: (@Sendable (FxTransportEvent) -> Void)? = nil
+        onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)? = nil
     ) {
         self.init(provider: .gateway(apiKey: apiKey), model: model, instructions: instructions,
                   tools: tools, providerTools: providerTools, workspace: workspace, httpClient: httpClient,
@@ -37,7 +37,7 @@ public struct FxConfiguration: Sendable {
         workspace: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil,
         checkpointAfterBytes: Int? = 1024 * 1024,
-        onTransportEvent: (@Sendable (FxTransportEvent) -> Void)? = nil
+        onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)? = nil
     ) {
         self.provider = provider
         self.model = model

@@ -80,6 +80,7 @@ export async function createFxEngine(options = {}) {
     for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
   });
+  const fetchErrorNames = [];
   lines.on('line', line => {
     const value = JSON.parse(line);
     if (value.refreshLockRequest) {
@@ -114,7 +115,15 @@ export async function createFxEngine(options = {}) {
       try { Promise.resolve(options.hooks?.onError?.(new Error(value.observationError))).catch(() => {}); } catch {}
     } else if (value.diagnostic) {
       if (value.diagnostic.type === 'acp.send') runtimeStarted = true;
-      options.onEvent?.(value.diagnostic);
+      if (value.diagnostic.type === 'transport.error' && fetchErrorNames.length) {
+        value.diagnostic.error = fetchErrorNames.shift();
+      }
+      try { options.onEvent?.(value.diagnostic); }
+      finally {
+        if (value.diagnosticToken) {
+          void Promise.resolve(turn?.cancellation).then(() => request('diagnosticAck', { token: value.diagnosticToken })).catch(() => {});
+        }
+      }
     }
     else if ('id' in value) {
       const waiter = pending.get(value.id);
@@ -201,12 +210,14 @@ export async function createFxEngine(options = {}) {
       const call = value.fetchRequest, controller = new AbortController();
       fetchControllers.set(call.id, controller);
       void (async () => {
+        let receivedHeaders = false;
         try {
           const response = await (options.fetch || globalThis.fetch)(call.url, {
             method: call.method, headers: new Headers(call.headers),
             ...(call.body ? { body: new Uint8Array(Buffer.from(call.body, 'base64')) } : {}),
             signal: controller.signal,
           });
+          receivedHeaders = true;
           const reader = response.body?.getReader();
           if (reader) fetchReaders.set(call.id, reader);
           try {
@@ -221,6 +232,7 @@ export async function createFxEngine(options = {}) {
             await request('fetchEnd', { fetchID: call.id });
           } finally { fetchReaders.delete(call.id); reader?.releaseLock(); }
         } catch (error) {
+          if (!receivedHeaders && !controller.signal.aborted) fetchErrorNames.push(error.name || 'Error');
           await request('fetchFailure', { fetchID: call.id, error: String(error) }).catch(() => {});
         } finally { fetchControllers.delete(call.id); }
       })();
@@ -346,7 +358,7 @@ export async function createFxEngine(options = {}) {
           ...args, ...(op === 'prompt' || publicID != null ? { turnID: publicID } : {}),
           ...(promptOptions.yieldAt === undefined ? {} : { yieldAt: promptOptions.yieldAt }),
         })).then(reply => { if (reply?.turnID) state.public.id = reply.turnID; });
-      const abort = () => { void ready.then(() => control('cancel')).catch(error => state.fail(error)); };
+      const abort = () => { state.cancellation = ready.then(() => control('cancel')).catch(error => state.fail(error)); };
       promptOptions.signal?.addEventListener('abort', abort, { once: true });
       state.cleanup = () => promptOptions.signal?.removeEventListener('abort', abort);
       if (promptOptions.signal?.aborted) abort();

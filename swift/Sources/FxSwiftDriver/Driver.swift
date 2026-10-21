@@ -39,6 +39,7 @@ actor Driver: FxHTTPClient, FxPersistence {
     private var turns: [String: FxTurn] = [:]
     private var credentialWaiters: [String: CheckedContinuation<JSONValue, any Error>] = [:]
     private var nextFetchID = 1
+    private var retryObservers: [String: CheckedContinuation<Void, Never>] = [:]
     private var fetchWaiters: [Int: CheckedContinuation<FxHTTPResponse, any Error>] = [:]
     private var fetchBodies: [Int: AsyncThrowingStream<Data, any Error>.Continuation] = [:]
     private var fetchStreams: [Int: AsyncThrowingStream<Data, any Error>] = [:]
@@ -216,8 +217,9 @@ actor Driver: FxHTTPClient, FxPersistence {
                     DriverOutput.emit(.object(["observationError": .string(String(describing: error))]))
                 }
             }
-            config.onTransportEvent = { event in
-                DriverOutput.emit(.object(["diagnostic": encodeTransportEvent(event)]))
+            config.onTransportEvent = { [weak self] event in
+                if case .retrying = event { await self?.observeRetry(event) }
+                else { DriverOutput.emit(.object(["diagnostic": encodeTransportEvent(event)])) }
             }
             config.wireObserver = { [weak self] direction, message in
                 await self?.emit(.object(["diagnostic": .object([
@@ -411,6 +413,9 @@ actor Driver: FxHTTPClient, FxPersistence {
                 catch { emit(.object(["failed": .string(String(describing: error)), "turnToken": .string(token)])) }
             }
             return .object(["inputID": .string(receipt.id)])
+        case "diagnosticAck":
+            if let token = value["token"]?.string { retryObservers.removeValue(forKey: token)?.resume() }
+            return .null
         case "cancel":
             if let token = value["turnToken"]?.string, let turn = sessionTurns[token] {
                 try await turn.cancel()
@@ -646,6 +651,19 @@ actor Driver: FxHTTPClient, FxPersistence {
         throw FxError.invalidInput("Image data or reference is required")
     }
 
+    private func observeRetry(_ event: FxTransportEvent) async {
+        let token = UUID().uuidString
+        await withTaskCancellationHandler {
+            guard !Task.isCancelled else { return }
+            await withCheckedContinuation { continuation in
+                retryObservers[token] = continuation
+                DriverOutput.emit(.object(["diagnostic": encodeTransportEvent(event), "diagnosticToken": .string(token)]))
+            }
+        } onCancel: { Task { await self.finishRetryObservation(token) } }
+    }
+
+    private func finishRetryObservation(_ token: String) { retryObservers.removeValue(forKey: token)?.resume() }
+
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         let id = nextFetchID
         nextFetchID += 1
@@ -813,6 +831,9 @@ private func encodeTransportEvent(_ event: FxTransportEvent) -> JSONValue {
     case .failed(let request, let elapsed, let reason):
         fields = ["type": .string("transport.error"), "attempt": .number(Double(request.number)),
                   "elapsedMs": milliseconds(elapsed), "error": .string(reason == .cancelled ? "AbortError" : "Error")]
+    case .activity(let request, let chunkBytes, let totalBytes):
+        fields = ["type": .string("transport.activity"), "attempt": .number(Double(request.number)),
+                  "chunkBytes": .number(Double(chunkBytes)), "totalBytes": .number(Double(totalBytes))]
     case .retrying(let request):
         fields = ["type": .string("transport.retry"), "attempt": .number(Double(request.number)),
                   "nextAttempt": .number(Double(request.number + 1))]

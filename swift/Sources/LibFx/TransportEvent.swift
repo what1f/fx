@@ -28,6 +28,8 @@ public enum FxTransportEvent: Sendable {
 
     case started(Request)
     case response(Request, Response)
+    /// Nonempty body progress, reported at most once every 250 milliseconds per request.
+    case activity(Request, chunkBytes: Int, totalBytes: Int)
     case failed(Request, elapsed: Duration, reason: Failure)
     case retrying(Request)
 }

@@ -59,9 +59,9 @@ let configuration = FxConfiguration(apiKey: key, onTransportEvent: { event in
 })
 ```
 
-Events include `.started`, `.response`, `.failed`, and `.retrying`. Each request has a UUID and a number that starts at one for each turn. Retries count as separate requests. Responses include selected request, generation, model, and provider identifiers when available. A response event means headers arrived; it does not mean the body completed. Credential refresh requests made inside a subscription are not separate transport events.
+Events include `.started`, `.response`, `.activity`, `.failed`, and `.retrying`. Each request has a UUID and a number that starts at one for each turn. Retries count as separate requests. Responses include selected request, generation, model, and provider identifiers when available. A response event means headers arrived; it does not mean the body completed. Activity events report nonempty chunk bytes and cumulative bytes for that request, at most once every 250 milliseconds. They are progress samples, so the last sample need not include every byte. Credential refresh requests made inside a subscription are not separate transport events.
 
-The SDK removes URL credentials, query parameters, and fragments. It excludes bodies, credential headers, and raw error descriptions. Selected response values mask the credentials used for that request and are bounded to 512 UTF-8 bytes. Host-defined endpoint paths and model names remain visible. Callbacks run in order on the transport actor; keep them short. No events are delivered after the engine closes.
+The SDK removes URL credentials, query parameters, and fragments. It excludes bodies, credential headers, and raw error descriptions. Selected response values mask the credentials used for that request and are bounded to 512 UTF-8 bytes. Host-defined endpoint paths and model names remain visible. The transport awaits your callback before advancing; keep it short and cooperate with cancellation. Awaiting turn cancellation from `.retrying` prevents the next request. No events are delivered after the engine closes.
 
 ## Discover models and steer a turn
 

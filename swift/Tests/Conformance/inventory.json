@@ -83,7 +83,7 @@
       "upstream": "sdk/tests/test-agent-transport-retry.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged upstream native file through Swift; bounded pre-header retry, sampled cumulative body progress, ordinary cancellation and cancellation awaited from the retry observer; adapter translates host error names and synchronizes the JavaScript callback boundary only"
     },
     {
       "upstream": "sdk/tests/test-agent-ultrafast-options.mjs",

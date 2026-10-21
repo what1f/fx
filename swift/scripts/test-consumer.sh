@@ -143,6 +143,12 @@ struct SubscriptionHTTP: FxHTTPClient {
               requests.allSatisfy({ $0.sessionID == engine.sessionID && $0.modelID == "swift/consumer" }) else {
             throw FxError.protocolViolation("Unexpected transport events")
         }
+        guard transportEvents.values.contains(where: { event in
+            if case .activity(let request, let chunkBytes, let totalBytes) = event {
+                return request.method == "POST" && chunkBytes > 0 && totalBytes >= chunkBytes
+            }
+            return false
+        }) else { throw FxError.protocolViolation("Missing response progress") }
         let saved = try await store.load()
         guard saved.checkpoint != nil, saved.journal.isEmpty else { throw FxPersistenceError.invalidJournal }
         let restored = try await FxEngine.open(configuration: FxConfiguration(
