@@ -53,7 +53,10 @@ actor NativeTransport: CoreTransport {
         let fd = fx_core_ready_fd(handle.pointer)
         guard fd >= 0 else { throw FxError.transport("Core has no readiness descriptor") }
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .global(qos: .userInitiated))
-        source.setEventHandler { [weak self] in Task { await self?.pump() } }
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            Task { await self.pump() }
+        }
         source.setCancelHandler { [handle, sourceClosedContinuation] in
             handle.destroy()
             sourceClosedContinuation.finish()

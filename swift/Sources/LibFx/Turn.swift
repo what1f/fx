@@ -43,9 +43,10 @@ public enum FxWithdrawal: String, Sendable {
 }
 
 /// Read events once. Await result to observe completion even when no events are consumed.
-public struct FxTurn: AsyncSequence, Sendable {
+public struct FxTurn: AsyncSequence, Sendable, Identifiable {
     public typealias Element = FxEvent
     public typealias AsyncIterator = AsyncThrowingStream<FxEvent, any Error>.Iterator
+    public let id: String
     let events: AsyncThrowingStream<FxEvent, any Error>
     let completion: Task<FxTurnResult, any Error>
     let cancelAction: @Sendable () async -> Void
@@ -56,7 +57,9 @@ public struct FxTurn: AsyncSequence, Sendable {
         get async throws {
             try await withTaskCancellationHandler {
                 try Task.checkCancellation()
-                return try await completion.value
+                let result = try await completion.value
+                try Task.checkCancellation()
+                return result
             } onCancel: { Task { await cancelAction() } }
         }
     }
@@ -66,4 +69,15 @@ public struct FxTurn: AsyncSequence, Sendable {
         try await steerAction(text, id)
     }
     public func withdraw(_ id: String) async throws -> FxWithdrawal { try await withdrawAction(id) }
+
+    static func completed(id: String) -> FxTurn {
+        let (events, continuation) = AsyncThrowingStream<FxEvent, any Error>.makeStream()
+        continuation.finish()
+        return FxTurn(
+            id: id, events: events,
+            completion: Task<FxTurnResult, any Error> { FxTurnResult(stopReason: .endTurn, usage: FxUsage(nil)) },
+            cancelAction: {}, steerAction: { _, _ in throw FxError.noActiveTurn },
+            withdrawAction: { _ in .alreadyPlaced }
+        )
+    }
 }

@@ -17,6 +17,7 @@ export async function createFxEngine(options = {}) {
   const fetchControllers = new Map();
   const fetchReaders = new Map();
   let nextID = 1, turn = null, closed = false, stderr = '';
+  let resumable = false, recoveryCalls = [], recoveryTurnID = null;
   let turnSignal = null, removeAbortListener = () => {};
   child.stderr.on('data', data => { stderr += data; });
   child.stdin.on('error', error => {
@@ -66,7 +67,12 @@ export async function createFxEngine(options = {}) {
         waiter?.reject(error);
       } else waiter?.resolve(value.result);
     } else if (value.event) turn?.push(value.event);
-    else if (value.completed) { removeAbortListener(); turn?.finish(value.completed); turn = null; turnSignal = null; }
+    else if (value.completed) {
+      resumable = value.recovery?.resumable ?? false;
+      recoveryCalls = value.recovery?.runningCalls ?? [];
+      recoveryTurnID = value.recovery?.openTurnId ?? null;
+      removeAbortListener(); turn?.finish(value.completed); turn = null; turnSignal = null;
+    }
     else if (value.failed) { removeAbortListener(); turn?.fail(new Error(value.failed)); turn = null; turnSignal = null; }
     else if (value.fetchCancelled) {
       fetchControllers.get(value.fetchCancelled)?.abort();
@@ -152,7 +158,9 @@ export async function createFxEngine(options = {}) {
       ...(checkpoint ? { checkpoint: Buffer.from(checkpoint).toString('base64') } : {}),
       tools: (options.tools || []).map(({ execute, ...descriptor }) => descriptor),
     } });
-    let resumable = opened.resumable;
+    resumable = opened.resumable;
+    recoveryCalls = opened.runningCalls;
+    recoveryTurnID = opened.openTurnId;
     function begin(op, args, promptOptions = {}) {
       if (turn) throw new Error('a prompt is already running');
       const turnToken = randomUUID();
@@ -162,10 +170,14 @@ export async function createFxEngine(options = {}) {
         text: Array.isArray(input) ? input.map(block => block.text).join('\n') : input, inputID,
       })), inputID => ready.then(() => control('withdraw', { inputID })));
       turn = state;
-      resumable = false;
+      const publicID = op === 'prompt' ? promptOptions.turnId === undefined ? randomUUID() : promptOptions.turnId : recoveryTurnID;
+      state.public.id = publicID;
       turnSignal = promptOptions.signal;
       ready = (op === 'prompt' ? encodePrompt(args.text).then(text => ({ text })) : Promise.resolve(args))
-        .then(args => control(op, args));
+        .then(args => control(op, {
+          ...args, ...(op === 'prompt' || publicID != null ? { turnID: publicID } : {}),
+          ...(promptOptions.yieldAt === undefined ? {} : { yieldAt: promptOptions.yieldAt }),
+        })).then(reply => { if (reply?.turnID) state.public.id = reply.turnID; });
       const abort = () => { void ready.then(() => control('cancel')).catch(error => state.fail(error)); };
       turnSignal?.addEventListener('abort', abort, { once: true });
       removeAbortListener = () => promptOptions.signal?.removeEventListener('abort', abort);
@@ -180,7 +192,7 @@ export async function createFxEngine(options = {}) {
       },
       resume(promptOptions = {}) {
         if (!resumable) return null;
-        const rerun = opened.runningCalls.filter(call => promptOptions.onAmbiguous?.(call) === 'rerun').map(call => call.executionId);
+        const rerun = recoveryCalls.filter(call => promptOptions.onAmbiguous?.(call) === 'rerun').map(call => call.executionId);
         return begin('resume', { rerun }, promptOptions);
       },
       async checkpoint() { return new Uint8Array(Buffer.from(await request('checkpoint'), 'base64')); },

@@ -138,6 +138,7 @@ private actor RetryingCheckpointStore: FxCheckpointPersistence {
     await #expect(throws: FxPersistenceError.fenced) { try await engine.flushPersistence() }
     #expect(await store.appends == 1)
     #expect(await gateway.bodies.isEmpty)
+    await #expect(throws: FxPersistenceError.fenced) { try await engine.prompt("must not start another turn") }
     await #expect(throws: FxPersistenceError.fenced) { try await engine.close() }
 }
 
@@ -189,7 +190,8 @@ private actor RetryingCheckpointStore: FxCheckpointPersistence {
     _ = try await interrupted.append(expected: nil, idempotencyKey: "seed", data: record, barrier: true)
     let resumed = try await FxEngine.open(configuration: config, persistence: interrupted)
     #expect(await resumed.recoveryState != nil)
-    await #expect(throws: FxError.self) { try await resumed.prompt("would duplicate input") }
+    await #expect(throws: FxError.self) { try await resumed.prompt("") }
+    #expect(await resumed.recoveryState != nil)
     let recovery = try #require(try await resumed.resume())
     for try await _ in recovery {}
     #expect(try await recovery.result.stopReason == .endTurn)

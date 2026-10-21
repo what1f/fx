@@ -35,15 +35,22 @@ struct MockHTTP: FxHTTPClient {
         let engine = try await FxEngine.open(configuration: FxConfiguration(
             apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP(), checkpointAfterBytes: 0
         ), persistence: store)
-        let turn = try await engine.prompt("hello")
+        let turn = try await engine.prompt("hello", id: "consumer-turn")
         var text = ""
         for try await event in turn { if case .text(let delta) = event { text += delta } }
-        guard text == "consumer ok", try await turn.result.stopReason == .endTurn else {
+        guard turn.id == "consumer-turn", text == "consumer ok", try await turn.result.stopReason == .endTurn else {
             throw FxError.protocolViolation("Unexpected consumer response")
         }
         try await engine.close()
         let saved = try await store.load()
         guard saved.checkpoint != nil, saved.journal.isEmpty else { throw FxPersistenceError.invalidJournal }
+        let restored = try await FxEngine.open(configuration: FxConfiguration(
+            apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()
+        ), persistence: store)
+        let duplicate = try await restored.prompt("ignored retry", id: turn.id)
+        for try await _ in duplicate { throw FxPersistenceError.invalidJournal }
+        guard try await duplicate.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
+        try await restored.close()
         try await store.close()
         print("Swift package consumer passed")
     }

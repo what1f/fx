@@ -10,7 +10,7 @@ const checks = [
   { name: 'upstream/test-agent-steering-hooks', args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-agent-steering.mjs', 'native', '--hooks',
   ] },
-  ...['smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing'].map(name => ({
+  ...['smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing', 'turn-identity'].map(name => ({
     name, args: [`swift/Tests/Conformance/${name}.mjs`],
   })),
 ];

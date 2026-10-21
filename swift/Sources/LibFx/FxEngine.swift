@@ -10,6 +10,8 @@ public actor FxEngine {
     private let observation: FxObservationOptions?
     private let checkpointAfterBytes: Int?
     private var recovery: FxRecoveryState?
+    private var lastCompletedTurnID: String?
+    private var journalFailure: (any Error)?
     private var turnID: UUID?
     private var output: AsyncThrowingStream<FxEvent, any Error>.Continuation?
     private var toolTasks: [String: Task<Void, Never>] = [:]
@@ -22,7 +24,10 @@ public actor FxEngine {
     private var checkpointSaveTask: Task<Void, any Error>?
     private var closingTask: Task<Void, any Error>?
 
-    private init(sessionID: String, rpc: RPCClient, transport: NativeTransport, tools: [String: FxTool], journal: JournalWriter?, observation: FxObservationOptions?, checkpointAfterBytes: Int?) {
+    private init(
+        sessionID: String, rpc: RPCClient, transport: NativeTransport,
+        tools: [String: FxTool], journal: JournalWriter?, observation: FxObservationOptions?, checkpointAfterBytes: Int?
+    ) {
         self.sessionID = sessionID
         self.rpc = rpc
         self.transport = transport
@@ -114,29 +119,40 @@ public actor FxEngine {
         }
     }
 
-    public func prompt(_ text: String) throws -> FxTurn {
-        try prompt([.text(text)])
+    public func prompt(_ text: String, id: String = UUID().uuidString, yieldAt: Date? = nil) throws -> FxTurn {
+        try prompt([.text(text)], id: id, yieldAt: yieldAt)
     }
 
-    public func prompt(_ content: [FxPromptContent]) throws -> FxTurn {
+    public func prompt(_ content: [FxPromptContent], id: String = UUID().uuidString, yieldAt: Date? = nil) throws -> FxTurn {
         guard !closed else { throw FxError.closed }
-        guard recovery == nil else { throw FxError.invalidInput("Resume the interrupted turn before starting another prompt") }
-        return try startTurn(content)
+        if let journalFailure { throw journalFailure }
+        guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
+        guard validInputID(id) else { throw FxError.invalidInput("Turn ID must contain 1–128 ASCII letters, digits, '.', '_' or '-'") }
+        if journal != nil {
+            if recovery?.turnID == id, let turn = try resume(yieldAt: yieldAt) { return turn }
+            if lastCompletedTurnID == id { return .completed(id: id) }
+        }
+        let turn = try startTurn(content, publicID: id, yieldAt: yieldAt)
+        recovery = nil
+        return turn
     }
 
     public var recoveryState: FxRecoveryState? { recovery }
 
     /// Continues an interrupted turn. Unlisted ambiguous calls are not repeated.
-    public func resume(rerunning executionIDs: Set<String> = []) throws -> FxTurn? {
+    public func resume(rerunning executionIDs: Set<String> = [], yieldAt: Date? = nil) throws -> FxTurn? {
         guard !closed else { throw FxError.closed }
+        if let journalFailure { throw journalFailure }
+        guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
         guard let recovery else { return nil }
         guard executionIDs.isSubset(of: Set(recovery.runningCalls.map(\.executionID))) else {
             throw FxError.invalidInput("Unknown recovery execution identifier")
         }
-        return try startTurn([], resuming: true, rerunning: executionIDs)
+        return try startTurn([], publicID: recovery.turnID ?? UUID().uuidString, yieldAt: yieldAt, resuming: true, rerunning: executionIDs)
     }
 
     private func setRecovery(_ opened: JSONValue) {
+        lastCompletedTurnID = opened["lastTurnId"]?.string
         guard opened["resumable"] == .bool(true) else { recovery = nil; return }
         let calls: [FxRecoveryCall]
         if case .array(let entries) = opened["runningCalls"] {
@@ -150,9 +166,19 @@ public actor FxEngine {
         recovery = FxRecoveryState(turnID: opened["openTurnId"]?.string, runningCalls: calls)
     }
 
-    private func startTurn(_ content: [FxPromptContent], resuming: Bool = false, rerunning: Set<String> = []) throws -> FxTurn {
+    private func startTurn(_ content: [FxPromptContent], publicID: String, yieldAt: Date? = nil, resuming: Bool = false, rerunning: Set<String> = []) throws -> FxTurn {
         guard !closed else { throw FxError.closed }
         guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
+        var metadata: [String: JSONValue] = [:]
+        if let yieldAt {
+            guard journal != nil else { throw FxError.invalidInput("Yielding requires persistence") }
+            let milliseconds = (yieldAt.timeIntervalSince1970 * 1000).rounded()
+            guard milliseconds.isFinite, milliseconds > 0, milliseconds <= 9_007_199_254_740_991 else {
+                throw FxError.invalidInput("Yield deadline is outside the supported date range")
+            }
+            metadata["yieldAt"] = .number(milliseconds)
+        }
+        if !resuming { metadata["turnId"] = .string(publicID) }
         guard resuming || content.contains(where: {
             switch $0 {
             case .text(let text): return !text.isEmpty
@@ -226,19 +252,25 @@ public actor FxEngine {
                     "prompt": .array(blocks),
                 ]
                 if resuming {
-                    params["_meta"] = .object(["fx": .object([
-                        "continueRecovery": .bool(true), "freshOutput": .bool(true),
-                        "rerun": .array(rerunning.sorted().map(JSONValue.string)),
-                    ])])
+                    metadata["continueRecovery"] = .bool(true)
+                    metadata["freshOutput"] = .bool(true)
+                    metadata["rerun"] = .array(rerunning.sorted().map(JSONValue.string))
                 }
+                params["_meta"] = .object(["fx": .object(metadata)])
                 let result = try await rpc.request("session/prompt", .object(params), onSent: { await dispatch.resolve(sent: true) })
                 try await journal?.check()
                 try Task.checkCancellation()
-                recovery = nil
+                let reason = FxTurnResult.StopReason(rawValue: result["stopReason"]?.string ?? "") ?? .unknown
+                if reason == .yielded {
+                    recovery = FxRecoveryState(turnID: publicID, runningCalls: [])
+                } else {
+                    recovery = nil
+                    if journal != nil { lastCompletedTurnID = publicID }
+                }
                 await maybeSaveCheckpoint(finishing: id)
                 self.finish(turn: id)
                 return FxTurnResult(
-                    stopReason: FxTurnResult.StopReason(rawValue: result["stopReason"]?.string ?? "") ?? .unknown,
+                    stopReason: reason,
                     usage: FxUsage(result["usage"])
                 )
             } catch {
@@ -249,7 +281,7 @@ public actor FxEngine {
             }
         }
         return FxTurn(
-            events: events, completion: task,
+            id: publicID, events: events, completion: task,
             cancelAction: { [weak self] in await self?.cancel(turn: id) },
             steerAction: { [weak self] text, inputID in
                 guard let self else { throw FxError.closed }
@@ -281,6 +313,7 @@ public actor FxEngine {
                     ])))
                 }
             } catch {
+                journalFailure = error
                 observation?.deliver(FxObservation(journal: .journalError, sessionID: sessionID, data: .object([
                     "error": .string(String(describing: type(of: error))),
                     "fenced": .bool((error as? FxPersistenceError) == .fenced),
@@ -380,6 +413,7 @@ public actor FxEngine {
         guard !closed else { throw FxError.closed }
         guard isActive(id) else { throw FxError.noActiveTurn }
         guard !text.isEmpty, text.utf8.count <= 64 * 1024 else { throw FxError.invalidInput("Steering text must contain 1–65536 UTF-8 bytes") }
+        guard validInputID(inputID) else { throw FxError.invalidInput("Invalid steering ID") }
         guard await promptDispatch?.wait() == true, isActive(id) else { throw FxError.noActiveTurn }
         _ = try await rpc.request("libfx/steer", .object([
             "sessionId": .string(sessionID), "text": .string(text), "id": .string(inputID),
@@ -390,6 +424,7 @@ public actor FxEngine {
 
     private func withdraw(turn id: UUID, inputID: String) async throws -> FxWithdrawal {
         guard !closed else { throw FxError.closed }
+        guard validInputID(inputID) else { throw FxError.invalidInput("Invalid steering ID") }
         guard isActive(id) else { return .alreadyPlaced }
         guard await promptDispatch?.wait() == true, isActive(id) else { return .alreadyPlaced }
         let reply = try await rpc.request("libfx/withdraw", .object([

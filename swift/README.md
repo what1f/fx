@@ -41,6 +41,8 @@ do {
 
 Read a turn's events once. Await `result` to observe its completion. Call `cancel()` on the turn to stop model requests and cooperative tool tasks. Call `close()` on the engine to release the core; repeated close calls await the same shutdown and report the same persistence failure, if any.
 
+Cancelling a Swift task that awaits `turn.result` cancels the turn and makes that waiter throw `CancellationError`.
+
 ## Discover models and steer a turn
 
 ```swift
@@ -112,6 +114,10 @@ if let recovery = await engine.recoveryState {
 ```
 
 A resumed turn does not repeat ambiguous tools by default. Use `resume(rerunning:)` only after deciding that the selected execution IDs can run again. The SDK exposes interrupted calls through `recoveryState` and reports skipped calls in the event stream.
+
+Use `prompt(_:id:yieldAt:)` to give a turn a stable identity and an optional `Date` deadline. IDs contain 1–128 ASCII letters, digits, periods, underscores, or hyphens. Each turn exposes its ID through `FxTurn.id`. With persistence, retrying an interrupted ID resumes its saved input; retrying the most recently completed ID returns an empty completed turn without another model request. Starting a different ID replaces the interrupted turn. This deduplication covers the most recently completed ID, not all historical IDs.
+
+Yielding requires persistence. Pass `yieldAt` to `prompt` or `resume` to stop at a safe boundary and return `.yielded`. Each invocation allows at least one model request before checking the deadline, including an expired deadline. Yielding does not interrupt an active request or tool. Resume the saved turn with `resume()` or its original ID. Automatic snapshots also preserve yielded turns.
 
 For an idle engine, `checkpoint()` returns opaque bytes that another Swift or JavaScript engine can restore. Provide either checkpoint bytes or a persistence store at creation.
 

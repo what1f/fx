@@ -139,6 +139,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             let recovery = await engine!.recoveryState
             return .object([
                 "sessionId": .string(engine!.sessionID), "resumable": .bool(recovery != nil),
+                "openTurnId": recovery?.turnID.map(JSONValue.string) ?? .null,
                 "runningCalls": .array((recovery?.runningCalls ?? []).map {
                     .object(["executionId": .string($0.executionID), "name": .string($0.name), "input": $0.input])
                 }),
@@ -148,11 +149,18 @@ actor Driver: FxHTTPClient, FxPersistence {
             return .array(models.map { .string($0.id) })
         case "prompt", "resume":
             guard let engine else { throw FxError.closed }
+            let deadline: Date?
+            if let raw = value["yieldAt"] {
+                guard let milliseconds = raw.integer else { throw FxError.invalidInput("Invalid yield deadline") }
+                deadline = Date(timeIntervalSince1970: Double(milliseconds) / 1000)
+            } else { deadline = nil }
+            if let raw = value["turnID"], raw.string == nil { throw FxError.invalidInput("Invalid turn ID") }
+            let publicID = value["turnID"]?.string ?? UUID().uuidString
             let next: FxTurn
             if value["op"] == .string("resume") {
                 var ids: Set<String> = []
                 if case .array(let values) = value["rerun"] { ids = Set(values.compactMap(\.string)) }
-                guard let resumed = try await engine.resume(rerunning: ids) else { return .null }
+                guard let resumed = try await engine.resume(rerunning: ids, yieldAt: deadline) else { return .null }
                 next = resumed
             } else if case .array(let blocks) = value["text"] {
                 let content = try blocks.map { block -> FxPromptContent in
@@ -162,18 +170,26 @@ actor Driver: FxHTTPClient, FxPersistence {
                     }
                     return .text(text)
                 }
-                next = try await engine.prompt(content)
-            } else { next = try await engine.prompt(value["text"]?.string ?? "") }
+                next = try await engine.prompt(content, id: publicID, yieldAt: deadline)
+            } else { next = try await engine.prompt(value["text"]?.string ?? "", id: publicID, yieldAt: deadline) }
             turn = next
             turnToken = value["turnToken"]?.string
             Task {
                 do {
                     for try await event in next { emit(.object(["event": encode(event)])) }
                     let result = try await next.result
-                    emit(.object(["completed": encode(result)]))
+                    let recovery = await engine.recoveryState
+                    emit(.object([
+                        "completed": encode(result), "recovery": .object([
+                            "resumable": .bool(recovery != nil), "openTurnId": recovery?.turnID.map(JSONValue.string) ?? .null,
+                            "runningCalls": .array((recovery?.runningCalls ?? []).map {
+                                .object(["executionId": .string($0.executionID), "name": .string($0.name), "input": $0.input])
+                            }),
+                        ]),
+                    ]))
                 } catch { emit(.object(["failed": .string(String(describing: error))])) }
             }
-            return .null
+            return .object(["turnID": .string(next.id)])
         case "cancel":
             if value["turnToken"]?.string == turnToken { await turn?.cancel() }
             return .null
