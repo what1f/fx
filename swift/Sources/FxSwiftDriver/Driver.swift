@@ -1,6 +1,19 @@
 import Foundation
 @_spi(Conformance) import LibFx
 
+private enum DriverOutput {
+    private static let lock = NSLock()
+    static func emit(_ value: JSONValue) {
+        lock.withLock {
+            do {
+                var data = try JSONEncoder().encode(value)
+                data.append(10)
+                try FileHandle.standardOutput.write(contentsOf: data)
+            } catch { /* A closed test pipe is handled by process teardown. */ }
+        }
+    }
+}
+
 /// Test-only protocol adapter. Engine behavior stays in LibFx.
 actor Driver: FxHTTPClient, FxPersistence {
     private var engine: FxEngine?
@@ -16,11 +29,7 @@ actor Driver: FxHTTPClient, FxPersistence {
     private var persistenceWaiters: [Int: CheckedContinuation<JSONValue, any Error>] = [:]
 
     func emit(_ value: JSONValue) {
-        do {
-            var data = try JSONEncoder().encode(value)
-            data.append(10)
-            try FileHandle.standardOutput.write(contentsOf: data)
-        } catch { /* A closed test pipe is handled by process teardown. */ }
+        DriverOutput.emit(value)
     }
 
     func handle(_ value: JSONValue) async {
@@ -80,6 +89,23 @@ actor Driver: FxHTTPClient, FxPersistence {
             )
             if let url = options["gatewayChatUrl"]?.string, let endpoint = URL(string: url) { config.gatewayURL = endpoint }
             config.httpClient = self
+            if options["hooks"] != nil, options["hooks"] != .null {
+                config.observation = FxObservationOptions(captureContent: options["hooks"]?["captureContent"] == .bool(true)) { event in
+                    let encoder = JSONEncoder()
+                    encoder.dateEncodingStrategy = .millisecondsSince1970
+                    var value = try JSONDecoder().decode(JSONValue.self, from: encoder.encode(event))
+                    if case .object(var fields) = value {
+                        fields["timestamp"] = .number((event.timestamp.timeIntervalSince1970 * 1000).rounded())
+                        for key in ["parentSessionId", "sourceSessionId", "workId", "turnId", "executionId"] where fields[key] == nil {
+                            fields[key] = .null
+                        }
+                        value = .object(fields)
+                    }
+                    DriverOutput.emit(.object(["observation": value]))
+                } onError: { error in
+                    DriverOutput.emit(.object(["observationError": .string(String(describing: error))]))
+                }
+            }
             config.wireObserver = { [weak self] direction, message in
                 await self?.emit(.object(["diagnostic": .object([
                     "type": .string(direction == .sent ? "acp.send" : "acp.receive"), "message": message,

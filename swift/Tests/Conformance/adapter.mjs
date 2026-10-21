@@ -47,7 +47,15 @@ export async function createFxEngine(options = {}) {
   });
   lines.on('line', line => {
     const value = JSON.parse(line);
-    if (value.diagnostic) { options.onEvent?.(value.diagnostic); }
+    if (value.observation) {
+      try { Promise.resolve(options.hooks?.onEvent(value.observation)).catch(error => {
+        try { Promise.resolve(options.hooks?.onError?.(error)).catch(() => {}); } catch {}
+      }); } catch (error) {
+        try { Promise.resolve(options.hooks?.onError?.(error)).catch(() => {}); } catch {}
+      }
+    } else if (value.observationError) {
+      try { Promise.resolve(options.hooks?.onError?.(new Error(value.observationError))).catch(() => {}); } catch {}
+    } else if (value.diagnostic) { options.onEvent?.(value.diagnostic); }
     else if ('id' in value) {
       const waiter = pending.get(value.id);
       pending.delete(value.id);

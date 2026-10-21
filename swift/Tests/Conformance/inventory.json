@@ -196,8 +196,8 @@
     {
       "upstream": "sdk/tests/test-hooks.mjs",
       "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "reason": "Runtime and journal observations, content opt-in, observer error isolation, and hooks-enabled steering have Swift proof. Full upstream hooks assertions await parent scopes, tool-local MCP observations, and durable agents.",
+      "status": "partial"
     },
     {
       "upstream": "sdk/tests/test-host-tool-cancel.mjs",

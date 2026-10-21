@@ -80,6 +80,7 @@ struct LoadedJournal: Sendable {
     let checkpoint: Data?
     let events: [JSONValue]
     let head: String?
+    let lastSequence: UInt64
 
     init(_ snapshot: FxPersistenceSnapshot) throws {
         func validateCursor(_ cursor: String) throws {
@@ -138,6 +139,7 @@ struct LoadedJournal: Sendable {
         self.checkpoint = snapshot.checkpoint?.data
         self.events = events
         self.head = head
+        self.lastSequence = events.last?["seq"]?.integer.flatMap(UInt64.init(exactly:)) ?? covered
     }
 }
 
@@ -147,8 +149,11 @@ actor JournalWriter {
     private let writerID = UUID().uuidString
     private(set) var head: String?
     private var tail: Task<Void, any Error>?
+    private var lastSequence: UInt64
 
-    init(store: any FxPersistence, head: String?) { self.store = store; self.head = head }
+    init(store: any FxPersistence, head: String?, lastSequence: UInt64 = 0) {
+        self.store = store; self.head = head; self.lastSequence = lastSequence
+    }
 
     func append(_ events: JSONValue, barrier: Bool) async throws {
         guard case .array(let batch) = events, !batch.isEmpty else { return }
@@ -163,10 +168,23 @@ actor JournalWriter {
             let cursor = try await store.append(expected: head, idempotencyKey: "\(writerID):\(first)", data: data, barrier: barrier || waits)
             guard !cursor.isEmpty, cursor.utf8.count <= 1024 else { throw FxPersistenceError.invalidCursor }
             head = cursor
+            if let seq = batch.last?["seq"]?.integer, let sequence = UInt64(exactly: seq) {
+                lastSequence = sequence
+            }
         }
         tail = task
         try await task.value
     }
 
     func check() async throws { try await tail?.value }
+
+    func saveSnapshot(_ data: Data, at sequence: UInt64) async throws {
+        try await check()
+        guard let store = store as? any FxCheckpointPersistence else {
+            throw FxError.invalidInput("Persistence store does not support checkpoints")
+        }
+        guard sequence == lastSequence else { throw FxPersistenceError.invalidJournal }
+        guard let head else { return }
+        try await store.saveCheckpoint(FxStoredCheckpoint(through: head, data: data))
+    }
 }

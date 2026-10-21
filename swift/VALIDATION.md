@@ -8,7 +8,7 @@ Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. 
 
 ## Implemented proof
 
-`swift test --package-path swift` passed 23 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
+`swift test --package-path swift` passed 27 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
 
 - Fragmented UTF-8 frames, host requests, cancellation, oversized frames, and pending requests during close.
 - HTTP response status, Unicode, bounded chunks, invalid responses, and cancellation before headers.
@@ -17,7 +17,8 @@ Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. 
 - Model effort and fast options reaching provider requests, plus unsupported effort rejection.
 - Prompt image bytes traveling through attachments, and structured tool result images and error flags.
 - Journal conversation restore, stale-writer fencing, retry deduplication, malformed and future records, and persistence failure before a model request.
-- Resuming a journal stopped after its pre-request progress record.
+- Resuming a journal stopped after its pre-request progress record, restoring history after a saved journal snapshot, and waiting for a snapshot save during close.
+- Runtime observation ordering and scope, content opt-in, observer error isolation, successful journal commits, and fencing errors.
 
 The following upstream tests passed through the Swift test driver with their assertions unchanged:
 
@@ -26,10 +27,11 @@ node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-
 node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-step-limit.mjs native
 node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-host-tool-cancel.mjs native
 node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-steering.mjs native
+node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-steering.mjs native --hooks
 node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-list-models.mjs
 ```
 
-These five pass through the Swift driver. Both surface labels in the model-discovery fixture are redirected to Swift; this does not qualify a browser runtime. The adapter translates typed Swift errors to JavaScript error classes for those assertions. `test-agent-effort.mjs` passed its valid and unsupported capability cases, then stopped on a JavaScript error-class assertion. `test-agent-images.mjs` passed initial image transport cases, then stopped at the unimplemented resize hook. Neither file is counted as passed.
+These five files, including a second steering run with hooks enabled, pass through the Swift driver. Both surface labels in the model-discovery fixture are redirected to Swift; this does not qualify a browser runtime. The adapter translates typed Swift errors to JavaScript error classes for those assertions. `test-agent-effort.mjs` passed its valid and unsupported capability cases, then stopped on a JavaScript error-class assertion. `test-agent-images.mjs` passed initial image transport cases, then stopped at the unimplemented resize hook. Neither file is counted as passed.
 
 Additional executable checks passed:
 
@@ -38,6 +40,7 @@ Additional executable checks passed:
 - `journal-interoperability.mjs`: Swift to JS to Swift using one persistence store.
 - `recovery.mjs`: journal truncated at tool intent; ambiguous writes remain stopped by default, while explicit rerun preserves execution ID.
 - `turn-control.mjs`: withdrawal while a tool is running, plus controls from an old turn leaving a new turn unaffected.
+- `observation.mjs`: JavaScript and Swift comparison of event kinds, scopes, parallel tool causality, tool failure, content opt-in, and committed journal cursors.
 
 `node swift/Tests/Conformance/run.mjs` reruns the selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
 
@@ -45,7 +48,7 @@ Additional executable checks passed:
 
 ## Required remaining gates
 
-- Full classified upstream test coverage, including the SDK's providers, follow-ups and handoff, hooks, image processing and storage, and durable agent and session behavior.
+- Full classified upstream test coverage, including the SDK's providers, follow-ups and handoff, parent and tool-local observation scopes, image processing and storage, and durable agent and session behavior.
 - Persistent storage adapters, automatic checkpoints, durability barriers under slow storage, and process termination at effect boundaries.
 - Sanitizers and concurrency stress tests, especially cancellation during preparation and storage.
 - Runtime proof for x86_64 and final consumer validation against the release artifact.

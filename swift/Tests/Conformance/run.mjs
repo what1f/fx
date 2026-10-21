@@ -7,7 +7,10 @@ const checks = [
   ...['test-host-tools', 'test-agent-step-limit', 'test-host-tool-cancel', 'test-agent-steering', 'test-list-models'].map(name => ({
     name: `upstream/${name}`, args: ['--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', `sdk/tests/${name}.mjs`, 'native'],
   })),
-  ...['smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control'].map(name => ({
+  { name: 'upstream/test-agent-steering-hooks', args: [
+    '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-agent-steering.mjs', 'native', '--hooks',
+  ] },
+  ...['smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation'].map(name => ({
     name, args: [`swift/Tests/Conformance/${name}.mjs`],
   })),
 ];

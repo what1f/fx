@@ -48,9 +48,9 @@ Persistence preserves ordered append, expected cursor checks, durability barrier
 | Steering | test-agent-steering | Interrupt, wait, join, withdraw, handoff | Partial: upstream steering, withdrawal and old-turn isolation; follow-up and handoff pending |
 | Model options and providers | test-agent-effort, test-agent-fast, test-agent-ultrafast-options, test-agent-custom, test-agent-codex, test-agent-grok | Matching request behavior and validation | Partial: effort and fast; provider APIs pending |
 | Images and limits | test-agent-images, test-instruction-limits, test-native-core-image-framing | Input, tool images, UTF-8, frame bounds | Partial: binary input; resizing and image storage pending |
-| Journal and checkpoints | test-journal, test-checkpoint | Swift and JS restore in both directions | Partial: bidirectional checkpoint and journal proof; full suite pending |
+| Journal and checkpoints | test-journal, test-checkpoint | Swift and JS restore in both directions | Partial: bidirectional checkpoint and journal proof, explicit journal snapshot save and restore; automatic snapshots and full suite pending |
 | Durable sessions | test-durable, test-durable-core, test-durable-provider-crash, test-world-persistence | Queue, deduplication, crash recovery, fencing | Pending |
-| Hooks | test-hooks | Event scopes and observation isolation | Pending |
+| Hooks | test-hooks | Event scopes and observation isolation | Partial: runtime and journal observations, content opt-in, error isolation, JS comparison and hooks-enabled steering; parent and tool-local scopes pending |
 | MCP and skills | test-mcp-adapter, test-skills-adapter | Host adapters and cancellation | Pending |
 | Swift package | Swift native tests and clean consumer | Import, link, release build, lifecycle and concurrency | Partial: XCFramework and independent release consumer on arm64; CI pending |
 

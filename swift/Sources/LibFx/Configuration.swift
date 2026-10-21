@@ -9,12 +9,13 @@ public struct FxConfiguration: Sendable {
     public var workspace: URL
     public var gatewayURL: URL
     public var httpClient: any FxHTTPClient
+    public var observation: FxObservationOptions?
 
     public init(
         apiKey: String, model: FxModel, instructions: String = "", tools: [FxTool] = [],
         workspace: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         gatewayURL: URL = URL(string: "https://ai-gateway.vercel.sh/v4/ai/language-model")!,
-        httpClient: any FxHTTPClient = FxURLSessionHTTPClient()
+        httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil
     ) {
         self.apiKey = apiKey
         self.model = model
@@ -23,6 +24,7 @@ public struct FxConfiguration: Sendable {
         self.workspace = workspace
         self.gatewayURL = gatewayURL
         self.httpClient = httpClient
+        self.observation = observation
     }
 
     var nativeOptions: JSONValue {

@@ -72,6 +72,24 @@ Pass tools through `FxConfiguration.tools`. A tool can return text, images, and 
 
 Images use `Data` and a supported format. Each prompt accepts up to eight images, at most 3.75 MiB each and 6 MiB together, subject to the encoded request limit. The core checks image content and model capabilities. Image resizing and external image storage are not implemented yet.
 
+## Observe runtime events
+
+Set `FxConfiguration.observation` to receive semantic events in delivery order:
+
+```swift
+configuration.observation = FxObservationOptions { event in
+    if event.kind == .modelEnded {
+        print(event.sessionID, event.stepIndex, event.data)
+    }
+} onError: { error in
+    print(error)
+}
+```
+
+Events have typed kinds, session and execution identifiers, a `Date` timestamp, and event-specific JSON data. Content is omitted by default. Set `captureContent: true` to include bounded prompt, model, and tool content. Treat captured content as conversation data.
+
+Callbacks run synchronously before the next event is handled. Keep them short and send asynchronous work to your own task or actor. An `onEvent` error is sent to `onError` without failing the turn or journal. Journal observations report restores, successful appends, and append failures. Parent observation scopes and tool-local MCP observations remain pending.
+
 ## Persist a conversation
 
 Pass a store conforming to `FxPersistence` when opening the engine. Its records are opaque bytes. The store must reject a stale expected cursor and honor durability barriers. `FxMemoryPersistence` provides an in-memory reference implementation; it does not survive process exit.
@@ -89,4 +107,8 @@ if let recovery = await engine.recoveryState {
 
 A resumed turn does not repeat ambiguous tools by default. Use `resume(rerunning:)` only after deciding that the selected execution IDs can run again. The SDK exposes interrupted calls through `recoveryState` and reports skipped calls in the event stream.
 
-For an idle engine, `checkpoint()` returns opaque bytes that another Swift or JavaScript engine can restore. Provide either checkpoint bytes or a persistence store at creation. Journal and checkpoint interoperability have local tests. Automatic checkpoint storage, durable agents and sessions, and process-crash qualification remain pending.
+For an idle engine, `checkpoint()` returns opaque bytes that another Swift or JavaScript engine can restore. Provide either checkpoint bytes or a persistence store at creation.
+
+With a store conforming to `FxCheckpointPersistence`, call `saveCheckpoint()` to save a journal snapshot through the last committed cursor. The store may then prune the covered journal prefix. Closing waits for a snapshot save already in progress. Journal snapshots differ from the export returned by `checkpoint()`; let the SDK create them.
+
+Journal and checkpoint interoperability have local tests. Automatic checkpoint storage, durable agents and sessions, and process-crash qualification remain pending.
