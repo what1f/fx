@@ -147,9 +147,11 @@ import CSQLite
         try await original.close()
         let connection = try SQLiteDatabase(path: url.path)
         try connection.execute("DROP INDEX fx_inputs_core")
-        for column in ["kind", "target", "accepted", "placed", "ends", "core_id", "step", "cut_step", "cutoffs"] {
+        for column in ["kind", "target", "accepted", "placed", "ends", "core_id", "step", "cut_step", "cutoffs", "stops", "stop_epoch"] {
             try connection.execute("ALTER TABLE fx_inputs DROP COLUMN \(column)")
         }
+        try connection.execute("ALTER TABLE fx_sessions DROP COLUMN halted")
+        try connection.execute("ALTER TABLE fx_sessions DROP COLUMN recovery_input")
         try connection.execute("UPDATE fx_agent_schema SET version=1")
         try connection.close()
         let upgraded = try FxSessionStore(url: url)

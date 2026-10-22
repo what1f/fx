@@ -45,6 +45,16 @@ public protocol FxSessionStorage: Sendable {
     func publicInputID(_ coreID: String, session: String) async throws -> String?
     func deliveryCutoffs(_ lease: FxSessionLease, id: String) async throws -> Int
     func cutOffDelivery(_ lease: FxSessionLease, id: String) async throws -> Int
+    func harnessFailureState(_ lease: FxSessionLease, id: String) async throws -> FxHarnessFailureState
+    /// Atomically increments the input's stop count once per ownership epoch, capped at five.
+    /// Also remembers this input for recovery. Opening failures do not count.
+    func recordHarnessStop(_ lease: FxSessionLease, id: String) async throws -> Int
+    /// Permanently prevents new execution in this session. Pending inputs still receive results.
+    func halt(_ lease: FxSessionLease) async throws
+    func input(_ lease: FxSessionLease, id: String) async throws -> FxSessionInput?
+    /// A failed public result may still have a physical turn that needs cancellation.
+    func harnessRecoveryInput(_ lease: FxSessionLease) async throws -> FxSessionInput?
+    func setHarnessRecoveryInput(_ lease: FxSessionLease, id: String?) async throws
 }
 
 struct SessionStorageFailure: Error {

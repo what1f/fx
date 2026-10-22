@@ -303,7 +303,17 @@ Seven native tests use a scripted executor with public imports and its own recor
 
 Local qualification: all 267 native tests pass normally and under Thread Sanitizer. Address Sanitizer passes the 267-test suite, then all seven harness tests again after strengthening per-input settings validation. The normal conformance runner passes 90/90 entries with empty stderr; the complete upstream instruction-limits owner and actual-driver smoke also pass after that final validation change. The independent public Release consumer passes with the scripted harness, injected session storage, HTTP queue, MCP and provider transport. The normal driver is restored. No CI was triggered.
 
-This is the conversation executor interface, not complete generic durable qualification. Inputs and output events still use the conversation types. Arbitrary payloads, automatic executor replacement, persisted stop counts, repeated-stop cancellation and halt behavior, plus the unchanged upstream generic-core assertions, remain required work. The scripted fixture does not claim those behaviors.
+The conversation executor interface still uses conversation input and output types. Arbitrary payloads and the unchanged upstream generic-core assertions remain required work. The stopped-executor behavior below has separate native and consumer proof.
+
+## Stopped executor recovery
+
+A stopped turn opens a replacement executor after close joins pending journal writes. Three stops end an input that has no open record; a recorded open turn is resumed without rerunning and cancelled. Two more stops during cancellation halt only that session. Stop counts are idempotent within an ownership epoch and persist across lease changes and database reopening. Opening outages do not consume this budget. Later work cancels a failed input's old physical turn using its captured settings without changing its public result. A completion record that lands before or during close produces an unknown result without rerunning.
+
+SQLite schema version 4 stores the stop count, counting epoch, halt and recovery-input pointer. Host storage implementations supply the same fenced operations. The version-1 migration fixture checks that an old database retains its pending input while upgrading. Ten recovery tests cover replacement, bounded starts, cancellation, halt isolation and reopening, late completion, queue redelivery, opening outages, storage failure identity, fencing and idempotence. The storage regression fails before wrapping nested recovery reads and passes afterward: a host storage error leaves the next input pending and retains its original error object instead of becoming a final execution error.
+
+The independent Release consumer executes recovery, cancellation and halting through public imports. The upstream generic-core file is not redirected to this fixture, so these checks do not count as its original assertions passing.
+
+Local qualification: all 277 native tests pass in normal, Address Sanitizer and Thread Sanitizer builds. The independent public Release consumer passes after the final storage-error fix. The normal compatibility runner passes 90/90 entries with empty stderr before that final fix; the new storage regression directly exercises the changed error boundary. The restored normal driver passes the runtime smoke for streaming, Unicode, tools, checkpoints, restore and repeated close. These sanitizer builds instrument Swift, without establishing instruction-level coverage of the precompiled Zig archive. No CI was triggered.
 
 ## Required remaining gates
 

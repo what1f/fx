@@ -53,7 +53,7 @@ public protocol FxHarnessSession: Sendable {
     func resume(rerunning: Bool, yieldAt: Date?) async throws -> (any FxHarnessTurn)?
     func saveCheckpoint() async throws
     func checkpoint() async throws -> Data
-    /// Joins pending journal writes before returning.
+    /// Joins pending journal writes before returning. Recovery properties remain readable afterward.
     func close() async throws
 }
 

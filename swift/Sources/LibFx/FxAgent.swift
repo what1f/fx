@@ -229,14 +229,38 @@ public actor FxAgent {
         }
     }
 
-    private func execute(_ input: FxSessionInput, lease: FxSessionLease, deadlines suppliedDeadlines: Deadlines? = nil) async throws -> Bool {
+    private func execute(_ input: FxSessionInput, lease: FxSessionLease, deadlines suppliedDeadlines: Deadlines? = nil, recoveringOnly: Bool = false) async throws -> Bool {
         let deadlines = suppliedDeadlines ?? deliveryPolicy?.deadlines()
-        try await store.start(lease, input: input)
-        if input.cancelRequested && !input.wasStarted {
-            try await finish(input, lease: lease, reason: .cancelled)
+        let store = self.store
+        func settle(_ reason: FxTurnResult.StopReason, usage: FxUsage? = nil, error: String? = nil) async throws {
+            if !recoveringOnly { try await finish(input, lease: lease, reason: reason, usage: usage, error: error) }
+        }
+        var failureState = try await sessionStorageOperation { try await store.harnessFailureState(lease, id: input.id) }
+        if !failureState.halted, !recoveringOnly,
+           let previous = try await sessionStorageOperation({ try await store.harnessRecoveryInput(lease) }), previous.id != input.id {
+            guard try await store.result(session: lease.sessionID, agent: name, id: previous.id) != nil else {
+                throw FxPersistenceError.invalidJournal
+            }
+            do {
+                if try await execute(previous, lease: lease, deadlines: deadlines, recoveringOnly: true) { return true }
+            } catch {
+                if error is SessionStorageFailure || error is FxPersistenceError || error is FxSQLiteError || error is FxSessionError { throw error }
+                let cause = (error as? HarnessOpeningFailure)?.cause ?? error
+                await onLifecycleEvent?(.harnessFailed(sessionID: lease.sessionID, inputID: input.id, error: cause))
+                try await settle(.error, error: harnessErrorMessage(cause))
+                return false
+            }
+            failureState = try await sessionStorageOperation { try await store.harnessFailureState(lease, id: input.id) }
+        }
+        if failureState.halted {
+            try await settle(.error, error: "The session's open turn cannot continue")
             return false
         }
-        let store = self.store
+        if !recoveringOnly { try await sessionStorageOperation { try await store.start(lease, input: input) } }
+        if input.cancelRequested && !input.wasStarted {
+            try await settle(.cancelled)
+            return false
+        }
         let context = FxHarnessContext(sessionID: lease.sessionID, inputID: input.id, options: input.options,
             persistence: SessionPersistence(store: store, lease: lease), checkpointAfterBytes: checkpointAfterBytes,
             ownership: { try await store.checkLease(lease) })
@@ -248,11 +272,11 @@ public actor FxAgent {
         catch let error as FxSessionError { throw error }
         catch let error as FxPersistenceError { throw error }
         catch let error as FxSQLiteError { throw error }
-        catch FxError.invalidInput(let message) {
-            try await finish(input, lease: lease, reason: .error, error: message)
-            return false
-        } catch {
-            try await finish(input, lease: lease, reason: .error, error: "Could not open conversation")
+        catch {
+            if recoveringOnly { throw HarnessOpeningFailure(cause: error) }
+            if input.wasStarted { try await store.setHarnessRecoveryInput(lease, id: input.id) }
+            await onLifecycleEvent?(.harnessFailed(sessionID: lease.sessionID, inputID: input.id, error: error))
+            try await settle(.error, error: harnessErrorMessage(error))
             return false
         }
         do {
@@ -262,18 +286,31 @@ public actor FxAgent {
             let recovery = await engine.recoveryState
             let spent = try await sessionStorageOperation { try await store.deliveryCutoffs(lease, id: input.id) } >= 3
             let turn: any FxHarnessTurn
-            if let recovery {
-                guard input.wasStarted, recovery.turnID == turnID else { throw FxPersistenceError.invalidJournal }
-                guard let resumed = try await engine.resume(rerunning: !spent && !input.cancelRequested, yieldAt: deadlines?.yield) else { throw FxPersistenceError.invalidJournal }
-                turn = resumed
-            } else if input.wasStarted, await engine.completedTurnID == turnID {
-                // The core committed completion, but the host result was not committed.
-                // Usage and final outcome cannot be inferred safely from an empty replay.
-                try await finish(input, lease: lease, reason: .unknown)
+            if recoveringOnly, recovery == nil {
+                try await sessionStorageOperation { try await store.setHarnessRecoveryInput(lease, id: nil) }
                 try await engine.close()
                 return false
-            } else { turn = try await engine.prompt(input.content, id: turnID, yieldAt: deadlines?.yield) }
-            if input.cancelRequested || spent && recovery?.runningCalls.isEmpty == true { await turn.cancel() }
+            }
+            if let recovery {
+                guard input.wasStarted, recovery.turnID == turnID else { throw FxPersistenceError.invalidJournal }
+                guard let resumed = try await harnessTurnOperation({
+                    try await engine.resume(rerunning: !spent && failureState.stops < 3 && !input.cancelRequested && !recoveringOnly, yieldAt: deadlines?.yield)
+                }) else { throw FxPersistenceError.invalidJournal }
+                turn = resumed
+            } else if input.wasStarted, await engine.completedTurnID == turnID {
+                try await settle(.unknown)
+                try await sessionStorageOperation { try await store.setHarnessRecoveryInput(lease, id: nil) }
+                try await engine.close()
+                return false
+            } else if failureState.stops >= 3 {
+                try await settle(.error, error: "The executor stopped each of the 3 times it started this turn")
+                try await sessionStorageOperation { try await store.setHarnessRecoveryInput(lease, id: nil) }
+                try await engine.close()
+                return false
+            } else {
+                turn = try await harnessTurnOperation { try await engine.prompt(input.content, id: turnID, yieldAt: deadlines?.yield) }
+            }
+            if recoveringOnly || input.cancelRequested || failureState.stops >= 3 || spent && recovery?.runningCalls.isEmpty == true { await turn.cancel() }
             let controls = Task { () throws -> Bool in
                 var ending = false
                 defer { finishControlChecks(lease.sessionID) }
@@ -320,7 +357,9 @@ public actor FxAgent {
                 return false
             }
             do {
-                try await publishEvents(turn, input: input, lease: lease)
+                if recoveringOnly {
+                    for try await _ in turn.events {}
+                } else { try await publishEvents(turn, input: input, lease: lease) }
                 let result = try await turn.result
                 controls.cancel()
                 let interrupted = try await controls.value
@@ -330,18 +369,49 @@ public actor FxAgent {
                     try await engine.close()
                     return true
                 }
-                try await finish(input, lease: lease, reason: result.stopReason, usage: result.usage)
+                if await engine.recoveryState?.turnID == turnID { throw FxHarnessError.stopped("The turn ended but stayed open") }
+                try await settle(result.stopReason, usage: result.usage)
+                try await sessionStorageOperation { try await store.setHarnessRecoveryInput(lease, id: nil) }
             } catch {
                 controls.cancel()
                 _ = await controls.result
-                await turn.cancel()
+                if !(error is FxHarnessError) { await turn.cancel() }
                 throw error
             }
             try await engine.close()
         } catch {
-            try? await engine.close()
-            if error is SessionStorageFailure || error is FxPersistenceError || error is FxSQLiteError { throw error }
-            try await finish(input, lease: lease, reason: .error, error: "Conversation failed")
+            do { try await engine.close() }
+            catch let closeError {
+                if closeError is SessionStorageFailure || closeError is FxPersistenceError || closeError is FxSQLiteError { throw closeError }
+            }
+            if error is SessionStorageFailure || error is FxPersistenceError || error is FxSQLiteError || error is FxSessionError { throw error }
+            let stopped: (any Error)?
+            if let error = error as? HarnessStopped { stopped = error.cause }
+            else if error is FxHarnessError { stopped = error }
+            else { stopped = nil }
+            if let stopped {
+                await onLifecycleEvent?(.harnessFailed(sessionID: lease.sessionID, inputID: input.id, error: stopped))
+                if await engine.completedTurnID == sessionCoreInputID(input.id), await engine.recoveryState?.turnID != sessionCoreInputID(input.id) {
+                    try await settle(.unknown)
+                    try await sessionStorageOperation { try await store.setHarnessRecoveryInput(lease, id: nil) }
+                    return false
+                }
+                let count = try await sessionStorageOperation { try await store.recordHarnessStop(lease, id: input.id) }
+                let open = await engine.recoveryState?.turnID == sessionCoreInputID(input.id)
+                if open && count >= 5 {
+                    try await sessionStorageOperation { try await store.halt(lease) }
+                    try await settle(.error, error: "The executor stopped each time it continued this turn, even to cancel it")
+                    return false
+                }
+                if !open && count >= 3 {
+                    try await settle(.error, error: "The executor stopped each of the 3 times it started this turn")
+                    try await sessionStorageOperation { try await store.setHarnessRecoveryInput(lease, id: nil) }
+                    return false
+                }
+                return true
+            }
+            if recoveringOnly { throw HarnessOpeningFailure(cause: error) }
+            try await settle(.error, error: harnessErrorMessage(error))
         }
         return false
     }

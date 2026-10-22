@@ -29,6 +29,11 @@ func encodeLifecycleEvent(_ event: FxLifecycleEvent) -> JSONValue {
         fields["changed"] = .array(changed.map { .string($0.rawValue) })
         fields["saved"] = checkpointIdentity(saved)
         fields["current"] = checkpointIdentity(current)
+    case .harnessFailed(let sessionID, let inputID, let error):
+        fields["type"] = .string("session.error")
+        fields["sessionId"] = .string(sessionID)
+        fields["messageId"] = .string(inputID)
+        fields["message"] = .string((error as? any LocalizedError)?.errorDescription ?? String(describing: error))
     case .deliveryDeadline(let sessionID, let epoch, let cutoffs):
         fields["type"] = .string("session.deadline")
         fields["sessionId"] = .string(sessionID)

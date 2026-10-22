@@ -572,7 +572,25 @@ struct SubscriptionHTTP: FxHTTPClient {
               try await scriptedSession.checkpoint().starts(with: Data("SCRIPT1\n".utf8)) else {
             throw FxError.protocolViolation("Unexpected custom executor result")
         }
-        try await scripted.close(); try await harnessStore.close()
+        try await scripted.close()
+        let recoveryFaults = ScriptedHarnessFaults()
+        let recovering = try FxAgent(harness: ScriptedSessionHarness(faults: recoveryFaults), store: harnessStore)
+        let recoverySession = try await recovering.session(id: "public-recovery")
+        guard try await recoverySession.prompt("flaky", id: "retry").result.stopReason == .endTurn,
+              await recoveryFaults.prompts == ["flaky", "flaky"],
+              try await recoverySession.prompt("brittle", id: "cancel").result.stopReason == .cancelled else {
+            throw FxError.protocolViolation("Unexpected executor recovery result")
+        }
+        let haltedSession = try await recovering.session(id: "public-halt")
+        guard try await haltedSession.prompt("shattered", id: "halt").result.stopReason == .error else {
+            throw FxError.protocolViolation("Expected halted session")
+        }
+        let opensBefore = await recoveryFaults.opens
+        guard try await haltedSession.prompt("after", id: "after").result.stopReason == .error,
+              await recoveryFaults.opens == opensBefore else {
+            throw FxError.protocolViolation("Halted session opened another executor")
+        }
+        try await recovering.close(); try await harnessStore.close()
         print("Swift package consumer passed")
     }
 }

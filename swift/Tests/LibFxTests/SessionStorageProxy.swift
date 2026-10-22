@@ -6,13 +6,19 @@ final class SessionStorageTestFailure: Error {}
 // Public imports only: the independent consumer compiles this same host implementation.
 actor SessionStorageProxy: FxSessionStorage {
     let base: FxSessionStore
-    private var failure: (String, SessionStorageTestFailure)?
+    private var failure: (String, SessionStorageTestFailure, remaining: Int)?
     private(set) var calls: [String] = []
     init(_ base: FxSessionStore) { self.base = base }
-    func failNext(_ operation: String, with error: SessionStorageTestFailure) { failure = (operation, error) }
+    func failNext(_ operation: String, with error: SessionStorageTestFailure, after successfulCalls: Int = 0) {
+        failure = (operation, error, successfulCalls)
+    }
     private func before(_ operation: String) throws {
         calls.append(operation)
         if let failure, failure.0 == operation {
+            if failure.remaining > 0 {
+                self.failure?.remaining -= 1
+                return
+            }
             self.failure = nil
             throw failure.1
         }
@@ -117,4 +123,30 @@ actor SessionStorageProxy: FxSessionStorage {
         try before("cutOffDelivery")
         return try await base.cutOffDelivery(lease, id: id)
     }
+    func harnessFailureState(_ lease: FxSessionLease, id: String) async throws -> FxHarnessFailureState {
+        try before("harnessFailureState")
+        return try await base.harnessFailureState(lease, id: id)
+    }
+    func recordHarnessStop(_ lease: FxSessionLease, id: String) async throws -> Int {
+        try before("recordHarnessStop")
+        return try await base.recordHarnessStop(lease, id: id)
+    }
+    func halt(_ lease: FxSessionLease) async throws {
+        try before("halt")
+        try await base.halt(lease)
+    }
+    func input(_ lease: FxSessionLease, id: String) async throws -> FxSessionInput? {
+        try before("input")
+        return try await base.input(lease, id: id)
+    }
+
+    func harnessRecoveryInput(_ lease: FxSessionLease) async throws -> FxSessionInput? {
+        try before("harnessRecoveryInput")
+        return try await base.harnessRecoveryInput(lease)
+    }
+    func setHarnessRecoveryInput(_ lease: FxSessionLease, id: String?) async throws {
+        try before("setHarnessRecoveryInput")
+        try await base.setHarnessRecoveryInput(lease, id: id)
+    }
+
 }

@@ -4,7 +4,10 @@ import LibFx
 // Public imports only. The independent package consumer also compiles this executor.
 struct ScriptedSessionHarness: FxSessionHarness {
     let stepDuration: Duration
-    init(stepDuration: Duration = .milliseconds(3)) { self.stepDuration = stepDuration }
+    let faults: ScriptedHarnessFaults?
+    init(stepDuration: Duration = .milliseconds(3), faults: ScriptedHarnessFaults? = nil) {
+        self.stepDuration = stepDuration; self.faults = faults
+    }
     func validate(input: [FxPromptContent], options: FxSessionOptions) throws {
         guard input.allSatisfy({ if case .text = $0 { return true }; return false }) else {
             throw FxError.invalidInput("This executor accepts text")
@@ -15,8 +18,41 @@ struct ScriptedSessionHarness: FxSessionHarness {
         return data
     }
     func open(_ context: FxHarnessContext) async throws -> any FxHarnessSession {
-        try await ScriptedHarnessSession(context: context, stepDuration: stepDuration)
+        try await faults?.willOpen(context)
+        return try await ScriptedHarnessSession(context: context, stepDuration: stepDuration, faults: faults)
     }
+}
+
+private enum ScriptHarnessFixtureError: Error, LocalizedError {
+    case openUnavailable, promptUnavailable
+    var errorDescription: String? {
+        switch self {
+        case .openUnavailable: "no executor"
+        case .promptUnavailable: "the executor cannot start"
+        }
+    }
+}
+
+actor ScriptedHarnessFaults {
+    private(set) var opens = 0
+    private(set) var prompts: [String] = []
+    private(set) var resumes: [Bool] = []
+    private(set) var contexts: [JSONValue?] = []
+    private var promptFailures: Set<String> = []
+    private var maximumOpens: Int?
+    init(maximumOpens: Int? = nil) { self.maximumOpens = maximumOpens }
+    func restoreOpenings() { maximumOpens = nil }
+    func willOpen(_ context: FxHarnessContext) throws {
+        opens += 1; contexts.append(context.options.context)
+        if let maximumOpens, opens > maximumOpens { throw ScriptHarnessFixtureError.openUnavailable }
+    }
+    func willPrompt(_ text: String) throws -> Bool {
+        prompts.append(text)
+        let first = promptFailures.insert(text).inserted
+        if text == "flaky", first { throw ScriptHarnessFixtureError.promptUnavailable }
+        return text == "doomed" || text == "halting" && first
+    }
+    func willResume(rerunning: Bool) { resumes.append(rerunning) }
 }
 
 private struct ScriptRecord: Codable {
@@ -49,12 +85,14 @@ private struct ScriptTurn: FxHarnessTurn {
 private actor ScriptedHarnessSession: FxHarnessSession {
     let context: FxHarnessContext
     let stepDuration: Duration
+    let faults: ScriptedHarnessFaults?
     var records: [ScriptRecord]
     var head: String?
     var active: Task<FxTurnResult, any Error>?
+    var landing: [Task<Void, any Error>] = []
 
-    init(context: FxHarnessContext, stepDuration: Duration) async throws {
-        self.context = context; self.stepDuration = stepDuration
+    init(context: FxHarnessContext, stepDuration: Duration, faults: ScriptedHarnessFaults?) async throws {
+        self.context = context; self.stepDuration = stepDuration; self.faults = faults
         let snapshot = try await context.persistence.load()
         var records = try snapshot.checkpoint.map { try Self.decode($0.data) } ?? []
         for record in snapshot.journal { records.append(try JSONDecoder().decode(ScriptRecord.self, from: record.data)) }
@@ -72,10 +110,18 @@ private actor ScriptedHarnessSession: FxHarnessSession {
     var completedTurnID: String? { records.last.flatMap { $0.ended ? $0.id : nil } }
     func prompt(_ content: [FxPromptContent], id: String, yieldAt: Date?) async throws -> any FxHarnessTurn {
         let text = content.compactMap { if case .text(let text) = $0 { return text }; return nil }.joined()
+        if try await faults?.willPrompt(text) == true {
+            let error = FxHarnessError.stopped("executor exited before its start record")
+            let stream = AsyncThrowingStream<FxEvent, any Error> { $0.finish(throwing: error) }
+            let task = Task<FxTurnResult, any Error> { throw error }
+            active = task
+            return ScriptTurn(events: stream, completion: task, control: ScriptTurnControl())
+        }
         try await append(ScriptRecord(id: id, text: text, step: 0, ended: false))
         return turn(id: id, text: text, yieldAt: yieldAt)
     }
-    func resume(rerunning: Bool, yieldAt: Date?) throws -> (any FxHarnessTurn)? {
+    func resume(rerunning: Bool, yieldAt: Date?) async throws -> (any FxHarnessTurn)? {
+        await faults?.willResume(rerunning: rerunning)
         guard let last = records.last, !last.ended else { return nil }
         return turn(id: last.id, text: last.text, yieldAt: yieldAt)
     }
@@ -96,15 +142,31 @@ private actor ScriptedHarnessSession: FxHarnessSession {
                      events: AsyncThrowingStream<FxEvent, any Error>.Continuation) async throws -> FxTurnResult {
         var first = true
         do {
+            if faults != nil, text == "shattered" {
+                try? await Task.sleep(for: .milliseconds(5))
+                throw FxHarnessError.stopped("executor exited even during cancellation")
+            }
+            if faults != nil, text == "brittle" {
+                try await Task.sleep(for: .milliseconds(5))
+                throw FxHarnessError.stopped("executor exited mid-turn")
+            }
             let start = records.last?.step ?? 0
             for step in start..<3 {
                 if !first, let yieldAt, Date() >= yieldAt { return FxTurnResult(stopReason: .yielded) }
                 first = false
                 try await Task.sleep(for: stepDuration)
                 try await context.checkOwnership()
-                try await append(ScriptRecord(id: id, text: text, step: step + 1, ended: step == 2))
+                let record = ScriptRecord(id: id, text: text, step: step + 1, ended: step == 2)
+                if faults != nil, text == "late", step == 2 {
+                    let write = Task { try await Task.sleep(for: .milliseconds(150)); try await self.append(record) }
+                    landing.append(write)
+                    events.yield(.text("\(text)-\(step) "))
+                    throw FxHarnessError.stopped("executor exited while completion was landing")
+                }
+                try await append(record)
                 events.yield(.text("\(text)-\(step) "))
             }
+            if faults != nil, text == "omega" { throw FxHarnessError.stopped("executor exited after completion") }
             return FxTurnResult(stopReason: .endTurn)
         } catch is CancellationError {
             if !(await control.handedOff) {
@@ -129,5 +191,8 @@ private actor ScriptedHarnessSession: FxHarnessSession {
     func saveCheckpoint() async throws {
         if let head { try await context.persistence.saveCheckpoint(FxStoredCheckpoint(through: head, data: checkpoint())) }
     }
-    func close() async throws { if let active { _ = try await active.value } }
+    func close() async throws {
+        for task in landing { try await task.value }
+        if let active { _ = try await active.value }
+    }
 }
