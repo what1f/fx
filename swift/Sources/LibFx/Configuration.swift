@@ -8,6 +8,8 @@ public struct FxConfiguration: Sendable {
     public var modelCatalog: FxModelCatalog?
     /// A smaller image window requires an FxImagePersistence store.
     public var imageWindow: FxImageWindow?
+    /// Prepares prompt image bytes before admission. Return bytes and a format; the original reference is retained.
+    public var prepareImage: (@Sendable (FxImage) async throws -> FxImage)?
     public var instructions: String
     public var tools: [FxTool]
     public var providerTools: [FxProviderTool]
@@ -55,6 +57,7 @@ public struct FxConfiguration: Sendable {
         self.model = model
         self.modelCatalog = nil
         self.imageWindow = nil
+        self.prepareImage = nil
         self.instructions = instructions
         self.tools = tools
         self.providerTools = providerTools

@@ -79,6 +79,7 @@ function swiftTools(value) {
 
 export async function createFxEngine(options = {}) {
   options = { ...options, tools: swiftTools(options.tools) };
+  if (options.resizeImage !== undefined && typeof options.resizeImage !== 'function') throw new TypeError('resizeImage must be a function');
   // These invalid callback shapes cannot be constructed by a typed Swift caller.
   if (options.hooks !== undefined) {
     const hooks = options.hooks;
@@ -216,8 +217,10 @@ export async function createFxEngine(options = {}) {
     pending.clear();
   });
   const persistenceFailures = new Map();
+  const imagePreparationFailures = new Map();
   let appendFailure, reportedAppendFailure;
   function persistenceError(value) {
+    if (imagePreparationFailures.has(value.imagePreparationFailure)) return { error: imagePreparationFailures.get(value.imagePreparationFailure) };
     const failure = persistenceFailures.get(value.persistenceFailureID) ??
       (value.persistenceError === 'fenced' ? appendFailure : undefined);
     if (failure) {
@@ -362,7 +365,8 @@ export async function createFxEngine(options = {}) {
     } else if ('failed' in value) {
       const state = turnStates.get(value.turnToken);
       const translated = persistenceError(value);
-      const error = translated ? translated.error : new Error(value.failed);
+      const ErrorType = value.category === 'type' ? TypeError : value.category === 'range' ? RangeError : Error;
+      const error = translated ? translated.error : new ErrorType(value.message ?? value.failed);
       if (appendFailure && error === appendFailure.wrapped) reportedAppendFailure = error;
       state?.cleanup?.(); state?.fail(error);
       const queued = followUps.get(value.turnToken);
@@ -375,6 +379,19 @@ export async function createFxEngine(options = {}) {
       fetchControllers.get(value.fetchCancelled)?.abort();
       void fetchReaders.get(value.fetchCancelled)?.cancel().catch(() => {});
       fetchControllers.delete(value.fetchCancelled);
+    } else if (value.imagePreparationRequest) {
+      const call = value.imagePreparationRequest;
+      void Promise.resolve().then(() => options.resizeImage({ bytes: new Uint8Array(Buffer.from(call.data, 'base64')), mimeType: call.mimeType }))
+        .then(image => {
+          if (!image || !(image.bytes instanceof ArrayBuffer || ArrayBuffer.isView(image.bytes)) || !image.bytes.byteLength || typeof image.mimeType !== 'string') {
+            throw new TypeError('resizeImage must return non-empty bytes and a mimeType');
+          }
+          const data = image.bytes instanceof ArrayBuffer ? Buffer.from(image.bytes) : Buffer.from(image.bytes.buffer, image.bytes.byteOffset, image.bytes.byteLength);
+          return request('imagePreparationResult', { token: call.token, image: { data: data.toString('base64'), mimeType: image.mimeType } });
+        }).catch(error => {
+          imagePreparationFailures.set(call.token, error);
+          void request('imagePreparationResult', { token: call.token, error: error?.message ?? String(error) }).catch(() => {});
+        });
     } else if (value.persistenceRequest) {
       const call = value.persistenceRequest;
       void (async () => {
@@ -522,6 +539,7 @@ export async function createFxEngine(options = {}) {
     }
     const opened = await request(options.__agent ? 'openAgent' : 'open', { options: {
       ...configuration,
+      hasImagePreparation: typeof options.resizeImage === 'function',
       sessionId: options.sessionId,
       model: swiftModel(options),
       ...(options.hooks ? { hooks: options.hooks } : {}),

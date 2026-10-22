@@ -5,6 +5,18 @@ import Testing
 private let imagePNG = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jP0cAAAAASUVORK5CYII=")!
 private final class ImageStoreFailure: Error {}
 
+private actor ImagePreparationGate {
+    private(set) var started = false
+    private(set) var finished = false
+    func prepare(_ image: FxImage) async throws -> FxImage {
+        started = true
+        defer { finished = true }
+        try await Task.sleep(for: .seconds(60))
+        return image
+    }
+    func waitForEntry() async { while !started { await Task.yield() } }
+}
+
 private actor StoredPictures: FxImagePersistence, FxCheckpointPersistence {
     let journal = FxMemoryPersistence()
     let failure: ImageStoreFailure?
@@ -85,6 +97,106 @@ private func requestPictures(_ body: JSONValue) -> [String] {
 }
 
 @Suite(.serialized, .timeLimit(.minutes(1))) struct ImagePersistenceTests {
+    @Test func preparationAdmitsLargeInputAndStoresOnlyThePreparedBytes() async throws {
+        let store = StoredPictures(), http = ImageStoreHTTP()
+        var config = try imageConfiguration(http)
+        let original = imagePNG + Data(repeating: 1, count: 5 * 1024 * 1024)
+        config.prepareImage = { image in
+            #expect(image.data == original)
+            #expect(image.format == .jpeg)
+            #expect(image.sourceReference == "host:original")
+            return FxImage(data: imagePNG, format: .png, sourceReference: "host:replacement")
+        }
+        let engine = try await FxEngine.open(configuration: config, persistence: store)
+        let turn = try await engine.prompt([.image(FxImage(data: original, format: .jpeg, sourceReference: "host:original"))])
+        #expect(try await turn.result.stopReason == .endTurn)
+        #expect(requestPictures(try #require(await http.bodies.last)) == [imagePNG.base64EncodedString()])
+        #expect(await store.images == [PersistedImages.name(for: imagePNG): imagePNG])
+        try await engine.close()
+        config.prepareImage = { _ in Issue.record("Restoration must not prepare saved bytes again"); throw FxError.closed }
+        let reopened = try await FxEngine.open(configuration: config, persistence: store)
+        let next = try await reopened.prompt("recall")
+        #expect(try await next.result.stopReason == .endTurn)
+        #expect(requestPictures(try #require(await http.bodies.last)) == [imagePNG.base64EncodedString()])
+        try await reopened.close()
+    }
+
+    @Test func preparationFailurePreservesItsIdentityAndLeavesTheEngineUsable() async throws {
+        let failure = ImageStoreFailure(), store = StoredPictures(), http = ImageStoreHTTP()
+        var config = try imageConfiguration(http)
+        config.prepareImage = { _ in throw failure }
+        let engine = try await FxEngine.open(configuration: config, persistence: store)
+        let turn = try await engine.prompt([.image(FxImage(data: imagePNG, format: .png))])
+        do { _ = try await turn.result; Issue.record("Preparation should fail") }
+        catch { #expect(error as? ImageStoreFailure === failure) }
+        #expect(await http.bodies.isEmpty)
+        #expect(await store.images.isEmpty)
+        #expect(await store.load().journal.isEmpty)
+        let next = try await engine.prompt("still usable")
+        #expect(try await next.result.stopReason == .endTurn)
+        try await engine.close()
+    }
+
+    @Test func durableIntakeDefersImageLimitsUntilTheWorkerPreparesItsBytes() async throws {
+        let store = try FxSessionStore(), http = ImageStoreHTTP()
+        let original = imagePNG + Data(repeating: 3, count: 5 * 1024 * 1024)
+        var config = try imageConfiguration(http)
+        config.prepareImage = { image in
+            #expect(image.data == original)
+            return FxImage(data: imagePNG, format: .png)
+        }
+        let agent = try FxAgent(configuration: config, store: store)
+        let session = try await agent.session(id: "prepared")
+        let turn = try await session.prompt([.image(FxImage(data: original, format: .png))], id: "picture")
+        #expect(try await turn.result.stopReason == .endTurn)
+        #expect(requestPictures(try #require(await http.bodies.last)) == [imagePNG.base64EncodedString()])
+        #expect(try await store.loadImage(named: PersistedImages.name(for: imagePNG), session: "prepared", agent: "default") == imagePNG)
+        try await agent.close()
+        config.prepareImage = { _ in Issue.record("Saved bytes must not be prepared again"); throw FxError.closed }
+        let reopened = try FxAgent(configuration: config, store: store)
+        let next = try await reopened.session(id: "prepared").prompt("recall", id: "text")
+        #expect(try await next.result.stopReason == .endTurn)
+        #expect(requestPictures(try #require(await http.bodies.last)) == [imagePNG.base64EncodedString()])
+        try await reopened.close()
+        try await store.close()
+    }
+
+    @Test(arguments: [false, true]) func preparationCancellationAndCloseJoinTheCallback(close: Bool) async throws {
+        let gate = ImagePreparationGate(), http = ImageStoreHTTP()
+        var config = try imageConfiguration(http)
+        config.prepareImage = { try await gate.prepare($0) }
+        let engine = try await FxEngine.open(configuration: config)
+        let turn = try await engine.prompt([.image(FxImage(data: imagePNG, format: .png))])
+        await gate.waitForEntry()
+        if close { try await engine.close() } else { await turn.cancel() }
+        if close {
+            do { _ = try await turn.result; Issue.record("Closed preparation should fail") } catch {}
+        } else {
+            #expect(try await turn.result.stopReason == .cancelled)
+            try await engine.close()
+        }
+        #expect(await gate.finished)
+        #expect(await http.bodies.isEmpty)
+    }
+
+    @Test(arguments: [0, 1, 2]) func preparedOutputMustHaveBytesAndFitTheFinalLimits(kind: Int) async throws {
+        let http = ImageStoreHTTP()
+        var config = try imageConfiguration(http)
+        config.prepareImage = { _ in
+            if kind == 0 { return FxImage(reference: "host:output", format: .png) }
+            return FxImage(data: imagePNG + Data(repeating: 0, count: kind == 1 ? 4 * 1024 * 1024 : 3 * 1024 * 1024 - imagePNG.count), format: .png)
+        }
+        let engine = try await FxEngine.open(configuration: config)
+        let pictures = Array(repeating: FxPromptContent.image(FxImage(data: imagePNG, format: .png)), count: kind == 2 ? 2 : 1)
+        let turn = try await engine.prompt(pictures)
+        do { _ = try await turn.result; Issue.record("Invalid prepared output should fail") }
+        catch { guard case FxError.invalidInput = error else { Issue.record("Unexpected preparation error: \(error)"); return } }
+        #expect(await http.bodies.isEmpty)
+        let next = try await engine.prompt("still usable")
+        #expect(try await next.result.stopReason == .endTurn)
+        try await engine.close()
+    }
+
     @Test func sqlitePicturesSurviveReopeningWithSmallCheckpoints() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

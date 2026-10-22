@@ -54,7 +54,7 @@ public actor FxAgent {
             }
         }
         try Task.checkCancellation()
-        let repeated = try await store.accept(session: session, agent: name, id: id, content: content, options: options, checkpoint: initialCheckpoint, steering: steering)
+        let repeated = try await store.accept(session: session, agent: name, id: id, content: content, options: options, checkpoint: initialCheckpoint, steering: steering, deferringImageLimits: configuration.prepareImage != nil)
         kick(session)
         if steering { await synchronizeControls(session) }
         return FxSessionTurn(id: id, sessionID: session, isRepeated: repeated, agent: self)

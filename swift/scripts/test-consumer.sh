@@ -230,10 +230,16 @@ struct SubscriptionHTTP: FxHTTPClient {
             httpClient: ImageHTTP(base64: png.base64EncodedString()), checkpointAfterBytes: 0)
         imageConfig.modelCatalog = try FxModelCatalog(response: Data(#"{"data":[{"id":"swift/consumer","type":"language","tags":["vision","file-input"]}]}"#.utf8))
         imageConfig.imageWindow = try FxImageWindow(maximumImages: 2)
+        imageConfig.prepareImage = { image in
+            guard image.data?.count == 5 * 1024 * 1024 else {
+                throw FxError.protocolViolation("Unexpected consumer preparation input")
+            }
+            return FxImage(data: png, format: .png)
+        }
         let imageStore = try FxSQLitePersistence(url: imageURL)
         let imagePersistence: any FxImagePersistence = imageStore
         let imageEngine = try await FxEngine.open(configuration: imageConfig, persistence: imagePersistence)
-        let picture = try await imageEngine.prompt([.image(FxImage(data: png, format: .png))])
+        let picture = try await imageEngine.prompt([.image(FxImage(data: Data(repeating: 0, count: 5 * 1024 * 1024), format: .png))])
         guard try await picture.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
         try await imageEngine.close()
         try await imageStore.close()

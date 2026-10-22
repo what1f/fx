@@ -204,7 +204,9 @@ A `.toolStarted` event carries an optional `FxToolInput`: `.complete(JSONValue)`
 
 Pass `providerTools: [.webSearch]` to `FxConfiguration` to advertise search executed by the model service. It has no host closure. Search calls and results appear as ordinary tool events and remain in checkpoint and journal history. Availability depends on the model service. Provider and host tool names share one namespace; duplicate names are rejected.
 
-Images use `Data` and a supported format. Each prompt accepts up to eight images, at most 3.75 MiB each and 6 MiB together, subject to the encoded request limit. The core checks image content and model capabilities. Image resizing and external image storage are not implemented yet.
+Images use `Data` and a supported format. Each prompt accepts up to eight images, at most 3.75 MiB each and 6 MiB together, subject to the encoded request limit. The core checks image content and model capabilities.
+
+Set `configuration.prepareImage` to resize or convert prompt images before admission. The asynchronous closure receives an `FxImage` and must return nonempty bytes and a supported format. The original source reference is retained. Size limits apply to the prepared bytes, so the input may exceed those limits. Reference-only images and restored conversation images do not call the closure. Preparation runs before image storage or a model request; a thrown error fails the turn with the original error. The closure must cooperate with cancellation. Cancelling a turn or closing the engine cancels preparation, and closing waits for it to exit.
 
 ## Resolve core permission requests
 

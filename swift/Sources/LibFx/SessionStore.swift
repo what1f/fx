@@ -75,9 +75,9 @@ public actor FxSessionStore {
         try database.close()
     }
 
-    func accept(session: String, agent: String, id: String, content: [FxPromptContent], options: FxSessionOptions, checkpoint: Data? = nil, steering: Bool = false) throws -> Bool {
+    func accept(session: String, agent: String, id: String, content: [FxPromptContent], options: FxSessionOptions, checkpoint: Data? = nil, steering: Bool = false, deferringImageLimits: Bool = false) throws -> Bool {
         guard validSessionIdentifier(session), validSessionIdentifier(id) else { throw FxError.invalidInput("Invalid session or message ID") }
-        _ = try PreparedPrompt(content)
+        _ = try PreparedPrompt(content, deferringImageLimits: deferringImageLimits)
         let data = try JSONEncoder().encode(content), settings = try JSONEncoder().encode(options)
         guard settings.count <= 1024 * 1024 else { throw FxError.invalidInput("Session settings exceed the size limit") }
         return try database.transaction {

@@ -9,6 +9,7 @@ public actor FxEngine {
     private let permissions: PermissionRequests
     private let journal: JournalWriter?
     private let imagePersistence: (any FxImagePersistence)?
+    private let prepareImage: (@Sendable (FxImage) async throws -> FxImage)?
     private let observation: FxObservationOptions?
     private let onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)?
     private let checkpointAfterBytes: Int?
@@ -31,14 +32,14 @@ public actor FxEngine {
     private var cancelling = false
     private var turnCancelled = false
     private var promptDispatch: PromptDispatch?
-    private var imagePreparation: Task<[JSONValue], any Error>?
+    private var imagePreparation: Task<PreparedPrompt, any Error>?
     private var checkpointing = false
     private var checkpointSaveTask: Task<Void, any Error>?
     private var closingTask: Task<Void, any Error>?
 
     private init(
         sessionID: String, rpc: RPCClient, transport: any EngineTransport,
-        tools: [String: FxTool], journal: JournalWriter?, imagePersistence: (any FxImagePersistence)?, observation: FxObservationOptions?, checkpointAfterBytes: Int?, checkpointMetadata: CheckpointMetadata, onPermission: PermissionRequests.Handler?, onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)?
+        tools: [String: FxTool], journal: JournalWriter?, imagePersistence: (any FxImagePersistence)?, prepareImage: (@Sendable (FxImage) async throws -> FxImage)?, observation: FxObservationOptions?, checkpointAfterBytes: Int?, checkpointMetadata: CheckpointMetadata, onPermission: PermissionRequests.Handler?, onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)?
     ) {
         self.sessionID = sessionID
         self.rpc = rpc
@@ -56,6 +57,7 @@ public actor FxEngine {
         self.permissions = PermissionRequests(sessionID: sessionID, rpc: rpc, handler: permissionHandler)
         self.journal = journal
         self.imagePersistence = imagePersistence
+        self.prepareImage = prepareImage
         self.observation = observation
         self.onLifecycleEvent = onLifecycleEvent
         self.checkpointAfterBytes = checkpointAfterBytes
@@ -159,7 +161,7 @@ public actor FxEngine {
                 throw FxError.protocolViolation("Runtime does not support observation")
             }
             let journal = persistence.map { JournalWriter(store: $0, head: loaded?.head, lastSequence: loaded?.lastSequence ?? 0, tailBytes: loaded?.tailBytes ?? 0) }
-            let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, imagePersistence: persistence as? any FxImagePersistence, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes, checkpointMetadata: checkpointMetadata, onPermission: configuration.onPermission, onLifecycleEvent: configuration.onLifecycleEvent)
+            let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, imagePersistence: persistence as? any FxImagePersistence, prepareImage: configuration.prepareImage, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes, checkpointMetadata: checkpointMetadata, onPermission: configuration.onPermission, onLifecycleEvent: configuration.onLifecycleEvent)
             await journal?.setHandler { [weak engine] result in await engine?.journalSettled(result) }
             await rpc.setHandler { [weak engine] message in await engine?.handle(message) }
             if let checkpoint {
@@ -390,8 +392,7 @@ public actor FxEngine {
             metadata["inputId"] = .string(followUp.receipt.id)
             metadata["inputAccepted"] = .bool(followUp.acceptedInCore)
         }
-        let prepared = try PreparedPrompt(content, allowEmpty: resuming)
-        let images = prepared.images
+        let prepared = try PreparedPrompt(content, allowEmpty: resuming, deferringImageLimits: prepareImage != nil)
         let id = UUID()
         turnID = id
         publicTurnID = publicID
@@ -418,14 +419,22 @@ public actor FxEngine {
             do {
                 await transport.beginTurn()
                 guard !closed else { throw FxError.closed }
-                var blocks = prepared.blocks
-                if !images.isEmpty, let imagePersistence, !turnCancelled {
-                    let preparation = Task { try await PersistedImages.prompt(prepared, store: imagePersistence) }
+                var ready = prepared
+                if !prepared.images.isEmpty, (prepareImage != nil || imagePersistence != nil), !turnCancelled {
+                    let preparation = Task {
+                        var value = prepared
+                        if let prepareImage { value = try await PreparedPrompt.preparing(content, with: prepareImage) }
+                        if let imagePersistence {
+                            value = PreparedPrompt(blocks: try await PersistedImages.prompt(value, store: imagePersistence), images: value.images)
+                        }
+                        return value
+                    }
                     imagePreparation = preparation
-                    blocks = try await preparation.value
+                    ready = try await preparation.value
                     if turnID == id { imagePreparation = nil }
                 }
-                for (index, bytes) in images.enumerated() {
+                let blocks = ready.blocks
+                for (index, bytes) in ready.images.enumerated() {
                     try await transport.putAttachment(bytes, id: UInt32(index + 1))
                 }
                 // Recovery must reach the core before cancellation so its open

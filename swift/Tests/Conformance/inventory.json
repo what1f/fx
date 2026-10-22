@@ -41,7 +41,7 @@
       "upstream": "sdk/tests/test-agent-images.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "partial: initial image transport cases passed; resize hook not implemented"
+      "status": "partial: complete input/preparation section passes through Swift with original assertions, including byte copies, Blob/File input, asynchronous host preparation and final size errors; loader explicitly selects this section. Remaining catalog diagnostics, concurrent checkpoints and admission cases are pending"
     },
     {
       "upstream": "sdk/tests/test-agent-provider-tools.mjs",

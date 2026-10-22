@@ -11,6 +11,11 @@ private struct RelayedPersistenceError: Error, CustomStringConvertible {
     let description: String
 }
 
+private struct RelayedImagePreparationError: Error, CustomStringConvertible {
+    let token: String
+    let description: String
+}
+
 enum DriverOutput {
     private static let lock = NSLock()
     static func emit(_ value: JSONValue) {
@@ -79,6 +84,7 @@ actor Driver: FxHTTPClient, FxPersistence {
     private var toolWaiters: [Int: CheckedContinuation<FxToolResult, any Error>] = [:]
     private var nextPersistenceID = 1
     private var persistenceWaiters: [Int: CheckedContinuation<JSONValue, any Error>] = [:]
+    private var imageWaiters: [String: CheckedContinuation<FxImage, any Error>] = [:]
 
     func emit(_ value: JSONValue) {
         DriverOutput.emit(value)
@@ -118,6 +124,13 @@ actor Driver: FxHTTPClient, FxPersistence {
     }
 
     private func persistenceErrorFields(_ error: any Error) -> [String: JSONValue] {
+        if let relayed = error as? RelayedImagePreparationError {
+            return ["imagePreparationFailure": .string(relayed.token)]
+        }
+        if case FxError.invalidInput(let message) = error {
+            let range = ["Reasoning effort must not exceed 64 bytes", "Prompt image exceeds the size limit", "Prompt images exceed the count or size limit", "Prompt exceeds frame limit"].contains(message)
+            return ["message": .string(javascriptMessage(message)), "category": .string(range ? "range" : "type")]
+        }
         if let relayed = error as? RelayedPersistenceError {
             return ["persistenceFailureID": .number(Double(relayed.id))]
         }
@@ -279,6 +292,12 @@ actor Driver: FxHTTPClient, FxPersistence {
             }
             if let window = options["imageWindow"] {
                 config.imageWindow = try FxImageWindow(maximumImages: window["images"]?.integer, maximumBytes: window["bytes"]?.integer)
+            }
+            if options["hasImagePreparation"] == .bool(true) {
+                config.prepareImage = { [weak self] image in
+                    guard let self else { throw FxError.closed }
+                    return try await self.prepareImage(image)
+                }
             }
             if let name = options["provider"]?["name"]?.string,
                let base = options["provider"]?["baseUrl"]?.string, let url = URL(string: base) {
@@ -674,6 +693,15 @@ actor Driver: FxHTTPClient, FxPersistence {
                 } catch { waiter.resume(throwing: error) }
             } else { waiter.resume(returning: FxToolResult(text: value["content"]?.string ?? "")) }
             return .null
+        case "imagePreparationResult":
+            guard let token = value["token"]?.string, let waiter = imageWaiters.removeValue(forKey: token) else { return .null }
+            if let message = value["error"]?.string {
+                waiter.resume(throwing: RelayedImagePreparationError(token: token, description: message))
+            } else {
+                do { waiter.resume(returning: try image(value["image"] ?? .null)) }
+                catch { waiter.resume(throwing: error) }
+            }
+            return .null
         case "persistenceResult":
             guard let id = value["persistenceID"]?.integer, let waiter = persistenceWaiters.removeValue(forKey: id) else {
                 throw FxError.invalidInput("Unknown persistence operation")
@@ -732,6 +760,8 @@ actor Driver: FxHTTPClient, FxPersistence {
 
     private func javascriptMessage(_ message: String) -> String {
         switch message {
+        case "Prompt image exceeds the size limit": return "image exceeds the per-image libfx limit"
+        case "Image preparation must return nonempty bytes": return "resizeImage must return non-empty bytes and a mimeType"
         case "Invalid provider name": return "provider.name must be 1 to 64 letters, digits, underscores or hyphens, starting with a letter"
         case "Provider URL must use HTTPS or local HTTP, without credentials, query, or fragment":
             return "provider URL must use https, or http on localhost, without credentials, a query or a fragment"
@@ -745,6 +775,25 @@ actor Driver: FxHTTPClient, FxPersistence {
             return "a custom provider needs a model"
         default: return message
         }
+    }
+
+    private func prepareImage(_ image: FxImage) async throws -> FxImage {
+        guard let data = image.data else { throw FxError.invalidInput("Image preparation requires bytes") }
+        let token = UUID().uuidString
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { waiter in
+                imageWaiters[token] = waiter
+                emit(.object(["imagePreparationRequest": .object([
+                    "token": .string(token), "data": .string(data.base64EncodedString()),
+                    "mimeType": .string(image.format.rawValue),
+                ])]))
+            }
+        } onCancel: { Task { await self.cancelImagePreparation(token) } }
+    }
+
+    private func cancelImagePreparation(_ token: String) {
+        imageWaiters.removeValue(forKey: token)?.resume(throwing: CancellationError())
     }
 
     private func persistenceRequest(_ kind: String, _ fields: [String: JSONValue] = [:]) async throws -> JSONValue {
