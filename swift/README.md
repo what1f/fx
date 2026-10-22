@@ -1,6 +1,6 @@
 # libfx Swift
 
-A Swift 6 package for running the fx agent core in process through a C ABI. The SDK is under development. See [the migration plan](MIGRATION.md) for required scope and [validation](VALIDATION.md) for the checks performed so far.
+A Swift 6 package for running the fx agent core in process through a C ABI. It provides conversation engines, durable sessions, tools, streaming, persistence, observation, and optional MCP and HTTP adapters. See [local acceptance](ACCEPTANCE.md) for the qualification scope and [validation](VALIDATION.md) for command results.
 
 ## Build and use a local package
 

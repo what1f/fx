@@ -631,7 +631,8 @@ export async function createFxEngine(options = {}) {
         const token = randomUUID();
         const state = createTurn(() => request('cancel', { turnToken: token }),
           () => Promise.reject(new Error('Session steering is not implemented')),
-          () => Promise.reject(new Error('Session withdrawal is not implemented')));
+          () => Promise.reject(new Error('Session withdrawal is not implemented')),
+          undefined, undefined, undefined, { cancelOnReturn: false });
         state.public.id = messageID;
         turnStates.set(token, state);
         const accepted = new Promise((resolve, reject) => acceptedSessions.set(token, { resolve, reject }));
@@ -922,7 +923,7 @@ async function encodePrompt(input) {
   }));
 }
 
-function createTurn(cancel, steer, withdraw, pull, release, abortHost) {
+function createTurn(cancel, steer, withdraw, pull, release, abortHost, { cancelOnReturn = true } = {}) {
   const queue = [], waiters = [];
   let done = false, failure, readerDone = false;
   let reads = Promise.resolve();
@@ -930,7 +931,7 @@ function createTurn(cancel, steer, withdraw, pull, release, abortHost) {
   const result = new Promise((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });
   result.catch(() => {});
   const state = {
-    push(value) { if (!done) { const waiter = waiters.shift(); if (waiter) waiter.resolve({ value, done: false }); else queue.push(value); } },
+    push(value) { if (!done && !readerDone) { const waiter = waiters.shift(); if (waiter) waiter.resolve({ value, done: false }); else queue.push(value); } },
     finish(value) { done = true; resolveResult(value); while (waiters.length) waiters.shift().resolve({ done: true }); },
     fail(error) { if (done) return; done = true; failure = error; rejectResult(error); while (waiters.length) waiters.shift().reject(error); },
     public: {
@@ -951,6 +952,7 @@ function createTurn(cancel, steer, withdraw, pull, release, abortHost) {
       withdraw,
       [Symbol.asyncIterator]() { return {
         next() {
+          if (readerDone) return Promise.resolve({ done: true });
           if (pull) {
             // Serialize concurrent JS next calls without prefetching an event.
             const next = reads.then(async () => {
@@ -973,14 +975,22 @@ function createTurn(cancel, steer, withdraw, pull, release, abortHost) {
         },
         return() {
           readerDone = true;
-          void state.public.cancel();
-          abortHost?.();
+          queue.length = 0;
+          while (waiters.length) waiters.shift().resolve({ done: true });
+          if (cancelOnReturn) {
+            void state.public.cancel();
+            abortHost?.();
+          }
           return Promise.resolve(state.cancellation).then(() => release?.()).then(() => ({ done: true }));
         },
         throw(error) {
           readerDone = true;
-          void state.public.cancel();
-          abortHost?.();
+          queue.length = 0;
+          while (waiters.length) waiters.shift().resolve({ done: true });
+          if (cancelOnReturn) {
+            void state.public.cancel();
+            abortHost?.();
+          }
           return Promise.resolve(state.cancellation).then(() => release?.()).then(() => { throw error; });
         },
       }; },
