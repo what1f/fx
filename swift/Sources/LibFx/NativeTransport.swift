@@ -20,8 +20,11 @@ private final class CoreHandle: @unchecked Sendable {
 }
 
 actor NativeTransport: EngineTransport {
-    nonisolated let output: AsyncThrowingStream<Data, any Error>
-    private let continuation: AsyncThrowingStream<Data, any Error>.Continuation
+    nonisolated var output: AsyncThrowingStream<Data, any Error> {
+        AsyncThrowingStream(unfolding: { [weak self] in try await self?.readOutput() })
+    }
+    private var outputWaiter: CheckedContinuation<Data?, any Error>?
+    private var outputFailure: (any Error)?
     private let handle: CoreHandle
     private let httpClient: any FxHTTPClient
     private let onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)?
@@ -30,6 +33,7 @@ actor NativeTransport: EngineTransport {
     private var modelID: String?
     private var source: (any DispatchSourceRead)?
     private var fetchTasks: [Int32: Task<Void, Never>] = [:]
+    private var drainTimers: [Int32: Task<Void, Never>] = [:]
     private var closed = false
     private let sourceClosed: AsyncStream<Void>
     private let sourceClosedContinuation: AsyncStream<Void>.Continuation
@@ -52,7 +56,6 @@ actor NativeTransport: EngineTransport {
         }
         handle = CoreHandle(pointer)
         (sourceClosed, sourceClosedContinuation) = AsyncStream.makeStream()
-        (output, continuation) = AsyncThrowingStream.makeStream(bufferingPolicy: .bufferingOldest(256))
     }
 
     func setContext(sessionID: String, modelID: String) { self.sessionID = sessionID; self.modelID = modelID }
@@ -90,17 +93,14 @@ actor NativeTransport: EngineTransport {
         var wake = [UInt8](repeating: 0, count: 256)
         while read(fd, &wake, wake.count) > 0 {}
         do {
-            while true {
-                var buffer = FxBuffer()
-                let status = fx_core_drain(handle.pointer, &buffer)
-                let data = consume(buffer)
-                guard status >= 0 else { throw FxError.transport("Cannot drain core") }
-                if data.isEmpty { break }
-                if case .dropped = continuation.yield(data) { throw FxError.outputOverflow }
-            }
-            for (id, task) in fetchTasks where fx_core_fetch_disposition(handle.pointer, id) != 1 {
-                task.cancel()
-                fetchTasks.removeValue(forKey: id)
+            deliverOutput()
+            guard !closed else { return }
+            for (id, task) in fetchTasks {
+                switch fx_core_fetch_disposition(handle.pointer, id) {
+                case 1: break
+                case 2: beginDraining(id)
+                default: task.cancel()
+                }
             }
             while true {
                 var metadata = FxBuffer(), body = FxBuffer()
@@ -127,11 +127,48 @@ actor NativeTransport: EngineTransport {
                     await self?.fetch(request, id: fetchID)
                 }
             }
-            if fx_core_exited(handle.pointer) != 0 {
-                let code = fx_core_exit_code(handle.pointer)
-                shutdown(code == 0 ? nil : FxError.transport("Core exited with code \(code)"))
-            }
+            deliverOutput()
         } catch { shutdown(error) }
+    }
+
+    // Pull from the bounded native queue only when the RPC reader is ready.
+    // Readiness wakes service effects without accumulating a second byte queue.
+    private func readOutput() async throws -> Data? {
+        if closed {
+            if let outputFailure { throw outputFailure }
+            return nil
+        }
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { waiter in
+                guard outputWaiter == nil else {
+                    waiter.resume(throwing: FxError.protocolViolation("Core output already has a reader"))
+                    return
+                }
+                outputWaiter = waiter
+                deliverOutput()
+            }
+        } onCancel: { Task { await self.cancelOutputRead() } }
+    }
+
+    private func cancelOutputRead() {
+        outputWaiter?.resume(throwing: CancellationError())
+        outputWaiter = nil
+    }
+
+    private func deliverOutput() {
+        guard !closed, let waiter = outputWaiter else { return }
+        var buffer = FxBuffer()
+        let status = fx_core_drain(handle.pointer, &buffer)
+        let data = consume(buffer)
+        guard status >= 0 else { shutdown(FxError.transport("Cannot drain core")); return }
+        if !data.isEmpty {
+            outputWaiter = nil
+            waiter.resume(returning: data)
+        } else if fx_core_exited(handle.pointer) != 0 {
+            let code = fx_core_exit_code(handle.pointer)
+            shutdown(code == 0 ? nil : FxError.transport("Core exited with code \(code)"))
+        }
     }
 
     private func consume(_ buffer: FxBuffer) -> Data {
@@ -141,10 +178,23 @@ actor NativeTransport: EngineTransport {
     }
 
     private func fetch(_ request: URLRequest, id: Int32) async {
-        defer { fetchTasks.removeValue(forKey: id) }
+        defer {
+            fetchTasks.removeValue(forKey: id)
+            drainTimers.removeValue(forKey: id)?.cancel()
+        }
         do {
+            // A completed model step may still own an HTTP tail. Release that
+            // response before the next step asks the host for another connection.
+            let draining = fetchTasks.filter { $0.key != id && fx_core_fetch_disposition(handle.pointer, $0.key) == 2 }
+            for (priorID, task) in draining {
+                beginDraining(priorID)
+                await task.value
+            }
+            try Task.checkCancellation()
+            guard !closed else { return }
             let (response, context) = try await sendWithRetry(request)
-            defer { response.cancel() }
+            var reachedEOF = false
+            defer { if !reachedEOF { response.cancel() } }
             guard !closed, !Task.isCancelled else { return }
             guard let status = UInt16(exactly: response.statusCode) else {
                 throw FxError.transport("Invalid HTTP response status")
@@ -152,9 +202,16 @@ actor NativeTransport: EngineTransport {
             guard fx_core_start_fetch(handle.pointer, id, status) == 1 else { return }
             var totalBytes = 0
             var lastActivity: ContinuousClock.Instant?
+            var tailBytes = 0
             for try await data in response.body {
                 try Task.checkCancellation()
                 guard !closed else { return }
+                if fx_core_fetch_disposition(handle.pointer, id) == 2 {
+                    beginDraining(id)
+                    tailBytes += data.count
+                    guard tailBytes <= 64 * 1024 else { return }
+                    continue
+                }
                 if !data.isEmpty {
                     totalBytes += data.count
                     let now = ContinuousClock.now
@@ -169,10 +226,18 @@ actor NativeTransport: EngineTransport {
                 var offset = 0
                 while offset < data.count {
                     let length = min(16 * 1024, data.count - offset)
-                    try await push(data.subdata(in: offset..<(offset + length)), id: id)
+                    let delivered = try await push(data.subdata(in: offset..<(offset + length)), id: id)
+                    if !delivered {
+                        beginDraining(id)
+                        tailBytes += data.count - offset
+                        guard tailBytes <= 64 * 1024 else { return }
+                        break
+                    }
                     offset += length
                 }
             }
+            try Task.checkCancellation()
+            reachedEOF = true
             if !closed { _ = fx_core_finish_fetch(handle.pointer, id) }
         } catch {
             if !closed { _ = fx_core_fail_fetch(handle.pointer, id) }
@@ -235,14 +300,26 @@ actor NativeTransport: EngineTransport {
         }
     }
 
-    private func push(_ data: Data, id: Int32) async throws {
+    private func beginDraining(_ id: Int32) {
+        guard drainTimers[id] == nil, let task = fetchTasks[id] else { return }
+        drainTimers[id] = Task {
+            do { try await Task.sleep(for: .milliseconds(100)) }
+            catch { return }
+            task.cancel()
+        }
+    }
+
+    private func push(_ data: Data, id: Int32) async throws -> Bool {
         while !closed {
             try Task.checkCancellation()
             let status = data.withUnsafeBytes {
                 fx_core_push_fetch(handle.pointer, id, $0.bindMemory(to: UInt8.self).baseAddress, data.count)
             }
-            if status == 1 { return }
-            if status == 0 { throw FxError.cancelled }
+            if status == 1 { return true }
+            if status == 0 {
+                if fx_core_fetch_disposition(handle.pointer, id) == 2 { return false }
+                throw FxError.cancelled
+            }
             guard status == 2 else { throw FxError.transport("Cannot deliver model response") }
             try await Task.sleep(for: .milliseconds(1))
         }
@@ -284,11 +361,20 @@ actor NativeTransport: EngineTransport {
         if let source { source.cancel() }
         else { handle.destroy(); sourceClosedContinuation.finish() }
         source = nil
-        if let error { continuation.finish(throwing: error) }
-        else { continuation.finish() }
+        outputFailure = error
+        if let error { outputWaiter?.resume(throwing: error) }
+        else { outputWaiter?.resume(returning: nil) }
+        outputWaiter = nil
     }
 
     func close() async {
+        if !closed {
+            let draining = fetchTasks.filter { fx_core_fetch_disposition(handle.pointer, $0.key) == 2 }
+            for (id, task) in draining {
+                beginDraining(id)
+                await task.value
+            }
+        }
         shutdown(nil)
         for await _ in sourceClosed {}
         handle.destroy()

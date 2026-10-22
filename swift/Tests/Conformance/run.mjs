@@ -4,6 +4,10 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const checks = [
+  ...['chatgpt', 'grok'].map(provider => ({ name: `upstream/test-${provider}-sign-in`,
+    expected: provider === 'chatgpt' ? 'ChatGPT sign-in passed' : 'Grok sign-in passed',
+    args: ['--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', `sdk/tests/test-${provider}-sign-in.mjs`],
+  })),
   { name: 'upstream/test-agent-images', expected: 'native agent image prompts passed', args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-agent-images.mjs', 'native',
   ] },
@@ -27,7 +31,7 @@ const checks = [
   { name: 'upstream/test-skills-adapter-disk', args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-skills-adapter.mjs', 'disk', 'native',
   ] },
-  ...['test-checkpoint', 'test-journal', 'test-host-tools', 'test-tool-contract', 'test-agent-step-limit', 'test-host-tool-cancel', 'test-agent-steering', 'test-list-models', 'test-agent-effort', 'test-agent-fast', 'test-agent-provider-tools', 'test-agent-ultrafast-options', 'test-agent-request-context', 'test-agent-bootstrap', 'test-agent-transport-retry', 'test-agent-tool-start', 'test-agent-reserved-tool-names'].map(name => ({
+  ...['test-minimal-api', 'test-native-core-config-isolation', 'test-native-core-cancel', 'test-native-core-fetch-failure', 'test-native-core-stream', 'test-native-host-tool-late-settle', 'test-checkpoint', 'test-journal', 'test-host-tools', 'test-tool-contract', 'test-agent-step-limit', 'test-host-tool-cancel', 'test-agent-steering', 'test-list-models', 'test-agent-effort', 'test-agent-fast', 'test-agent-provider-tools', 'test-agent-ultrafast-options', 'test-agent-request-context', 'test-agent-bootstrap', 'test-agent-transport-retry', 'test-agent-tool-start', 'test-agent-reserved-tool-names'].map(name => ({
     name: `upstream/${name}`, args: ['--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', `sdk/tests/${name}.mjs`, 'native', ...(['test-journal', 'test-checkpoint'].includes(name) ? ['native'] : [])],
   })),
   { name: 'upstream/test-agent-steering-hooks', args: [
@@ -62,7 +66,7 @@ const checks = [
   ].map(([kind, test]) => ({ name: `upstream/test-durable-delivery-${kind}`, expected: '1/1 durable tests passed', env: { LIBFX_TEST_ONLY: test }, args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable.mjs', 'memory', 'native',
   ] })),
-  ...['persistence-errors', 'driver-lifecycle', 'smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'input-observation', 'tool-observation', 'mcp-observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing', 'turn-identity', 'handoff', 'follow-up', 'custom-provider', 'provider-suites', 'agent-crash', 'session-checkpoint', 'session-steering-crash'].map(name => ({
+  ...['http-cleanup', 'persistence-errors', 'driver-lifecycle', 'smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'input-observation', 'tool-observation', 'mcp-observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing', 'turn-identity', 'handoff', 'follow-up', 'custom-provider', 'provider-suites', 'agent-crash', 'session-checkpoint', 'session-steering-crash'].map(name => ({
     name, args: [`swift/Tests/Conformance/${name}.mjs`],
   })),
 ];

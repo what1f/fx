@@ -61,4 +61,4 @@ The initial journal attempt required an unused Wasm fixture. The conformance loa
 
 The normal conformance runner streams output so CI records the time of each completed case. It preserves the 60-second process deadline, reports exit status, signal and timeout diagnostics, and saves results after each file. CI uploads the results even when a later check fails. These diagnostics help distinguish an aggregate deadline from a stalled case; they do not establish that either caused an earlier failure.
 
-Real-model integration and exact-final-commit CI remain required before release readiness. Local passes do not resolve the observed CI journal deadline failure.
+The user requested local-only validation on 2026-10-22. Final local runtime and available-credential real-model integration remain required; CI is excluded from this task's acceptance. Local passes do not explain the historical CI journal deadline failure.

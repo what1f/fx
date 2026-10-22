@@ -719,7 +719,7 @@ export async function createFxEngine(options = {}) {
       }
       return state.public;
     }
-    return {
+    const engine = {
       sessionId: opened.sessionId,
       prompt(text, promptOptions = {}) {
         if (handedOff) throw new Error('This engine handed its session off');
@@ -789,6 +789,11 @@ export async function createFxEngine(options = {}) {
         } finally { reapClosedDriver(); }
       },
     };
+    // Bridge-only fixture controls are not part of the minimal JavaScript API.
+    for (const name of ['saveCheckpoint', '__killForTest']) {
+      Object.defineProperty(engine, name, { enumerable: false });
+    }
+    return engine;
   } catch (error) { child.stdin.end(); await exited; lines.close(); throw error; }
 }
 

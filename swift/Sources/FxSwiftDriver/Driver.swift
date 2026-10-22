@@ -67,6 +67,8 @@ actor Driver: FxHTTPClient, FxPersistence {
     private var sessionDeliveries: [String: Task<Void, Never>] = [:]
     private var sessionReaders: [String: Task<JSONValue, any Error>] = [:]
     private var refreshTasks: [String: Task<FxSubscriptionCredentials, any Error>] = [:]
+    private var signInTasks: [String: Task<JSONValue, any Error>] = [:]
+    private var cancelledSignIns: Set<String> = []
     private var sessionTurns: [String: FxSessionTurn] = [:]
     private var refreshOperations: [String: FxSubscription.RefreshOperation] = [:]
     private var refreshWaiters: [String: CheckedContinuation<FxSubscriptionCredentials, any Error>] = [:]
@@ -130,6 +132,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                 fields["data"] = data
             }
             fields.merge(persistenceErrorFields(error), uniquingKeysWith: { _, value in value })
+            fields.merge(signInErrorFields(error, provider: value["provider"]?.string), uniquingKeysWith: { _, value in value })
             emit(.object(["id": id, "error": .object(fields)]))
         }
     }
@@ -187,6 +190,18 @@ actor Driver: FxHTTPClient, FxPersistence {
 
     private func run(_ value: JSONValue) async throws -> JSONValue {
         switch value["op"]?.string {
+        case "signIn":
+            let token = value["token"]?.string ?? "sign-in"
+            let task = Task { try await self.signInOperation(value) }
+            signInTasks[token] = task
+            if cancelledSignIns.remove(token) != nil { task.cancel() }
+            defer { signInTasks.removeValue(forKey: token) }
+            return try await task.value
+        case "signInCancel":
+            let token = value["token"]?.string ?? "sign-in"
+            if let task = signInTasks[token] { task.cancel() }
+            else { cancelledSignIns.insert(token) }
+            return .null
         case "observationOpen":
             return try await inputObservations.openFixture(scope: value["scope"] ?? .null,
                 callID: value["callID"]?.string ?? "", captureContent: value["captureContent"] == .bool(true))
@@ -655,6 +670,9 @@ actor Driver: FxHTTPClient, FxPersistence {
             try await engine.saveCheckpoint()
             return .null
         case "close":
+            let signIns = Array(signInTasks.values)
+            for task in signIns { task.cancel() }
+            for task in signIns { _ = await task.result }
             for read in sessionReaders.values { read.cancel() }
             for read in Array(sessionReaders.values) { _ = await read.result }
             try await agent?.close()

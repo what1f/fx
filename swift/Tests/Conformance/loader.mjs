@@ -2,6 +2,12 @@
 // its assertions and size boundaries remain unchanged.
 const adapter = new URL('./adapter.mjs', import.meta.url).href;
 export async function resolve(specifier, context, nextResolve) {
+  if (context.parentURL?.endsWith('/sdk/tests/test-chatgpt-sign-in.mjs') && specifier === '../chatgpt-sign-in.js') {
+    return { url: new URL('./sign-in-adapter.mjs?provider=codex', import.meta.url).href, shortCircuit: true };
+  }
+  if (context.parentURL?.endsWith('/sdk/tests/test-grok-sign-in.mjs') && ['../grok-sign-in.js', '../grok.js'].includes(specifier)) {
+    return { url: new URL('./sign-in-adapter.mjs?provider=grok', import.meta.url).href, shortCircuit: true };
+  }
   if (context.parentURL?.includes('/sdk/tests/') && (['../node.js', '../skills.js', '../skills-node.js', '../mcp.js'].includes(specifier) ||
       specifier === '../browser.js' && context.parentURL.endsWith('/test-list-models.mjs') ||
       ['../fx-sdk.js', '../tool-observation.js'].includes(specifier) && context.parentURL.endsWith('/test-hooks.mjs') ||

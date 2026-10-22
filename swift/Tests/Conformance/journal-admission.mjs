@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
@@ -112,16 +112,25 @@ const cases = {
 const group = process.argv[2] ?? 'admission';
 const selected = Object.hasOwn(cases, group) ? cases[group] : undefined;
 assert.ok(selected, 'Unknown journal group');
-const child = spawnSync(process.execPath, [
+process.stdout.write(`START journal selection: ${group} (${selected.length} cases)\n`);
+const started = Date.now();
+const child = spawn(process.execPath, [
   '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs',
   'sdk/tests/test-journal.mjs', 'native', 'native',
 ], {
   cwd: fileURLToPath(new URL('../../../', import.meta.url)),
   env: { ...process.env, LIBFX_SWIFT_JOURNAL_CASES: JSON.stringify(selected) },
-  encoding: 'utf8', timeout: 55_000,
+  timeout: 55_000,
 });
-process.stdout.write(child.stdout ?? '');
-process.stderr.write(child.stderr ?? '');
-assert.ifError(child.error);
-assert.equal(child.status, 0);
-assert.ok(child.stdout.includes(`selected journal cases passed: ${selected.length}`));
+let stdout = '', error;
+child.stdout.setEncoding('utf8');
+child.stderr.setEncoding('utf8');
+child.stdout.on('data', chunk => { stdout += chunk; process.stdout.write(chunk); });
+child.stderr.on('data', chunk => process.stderr.write(chunk));
+child.on('error', failure => { error = failure; });
+const { status, signal } = await new Promise(resolve => child.on('close', (status, signal) => resolve({ status, signal })));
+if (child.killed && signal === 'SIGTERM') error ??= new Error('Journal selection exceeded its 55000 ms deadline');
+process.stdout.write(`END journal selection: ${group} (${Date.now() - started} ms; status=${status}; signal=${signal ?? 'none'})\n`);
+assert.ifError(error);
+assert.equal(status, 0);
+assert.ok(stdout.includes(`selected journal cases passed: ${selected.length}`));

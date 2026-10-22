@@ -150,6 +150,23 @@ The asynchronous credentials closure receives the provider name and engine sessi
 
 The default Foundation HTTP client follows redirects only for unauthenticated GET and HEAD requests. A custom `FxHTTPClient` must preserve that credential scope when handling redirects. Custom providers support HTTPS and HTTP on loopback addresses. Use `FxProvider.subscription` for Codex or Grok subscriptions.
 
+## Sign in to a subscription
+
+Use `FxSignIn` with `.codex` for ChatGPT or `.grok` for Grok. Device authorization supplies a URL and user code for your interface:
+
+```swift
+let signIn = FxSignIn(provider: .grok)
+let device = try await signIn.startDeviceAuthorization()
+// Show device.verificationURL and device.userCode in your interface.
+let credentials = try await signIn.completeDeviceAuthorization(device)
+```
+
+`pollDeviceAuthorization` checks once and returns nil while approval is pending. `completeDeviceAuthorization` waits between checks, slows polling when requested, stops at expiry and responds to task cancellation.
+
+For a browser flow, call `startAuthorization`, open its `url` in the user's browser, then pass the copied callback address to `completeAuthorization(_:callback:)`. The SDK checks the state and exchanges the code with PKCE. It does not open a browser or run a callback server. Both authorization values are `Codable`; their encoded forms contain secrets. Keep them private and out of logs.
+
+Save the returned credentials in your host's credential store. `refreshCredentials` exchanges them explicitly when needed outside an engine. A Grok refresh checks the account before returning new credentials. `FxSubscriptionCredentials.normalized(for:)` reads account routing metadata and expiry from token claims when those fields were omitted; it does not verify the token.
+
 ## Use subscription credentials
 
 Share one `FxSubscription` across engines that use the same credential store:
@@ -173,7 +190,7 @@ Provide `onRefresh` to persist rotated credentials in your host's credential sto
 
 For multiple processes or servers, supply `refreshLock`. Hold the account lock while awaiting the operation, and return its result. The SDK reloads credentials under that lock before exchanging a refresh token. Cancellation removes one waiting request; when the last waiter leaves, it cancels the refresh and pending save callback. Host closures and HTTP clients must cooperate with task cancellation.
 
-The SDK supplies authentication and token refresh for existing credentials. Sign-in helpers and the full durable agent/session provider suites remain pending.
+The full durable agent/session provider suites remain pending.
 
 ## Observe host lifecycle events
 

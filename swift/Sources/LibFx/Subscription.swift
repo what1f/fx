@@ -1,6 +1,6 @@
 import Foundation
 
-public enum FxSubscriptionProvider: String, Sendable, CaseIterable {
+public enum FxSubscriptionProvider: String, Sendable, CaseIterable, Codable {
     case codex, grok
 
     func matches(_ url: URL?) -> Bool {
@@ -46,7 +46,7 @@ public struct FxSubscriptionCredentials: Sendable, Equatable {
         self.expiresAt = expiresAt
     }
 
-    func normalized(for provider: FxSubscriptionProvider) throws -> Self {
+    public func normalized(for provider: FxSubscriptionProvider) throws -> Self {
         // Claims supply routing metadata only. They do not verify the token.
         let parts = accessToken.split(separator: ".", omittingEmptySubsequences: false)
         var claims: JSONValue?
@@ -263,7 +263,7 @@ public actor FxSubscription {
                     return latest
                 }
             }
-            let next = try await self.exchange(current, client: client)
+            let next = try await Self.exchange(current, provider: self.provider, client: client)
             let rotation = Rotation(id: UUID(), credentials: next)
             await self.remember(rotation, tokens: [supplied.accessToken, current.accessToken])
             try await self.notify(rotation, context: context)
@@ -289,7 +289,7 @@ public actor FxSubscription {
         saved.insert(SaveKey(rotation: rotation.id, session: context.sessionID))
     }
 
-    private func exchange(_ current: FxSubscriptionCredentials, client: any FxHTTPClient) async throws -> FxSubscriptionCredentials {
+    package static func exchange(_ current: FxSubscriptionCredentials, provider: FxSubscriptionProvider, client: any FxHTTPClient) async throws -> FxSubscriptionCredentials {
         guard let refreshToken = current.refreshToken else { throw FxSubscriptionError.invalidCredentials }
         let endpoint = provider == .codex ? "https://auth.openai.com/oauth/token" : "https://auth.x.ai/oauth2/token"
         var request = URLRequest(url: URL(string: endpoint)!)
@@ -335,7 +335,7 @@ public actor FxSubscription {
         }
     }
 
-    private func json(_ request: URLRequest, client: any FxHTTPClient) async throws -> JSONValue {
+    private static func json(_ request: URLRequest, client: any FxHTTPClient) async throws -> JSONValue {
         let response = try await client.send(request)
         defer { response.cancel() }
         guard (200..<300).contains(response.statusCode) else { throw FxSubscriptionError.refreshFailed(statusCode: response.statusCode) }

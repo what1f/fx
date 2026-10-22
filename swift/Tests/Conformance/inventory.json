@@ -107,7 +107,7 @@
       "upstream": "sdk/tests/test-chatgpt-sign-in.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged upstream file through Swift; PKCE, callbacks, device polling, cancellation and host refresh use FxSignIn and existing native credential refresh"
     },
     {
       "upstream": "sdk/tests/test-checkpoint.mjs",
@@ -191,7 +191,7 @@
       "upstream": "sdk/tests/test-grok-sign-in.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged upstream file through Swift; PKCE, callbacks, device polling, slowdown, cancellation, account lookup, refresh and credential normalization use Swift"
     },
     {
       "upstream": "sdk/tests/test-hooks.mjs",
@@ -257,25 +257,25 @@
       "upstream": "sdk/tests/test-minimal-api.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged upstream file; minimal JavaScript surface projects the native Swift engine; bridge-only fixture controls are nonenumerable; streaming, reasoning, usage, authorization, model selection, checkpoint and repeated close retain original assertions"
     },
     {
       "upstream": "sdk/tests/test-native-core-cancel-before-fetch.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "pending: original file mixes direct N-API operations and injected late-publication handles; redirecting the engine import alone does not qualify Swift publication ordering"
     },
     {
       "upstream": "sdk/tests/test-native-core-cancel.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged upstream file through Swift; stalled host response cancels and runtime closes"
     },
     {
       "upstream": "sdk/tests/test-native-core-config-isolation.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged upstream file through Swift; explicit host instructions, no workspace context or MCP startup, and no native billing requests"
     },
     {
       "upstream": "sdk/tests/test-native-core-env-growth.mjs",
@@ -293,13 +293,13 @@
       "upstream": "sdk/tests/test-native-core-fetch-failure.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged upstream file through Swift; unrelated host AbortError retries once and fails without hanging"
     },
     {
       "upstream": "sdk/tests/test-native-core-http-cleanup.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "partial: native Swift delayed EOF, successful response cleanup, bounded tails and model-step ordering tests plus real TCP JavaScript/Swift differential pass; original owner injects N-API disposition wrappers and legacy-addon fallbacks not used by Swift"
     },
     {
       "upstream": "sdk/tests/test-native-core-image-framing.mjs",
@@ -329,7 +329,7 @@
       "upstream": "sdk/tests/test-native-core-stream.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged upstream file through Swift; split terminal tail, matching cancellation, next prompt isolation, large Unicode streaming and graceful close"
     },
     {
       "upstream": "sdk/tests/test-native-core-worker-termination.mjs",
@@ -353,13 +353,13 @@
       "upstream": "sdk/tests/test-native-host-tool-frame-limit.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "partial: native rich-image frame fallback passes; this original fixture has empty images and depends on JavaScript double encoding, whereas Swift encodes text-only results directly; full runtime continuation at the Swift frame boundary remains pending"
     },
     {
       "upstream": "sdk/tests/test-native-host-tool-late-settle.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged upstream file through Swift; late tool completion after cancellation or close sends no further frame, does not replay and causes no unhandled rejection"
     },
     {
       "upstream": "sdk/tests/test-next-package.mjs",

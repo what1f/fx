@@ -108,6 +108,20 @@ struct ImageHTTP: FxHTTPClient {
         return try await MockHTTP().send(request)
     }
 }
+struct SignInHTTP: FxHTTPClient {
+    func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        let text: String
+        switch request.url?.path {
+        case "/oauth2/device/code":
+            text = #"{"device_code":"consumer-device","user_code":"CODE","verification_uri":"https://example.com/device","expires_in":60,"interval":1}"#
+        case "/oauth2/token":
+            text = #"{"access_token":"consumer-token","refresh_token":"consumer-refresh","expires_in":3600}"#
+        case "/oauth2/userinfo": text = #"{"sub":"consumer-account"}"#
+        default: throw FxError.protocolViolation("Unexpected sign-in request")
+        }
+        return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { $0.yield(Data(text.utf8)); $0.finish() })
+    }
+}
 struct ProviderSearchHTTP: FxHTTPClient {
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         if request.httpMethod == "GET" {
@@ -177,6 +191,19 @@ struct SubscriptionHTTP: FxHTTPClient {
 }
 @main struct Consumer {
     static func main() async throws {
+        let signIn = FxSignIn(provider: .grok, httpClient: SignInHTTP())
+        let authorization = try signIn.startAuthorization()
+        let restoredAuthorization = try JSONDecoder().decode(FxSignIn.Authorization.self, from: JSONEncoder().encode(authorization))
+        let state = URLComponents(url: restoredAuthorization.url, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "state" }!.value!
+        let credentials = try await signIn.completeAuthorization(restoredAuthorization, callback: "code=consumer-code&state=\(state)")
+        let device = try await signIn.startDeviceAuthorization()
+        let restoredDevice = try JSONDecoder().decode(FxSignIn.DeviceAuthorization.self, from: JSONEncoder().encode(device))
+        guard credentials.accountID == "consumer-account",
+              try credentials.normalized(for: .grok) == credentials,
+              try await signIn.completeDeviceAuthorization(restoredDevice).accountID == credentials.accountID,
+              try await signIn.refreshCredentials(credentials).accountID == credentials.accountID else {
+            throw FxError.protocolViolation("Subscription sign-in consumer failed")
+        }
         let models = try await FxModel.available(apiKey: "consumer-test-key", httpClient: MockHTTP())
         guard models.map(\.id) == ["swift/consumer"] else { throw FxModelCatalogError.malformedResponse }
         var supplied = FxConfiguration(apiKey: "consumer-test-key",
