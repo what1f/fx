@@ -333,7 +333,12 @@ export async function createFxEngine(options = {}) {
     } else if (value.observationError) {
       try { Promise.resolve(options.hooks?.onError?.(new Error(value.observationError))).catch(() => {}); } catch {}
     } else if (value.diagnostic) {
-      if (value.diagnostic.type === 'acp.send') runtimeStarted = true;
+      if (value.diagnostic.type === 'acp.send' && !runtimeStarted) {
+        // Swift sends initialize only after its native transport has started.
+        // Translate that observed transition to the JS diagnostic vocabulary.
+        runtimeStarted = true;
+        try { options.onEvent?.({ type: 'runtime.ready' }); } catch {}
+      }
       if (value.diagnostic.type === 'transport.error' && fetchErrorNames.length) {
         value.diagnostic.error = fetchErrorNames.shift();
       }

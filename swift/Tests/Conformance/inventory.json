@@ -136,8 +136,8 @@
     {
       "upstream": "sdk/tests/test-core-live.mjs",
       "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "reason": "Credentialed gateway acceptance remains required; the original owner requires a real gateway key.",
+      "status": "pending: no credentialed live Swift gateway result; fixture HTTP and provider-suite results do not qualify this gate"
     },
     {
       "upstream": "sdk/tests/test-core-output-pressure.mjs",
@@ -225,9 +225,9 @@
     },
     {
       "upstream": "sdk/tests/test-libfx-benchmark.mjs",
-      "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "classification": "platform-specific",
+      "reason": "Validates Node/Bun native and Wasm benchmark executables, report schemas, capacity counters and benchmark comparison tooling. These JavaScript benchmark programs are not Swift SDK features.",
+      "status": "not executed: no Swift performance or capacity equivalence claim; functional streaming and lifecycle contracts are qualified separately"
     },
     {
       "upstream": "sdk/tests/test-libfx-loader.mjs",
@@ -281,13 +281,13 @@
       "upstream": "sdk/tests/test-native-core-env-growth.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "native counterpart: test-c-env-growth.sh passes arm64 and x86_64 under Rosetta, with 0/10/200 libc environment additions after first create, three isolated processes per size and three real model turns per process; all 18 processes exit 0 with empty stdout/stderr. This qualifies native environment relocation, not Node process.env or addon loading."
     },
     {
       "upstream": "sdk/tests/test-native-core-exit-code.mjs",
       "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "reason": "Qualify public C output pressure, runtime status, graceful drain and blocked destruction directly.",
+      "status": "native counterpart: test-c-abi.sh passes on arm64 and x86_64 under Rosetta with 180000 lossless replies after five seconds unread, successful exit and blocked-output destruction; drain deadline is 20 seconds, so the original five-second drain bound remains unqualified"
     },
     {
       "upstream": "sdk/tests/test-native-core-fetch-failure.mjs",
@@ -310,14 +310,14 @@
     {
       "upstream": "sdk/tests/test-native-core-misuse.mjs",
       "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "reason": "Qualify the C ABI value and handle boundaries directly; JavaScript argument counts, getters and object brands have no Swift counterpart.",
+      "status": "native counterparts: test-c-abi.sh qualifies options/input/attachment bounds and relative-path rejection; test-c-fetch.sh qualifies fetch identity, stale operations, body backpressure, abort revocation, normal close and all three gateway URL rejections on both packaged architectures; original JavaScript-only misuse assertions are not executed"
     },
     {
       "upstream": "sdk/tests/test-native-core-ready.mjs",
       "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "reason": "Qualify readiness coalescing, ordered drain and native handle cleanup through the public C ABI.",
+      "status": "native counterpart: test-c-abi.sh passes 1000 ordered readiness replies and descriptor cleanup on both packaged architectures; JavaScript Socket ownership and takeCoreReadyFd transfer assertions do not apply to the borrowed C readiness descriptor"
     },
     {
       "upstream": "sdk/tests/test-native-core-security.mjs",
@@ -340,14 +340,14 @@
     {
       "upstream": "sdk/tests/test-native-core-workers.mjs",
       "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "reason": "Qualify native engine isolation and explicit lifetime; Node Worker environments and garbage-collection finalizers are platform-specific.",
+      "status": "partial native counterpart: normal engine lifecycle and NativeTransportBoundaryTests qualify native operation, repeated explicit cleanup and slot reuse while 70 closed wrappers remain retained; the original four Worker environments and GC finalizer assertions are not executed"
     },
     {
       "upstream": "sdk/tests/test-native-core.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged upstream file through Swift. The adapter translates the first actual Swift wire send after NativeTransport.start into JavaScript runtime.ready; native initialization, checkpoint, close and received-wire observations execute through Swift. No production readiness callback or historical compatibility API is added."
     },
     {
       "upstream": "sdk/tests/test-native-host-tool-frame-limit.mjs",
@@ -393,9 +393,9 @@
     },
     {
       "upstream": "sdk/tests/test-node-tracing.mjs",
-      "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "classification": "platform-specific",
+      "reason": "Validates ESM/CJS deployment produced by nodeFileTrace, including relocation of the Node native addon. Swift uses SwiftPM and an XCFramework.",
+      "status": "native counterpart: isolated public Release SwiftPM consumers exercise engine, checkpoint and storage on arm64 and x86_64 under Rosetta; nodeFileTrace assertions are not executed"
     },
     {
       "upstream": "sdk/tests/test-node-wasm.mjs",
@@ -417,15 +417,15 @@
     },
     {
       "upstream": "sdk/tests/test-pi-benchmark.mjs",
-      "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "classification": "platform-specific",
+      "reason": "Validates the external Pi benchmark target selected by LIBFX_BENCH_PI_ROOT, rather than libfx SDK behavior.",
+      "status": "not executed: no Pi benchmark migration or performance claim"
     },
     {
       "upstream": "sdk/tests/test-sdk.mjs",
-      "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "classification": "platform-specific",
+      "reason": "Aggregates the JavaScript terminal and forced Wasm/JSPI smoke executables. It adds no distinct Swift SDK contract.",
+      "status": "not executed: native engine, cancellation, package consumers and terminal exclusions are recorded under their individual owners"
     },
     {
       "upstream": "sdk/tests/test-skills-adapter.mjs",
@@ -478,8 +478,8 @@
     {
       "upstream": "sdk/tests/test-vercel-storage.mjs",
       "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "reason": "This owner tests only setup validation for the JavaScript remote-test fixture with fake credentials and disabled network. Real remote provider qualification is separate.",
+      "status": "pending: fixture preflight is not Swift storage implementation or hosted service evidence; real PostgreSQL qualification is recorded separately, and the Vercel provider gate remains open"
     },
     {
       "upstream": "sdk/tests/test-wasm-jspi-tier-up.mjs",

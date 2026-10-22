@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const checks = [
+  { name: 'upstream/test-native-core', expected: 'native core passed: minimal agent initialization, checkpoint, and graceful close', args: [
+    '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-native-core.mjs',
+  ] },
   { name: 'native-steer-redelivery', expected: 'Native image steer SIGKILL queue redelivery passed', args: ['swift/Tests/Conformance/native-steer-redelivery.mjs'] },
   { name: 'upstream/test-core-output-pressure-pull', expected: 'Swift pressure bridge: original assertions passed; JS-addon corruption injection excluded', args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/output-pressure-loader.mjs', 'sdk/tests/test-core-output-pressure.mjs', 'native',
