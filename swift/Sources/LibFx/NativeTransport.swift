@@ -35,6 +35,7 @@ actor NativeTransport: EngineTransport {
     private var fetchTasks: [Int32: Task<Void, Never>] = [:]
     private var drainTimers: [Int32: Task<Void, Never>] = [:]
     private var closed = false
+    private var acceptingEffects = true
     private let sourceClosed: PromptDispatch
 
     init(options: JSONValue, httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), modelID: String? = nil,
@@ -58,7 +59,8 @@ actor NativeTransport: EngineTransport {
     }
 
     func setContext(sessionID: String, modelID: String) { self.sessionID = sessionID; self.modelID = modelID }
-    func beginTurn() { requestNumber = 0 }
+    func beginTurn() { requestNumber = 0; acceptingEffects = true }
+    func stopStartingEffects() { acceptingEffects = false }
 
     func start() throws {
         guard source == nil, !closed else { return }
@@ -243,12 +245,13 @@ actor NativeTransport: EngineTransport {
             reachedEOF = true
             if !closed { _ = fx_core_finish_fetch(handle.pointer, id) }
         } catch {
-            if !closed { _ = fx_core_fail_fetch(handle.pointer, id) }
+            if !closed, acceptingEffects { _ = fx_core_fail_fetch(handle.pointer, id) }
         }
     }
 
     private func sendWithRetry(_ request: URLRequest) async throws -> (FxHTTPResponse, FxTransportEvent.Request) {
         try Task.checkCancellation()
+        guard acceptingEffects else { throw CancellationError() }
         let first = await beginRequest(request)
         do { return (try await send(request, context: first), first) }
         catch {
@@ -262,6 +265,7 @@ actor NativeTransport: EngineTransport {
             await emitTransport(.retrying(first))
             try Task.checkCancellation()
             guard !closed else { throw FxError.closed }
+            guard acceptingEffects else { throw CancellationError() }
             let retry = await beginRequest(request)
             return (try await send(request, context: retry), retry)
         }
@@ -285,6 +289,7 @@ actor NativeTransport: EngineTransport {
         do {
             try Task.checkCancellation()
             guard !closed else { throw FxError.closed }
+            guard acceptingEffects else { throw CancellationError() }
             let response = try await httpClient.send(request)
             let headers = response.diagnosticHeaders ?? response.headers
             await emitTransport(.response(context, .init(statusCode: response.statusCode, elapsed: started.duration(to: .now),

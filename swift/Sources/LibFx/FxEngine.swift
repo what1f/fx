@@ -34,6 +34,7 @@ public actor FxEngine {
     private var closed = false
     private var handedOff = false
     private var cancelling = false
+    private var cancellationTask: Task<Void, Never>?
     private var turnCancelled = false
     private var promptDispatch: PromptDispatch?
     private var imagePreparation: Task<PreparedPrompt, any Error>?
@@ -497,9 +498,9 @@ public actor FxEngine {
                 try await journal?.check()
                 try Task.checkCancellation()
                 if let failedPrompt, failedPrompt.id == id { throw failedPrompt.error }
-                let reason = FxTurnResult.StopReason(rawValue: result["stopReason"]?.string ?? "") ?? .unknown
+                let nativeReason = FxTurnResult.StopReason(rawValue: result["stopReason"]?.string ?? "") ?? .unknown
                 if !handedOff {
-                    if reason == .yielded {
+                    if nativeReason == .yielded {
                         recovery = FxRecoveryState(turnID: publicID, runningCalls: [])
                     } else {
                         recovery = nil
@@ -507,13 +508,23 @@ public actor FxEngine {
                     }
                 }
                 await maybeSaveCheckpoint(finishing: id)
+                await cancellationTask?.value
+                if let failedPrompt, failedPrompt.id == id { throw failedPrompt.error }
+                // Close may run while journal or checkpoint work is suspended,
+                // after RPC has already delivered its successful response.
+                guard !closed else { throw FxError.closed }
+                // Check after all persistence suspension points. Cancellation
+                // may release an output reader with a successful reply already
+                // buffered, or arrive while the terminal checkpoint is saved.
+                let reason: FxTurnResult.StopReason = turnCancelled && !handedOff ? .cancelled : nativeReason
                 await self.finish(turn: id)
                 return FxTurnResult(
                     stopReason: reason,
                     usage: FxUsage(result["usage"])
                 )
             } catch {
-                let error = terminalFailure ?? error
+                await cancellationTask?.value
+                let error = terminalFailure ?? (failedPrompt?.id == id ? failedPrompt?.error : nil) ?? error
                 if !turnCancelled { failedPrompt = (id, error) }
                 await dispatch.resolve(sent: false)
                 await transport.discardAttachments()
@@ -723,23 +734,52 @@ public actor FxEngine {
         guard turnID == id, !closed, !cancelling else { return }
         turnCancelled = true
         cancelling = true
-        defer { cancelling = false; startNextFollowUp() }
+        await transport.stopStartingEffects()
         // Release a blocked RPC handler before sending cancellation through RPC.
         let failure = journalFailure ?? terminalFailure ?? (failedPrompt?.id == id ? failedPrompt?.error : nil)
         await output?.finish(throwing: failure, discarding: true)
         imagePreparation?.cancel()
-        for task in toolTasks.values { task.cancel() }
+        guard await promptDispatch?.currentResult() != nil,
+              await promptDispatch?.wait() == true, turnID == id, !closed else {
+            cancelling = false
+            startNextFollowUp()
+            return
+        }
+        let submitted = PromptDispatch()
+        let tasks = Array(toolTasks.values)
         toolTasks.removeAll()
         invalidateToolObservations()
-        await permissions.cancel(scope: id)
-        if await promptDispatch?.currentResult() == nil { return }
-        guard await promptDispatch?.wait() == true, turnID == id, !closed else { return }
         // Cancelling a permission callback can cancel the task calling this method.
-        // Cleanup must still reach the core before cancel() returns.
-        await Task { [rpc, transport, sessionID] in
-            try? await rpc.notify("session/cancel", .object(["sessionId": .string(sessionID)]))
+        // Send and cleanup must continue independently of that caller.
+        let task = Task {
+            // Writing only enqueues bytes. Wait for the core to acknowledge the
+            // user cancel before aborting effects that can finish its model step.
+            do {
+                _ = try await rpc.request("session/cancel", .object(["sessionId": .string(sessionID)]), onSent: {
+                    await submitted.resolve(sent: true)
+                })
+            } catch {
+                // Without acknowledgement the core may still be running. Keep
+                // the dispatch failure and close it instead of allowing reuse.
+                if !closed {
+                    let failure = journalFailure ?? terminalFailure ?? (failedPrompt?.id == id ? failedPrompt?.error : nil) ?? error
+                    transportFailed(failure)
+                    await output?.finish(throwing: failure, discarding: true)
+                    await rpc.close()
+                }
+            }
+            await submitted.resolve(sent: false)
+            for task in tasks { task.cancel() }
+            await permissions.cancel(scope: id)
             await transport.abortEffects()
-        }.value
+            cancellationTask = nil
+            cancelling = false
+            startNextFollowUp()
+        }
+        cancellationTask = task
+        // The RPC reader can be waiting in a callback or on a storage barrier.
+        // Submit cancellation without waiting on that reader's acknowledgement.
+        _ = await submitted.wait()
     }
 
     private func checkPromptBeforeWrite(_ id: UUID, resuming: Bool) throws {
@@ -933,11 +973,13 @@ public actor FxEngine {
             await finish(turn: turnID, error: failure)
         }
         let checkpointSave = checkpointSaveTask
+        let cancellation = cancellationTask
         let task = Task {
             let saved = await checkpointSave?.result
             _ = await preparation?.result
             await permissions.cancelAll()
             await rpc.close()
+            await cancellation?.value
             try await journal?.check()
             try saved?.get()
         }

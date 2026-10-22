@@ -76,6 +76,7 @@ actor Driver: FxHTTPClient, FxPersistence {
     private var engine: FxEngine?
     private var store: (any FxPersistence)?
     private var turns: [String: FxTurn] = [:]
+    private var turnReaders: [String: DriverTurnReader] = [:]
     private var credentialWaiters: [String: CheckedContinuation<JSONValue, any Error>] = [:]
     private var permissionWaiters: [String: CheckedContinuation<FxPermissionDecision, any Error>] = [:]
     private var nextFetchID = 1
@@ -170,10 +171,10 @@ actor Driver: FxHTTPClient, FxPersistence {
     private func deliver(_ next: FxTurn, token: String) {
         guard let engine else { return }
         turns[token] = next
+        turnReaders[token] = DriverTurnReader(next)
         emit(.object(["turnStarted": .string(token), "turnID": .string(next.id)]))
         Task {
             do {
-                for try await event in next { emit(.object(["event": encode(event), "turnToken": .string(token)])) }
                 let result = try await next.result
                 let recovery = await engine.recoveryState
                 emit(.object([
@@ -185,7 +186,6 @@ actor Driver: FxHTTPClient, FxPersistence {
                     ]),
                 ]))
             } catch { emitFailure(error, token: token) }
-            turns.removeValue(forKey: token)
         }
     }
 
@@ -520,6 +520,10 @@ actor Driver: FxHTTPClient, FxPersistence {
             guard let agent, let id = value["sessionID"]?.string else { throw FxError.closed }
             let session = try await agent.session(id: id, options: sessionOptions(value["options"] ?? .null))
             return .string(try await session.checkpoint().base64EncodedString())
+        case "sessionSettle":
+            guard let agent, let sessionID = value["sessionID"]?.string else { throw FxError.closed }
+            try await agent.flushPersistence(sessionID: sessionID)
+            return .null
         case "sessionCancel":
             guard let agent, let id = value["sessionID"]?.string else { throw FxError.closed }
             let session = try await agent.session(id: id)
@@ -653,6 +657,29 @@ actor Driver: FxHTTPClient, FxPersistence {
         case "diagnosticAck":
             if let token = value["token"]?.string { retryObservers.removeValue(forKey: token)?.resume() }
             return .null
+        case "turnNext":
+            guard let token = value["turnToken"]?.string, let reader = turnReaders[token] else {
+                return .object(["done": .bool(true)])
+            }
+            do {
+                guard let event = try await reader.next() else {
+                    turnReaders.removeValue(forKey: token)
+                    turns.removeValue(forKey: token)
+                    return .object(["done": .bool(true)])
+                }
+                return .object(["done": .bool(false), "value": encode(event)])
+            } catch {
+                turnReaders.removeValue(forKey: token)
+                turns.removeValue(forKey: token)
+                throw error
+            }
+        case "turnRelease":
+            if let token = value["turnToken"]?.string {
+                await turns[token]?.cancel()
+                turnReaders.removeValue(forKey: token)
+                turns.removeValue(forKey: token)
+            }
+            return .null
         case "cancel":
             if let token = value["turnToken"]?.string, let turn = sessionTurns[token] {
                 try await turn.cancel()
@@ -706,6 +733,8 @@ actor Driver: FxHTTPClient, FxPersistence {
             sessionStore = nil
             try await engine?.close()
             engine = nil
+            turnReaders.removeAll()
+            turns.removeAll()
             if let sqlite = store as? FxSQLitePersistence { try await sqlite.close() }
             store = nil
             for id in Array(fetchBodies.keys) { cancelFetch(id) }

@@ -15,6 +15,11 @@ public actor FxAgent {
     private var workers: [String: Task<Void, Never>] = [:]
     private var cleanups: [UUID: Task<Void, Never>] = [:]
     private var cleanupFailure: (any Error)?
+    private struct ActiveHarness {
+        let id = UUID()
+        let ready = AsyncResult<any FxHarnessSession>()
+    }
+    private var activeHarnesses: [String: ActiveHarness] = [:]
     private var failures: [String: any Error] = [:]
     private struct ControlCheck {
         let inputID: String
@@ -134,6 +139,29 @@ public actor FxAgent {
         _ = try await store.accept(session: session, agent: owner, id: id, content: content, options: options,
             checkpoint: nil, steering: steering, deferringImageLimits: true)
         throw FxAgentRoutingError.unavailableAgent(owner)
+    }
+
+    /// Waits for the active executor's pending journal writes, without waiting for its turn.
+    @_spi(Conformance) public func flushPersistence(sessionID: String) async throws {
+        guard !closed else { throw FxError.closed }
+        guard validSessionIdentifier(sessionID) else { throw FxError.invalidInput("Invalid session ID") }
+        intakes += 1
+        defer { intakes -= 1 }
+        if let owner = try await routedOwner(sessionID) { return try await owner.flushPersistence(sessionID: sessionID) }
+        while let active = activeHarnesses[sessionID] {
+            let engine: any FxHarnessSession
+            do { engine = try await active.ready.wait() }
+            catch let failure as SessionStorageFailure { throw failure.cause }
+            guard activeHarnesses[sessionID]?.id == active.id else { continue }
+            do { try await engine.flushPersistence() }
+            catch let failure as SessionStorageFailure { throw failure.cause }
+            catch FxError.closed {
+                guard activeHarnesses[sessionID]?.id != active.id else { throw FxError.closed }
+                continue
+            }
+            if activeHarnesses[sessionID]?.id == active.id { return }
+        }
+        try await failure(sessionID)
     }
 
     func resume(_ session: String) async throws -> FxSessionTurn? {
@@ -361,15 +389,19 @@ public actor FxAgent {
         let context = FxHarnessContext(sessionID: lease.sessionID, inputID: input.id, options: input.options,
             persistence: SessionPersistence(store: store, lease: lease), checkpointAfterBytes: checkpointAfterBytes,
             ownership: { try await sessionStorageOperation { try await store.checkLease(lease) } })
+        let active = ActiveHarness()
+        activeHarnesses[lease.sessionID] = active
+        defer {
+            if activeHarnesses[lease.sessionID]?.id == active.id { activeHarnesses[lease.sessionID] = nil }
+        }
         let engine: any FxHarnessSession
         do {
             engine = try await prepareSession(deadline: deadlines?.stop, open: { try await self.harness.open(context) },
                                               close: { try await $0.close() })
-        } catch let error as SessionStorageFailure { throw error }
-        catch let error as FxSessionError { throw error }
-        catch let error as FxPersistenceError { throw error }
-        catch let error as FxSQLiteError { throw error }
-        catch {
+            await active.ready.resolve(.success(engine))
+        } catch {
+            await active.ready.resolve(.failure(error))
+            if error is SessionStorageFailure || error is FxSessionError || error is FxPersistenceError || error is FxSQLiteError { throw error }
             if recoveringOnly { throw HarnessOpeningFailure(cause: error) }
             if input.wasStarted { try await sessionStorageOperation { try await store.setHarnessRecoveryInput(lease, id: input.id) } }
             await onLifecycleEvent?(.harnessFailed(sessionID: lease.sessionID, inputID: input.id, error: error))

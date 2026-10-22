@@ -27,6 +27,11 @@ actor FixtureTransport: EngineTransport {
         let message = try JSONDecoder().decode(JSONValue.self, from: bytes)
         if message["method"] == .string("libfx/conformance_barrier"), let id = message["id"] {
             try receive(.object(["id": id, "result": .object([:])]))
+        } else if message["method"] == .string("session/cancel"), let id = message["id"] {
+            // The scripted peer handles cancellation as a notification. Wait
+            // for its write acknowledgement before filling the request reply.
+            try await relay("fixtureSend", message)
+            try receive(.object(["id": id, "result": .null]))
         } else if let id = message["id"]?.string, let tool = tools.removeValue(forKey: id) {
             tool.resume(returning: message)
         } else { try await relay("fixtureSend", message) }

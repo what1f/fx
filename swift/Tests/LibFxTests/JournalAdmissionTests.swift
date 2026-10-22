@@ -83,6 +83,11 @@ private actor CommitLatch {
     func release() { gate?.resume(); gate = nil }
 }
 
+private actor BarrierCompletion {
+    private(set) var finished = false
+    func finish() { finished = true }
+}
+
 @Suite(.serialized) struct JournalAdmissionTests {
     @Test(.timeLimit(.minutes(1)))
     func flushJoinsCommitDeliveryAndPreservesQueuedRecordOrder() async throws {
@@ -149,5 +154,64 @@ private actor CommitLatch {
         #expect(await http.posts == 1)
         await #expect(throws: FxPersistenceError.fenced) { try await engine.flushPersistence() }
         await #expect(throws: FxPersistenceError.fenced) { try await engine.close() }
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func cancellationDuringWriteBarrierNeverStartsTheEffect(failIntent: Bool) async throws {
+        let store = AdmissionStore(failIntent: failIntent), http = AdmissionHTTP()
+        let tool = FxTool(name: "probe", description: "Admission probe", inputSchema: .object(["type": .string("object")]),
+            isIdempotent: true, writes: true) { _, _ in await store.execute(reader: false) }
+        let engine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "fixture", model: "swift/journal-admission", tools: [tool], httpClient: http), persistence: store)
+        let turn = try await engine.prompt("run probe")
+        await store.waitForIntent()
+        await turn.cancel()
+        #expect(await store.intentPending)
+        #expect(await store.toolSawStoredIntent == nil)
+        await store.release()
+        if failIntent {
+            await #expect(throws: FxPersistenceError.fenced) { _ = try await turn.result }
+            await #expect(throws: FxPersistenceError.fenced) { try await engine.close() }
+        } else {
+            #expect(try await turn.result.stopReason == .cancelled)
+            try await engine.close()
+        }
+        #expect(await store.toolSawStoredIntent == nil)
+        #expect(await http.posts == 1)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func closeJoinsHeldWriteBarrierWithoutBlockingAnotherEngine() async throws {
+        let store = AdmissionStore(), http = AdmissionHTTP(), completion = BarrierCompletion()
+        let tool = FxTool(name: "probe", description: "Admission probe", inputSchema: .object(["type": .string("object")]),
+            isIdempotent: true, writes: true) { _, _ in await store.execute(reader: false) }
+        let configuration = FxConfiguration(apiKey: "fixture", model: "swift/journal-admission", tools: [tool], httpClient: http)
+        let engine = try await FxEngine.open(configuration: configuration, persistence: store)
+        let turn = try await engine.prompt("run probe")
+        await store.waitForIntent()
+        let closing = Task {
+            try await engine.close()
+            await completion.finish()
+        }
+        // Admission acknowledges that close has entered the engine actor.
+        while true {
+            do {
+                _ = try await engine.prompt("must be rejected")
+                Issue.record("Closing engine admitted another turn")
+                break
+            } catch FxError.closed { break }
+            catch FxError.busy { await Task.yield() }
+        }
+        #expect(await completion.finished == false)
+        #expect(await store.intentPending)
+        let other = try await FxEngine.open(configuration: configuration)
+        let independent = try await other.prompt("independent")
+        #expect(try await independent.result.stopReason == .endTurn)
+        try await other.close()
+        #expect(await completion.finished == false)
+        await store.release()
+        try await closing.value
+        await #expect(throws: FxError.closed) { _ = try await turn.result }
+        #expect(await store.toolSawStoredIntent == nil)
+        #expect(await completion.finished)
     }
 }

@@ -51,11 +51,19 @@ public protocol FxHarnessSession: Sendable {
     func prompt(_ content: [FxPromptContent], id: String, yieldAt: Date?) async throws -> any FxHarnessTurn
     /// The harness chooses which interrupted effects are safe to rerun.
     func resume(rerunning: Bool, yieldAt: Date?) async throws -> (any FxHarnessTurn)?
+    /// Acknowledges pending journal writes without waiting for a running turn.
+    func flushPersistence() async throws
     func saveCheckpoint() async throws
     func checkpoint() async throws -> Data
     /// Joins pending journal writes before returning. Recovery properties remain readable afterward.
     /// After a durable terminal result, cleanup may overlap the session's next turn.
     func close() async throws
+}
+
+extension FxHarnessSession {
+    public func flushPersistence() async throws {
+        throw FxError.invalidInput("Executor does not support flushing pending writes")
+    }
 }
 
 public protocol FxHarnessTurn: Sendable {

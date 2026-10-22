@@ -77,6 +77,7 @@ private struct KernelHarnessSession: FxHarnessSession {
         let ids = Set(calls.filter { rerunning && idempotent.contains($0.name) }.map(\.executionID))
         return try await engine.resume(replayingOutput: false, rerunning: ids, yieldAt: yieldAt)
     }
+    func flushPersistence() async throws { try await engine.flushPersistence() }
     func saveCheckpoint() async throws { try await engine.saveCheckpoint() }
     func checkpoint() async throws -> Data { try await engine.checkpoint() }
     func close() async throws { try await engine.close() }

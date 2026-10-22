@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const checks = [
+  { name: 'upstream/test-core-output-pressure-pull', expected: 'Swift pressure bridge: original assertions passed; JS-addon corruption injection excluded', args: [
+    '--no-warnings', '--loader', './swift/Tests/Conformance/output-pressure-loader.mjs', 'sdk/tests/test-core-output-pressure.mjs', 'native',
+  ] },
   { name: 'upstream/test-core-output-control', expected: 'core output framing passed:', args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-core-output.mjs',
   ] },
@@ -93,7 +96,7 @@ const checks = [
   ].map(([kind, test]) => ({ name: `upstream/test-durable-delivery-${kind}`, expected: '1/1 durable tests passed', env: { LIBFX_TEST_ONLY: test }, args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable.mjs', 'local', 'native',
   ] })),
-  ...['admission-cache', 'session-readable', 'http-cleanup', 'persistence-errors', 'driver-lifecycle', 'generic-relay-lifecycle', 'generic-core', 'generic-result', 'generic-routing', 'generic-fresh-host', 'generic-durable-additions', 'smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'input-observation', 'tool-observation', 'mcp-observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing', 'turn-identity', 'handoff', 'follow-up', 'custom-provider', 'provider-suites', 'agent-crash', 'session-checkpoint', 'session-steering-crash'].map(name => ({
+  ...['admission-cache', 'session-readable', 'http-cleanup', 'persistence-errors', 'driver-lifecycle', 'generic-relay-lifecycle', 'generic-core', 'generic-result', 'generic-routing', 'generic-fresh-host', 'generic-durable-additions', 'generic-durable-images', 'generic-durable-steer-start', 'smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'input-observation', 'tool-observation', 'mcp-observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing', 'turn-identity', 'handoff', 'follow-up', 'custom-provider', 'provider-suites', 'agent-crash', 'session-checkpoint', 'session-steering-crash'].map(name => ({
     name, args: [`swift/Tests/Conformance/${name}.mjs`],
   })),
 ];

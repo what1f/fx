@@ -129,6 +129,27 @@ private actor QueueHTTP: FxHTTPClient {
         try await store.close()
     }
 
+    @Test func failedCancellationPublishRetainsTheControlForRedelivery() async throws {
+        let store = try FxSessionStore(), queue = TestSessionQueue(), http = QueueHTTP(), failure = QueueFailure()
+        let worker = try agent(store: store, queue: queue, http: http)
+        let session = try await worker.session(id: "cancel-publish-failure")
+        let first = try await session.prompt("first", id: "first")
+        let second = try await session.prompt("must stay cancelled", id: "second")
+        await queue.failNext(failure)
+        do { try await second.cancel(); Issue.record("Cancellation publication failure was ignored") }
+        catch { #expect((error as? QueueFailure) === failure) }
+        // The existing delivery must observe the stored control even though
+        // publishing its additional wakeup failed.
+        let wakeup = try #require(await queue.messages.first)
+        #expect(try await worker.deliver(wakeup) == .complete)
+        #expect(try await first.result.stopReason == .endTurn)
+        #expect(try await second.result.stopReason == .cancelled)
+        #expect(try await worker.deliver(wakeup) == .complete)
+        #expect(await http.requests.count == 1)
+        try await worker.close()
+        try await store.close()
+    }
+
     @Test func simultaneousDeliveryWaitersShareWorkAndCancelIndependently() async throws {
         let store = try FxSessionStore(), queue = TestSessionQueue(), http = QueueHTTP(.held)
         let worker = try agent(store: store, queue: queue, http: http)

@@ -120,6 +120,7 @@ export async function createFxEngine(options = {}) {
   const turnStates = new Map(), followUps = new Map(), acceptedSessions = new Map();
   const sessionIntakes = new Set();
   const fetchControllers = new Map();
+  const fetchOwners = new Map();
   const fetchReaders = new Map();
   const inputEffects = new Map(), toolScopes = new Map();
   let fixtureRuntime;
@@ -408,6 +409,7 @@ export async function createFxEngine(options = {}) {
       fetchControllers.get(value.fetchCancelled)?.abort();
       void fetchReaders.get(value.fetchCancelled)?.cancel().catch(() => {});
       fetchControllers.delete(value.fetchCancelled);
+      fetchOwners.delete(value.fetchCancelled);
     } else if (value.imagePreparationRequest) {
       const call = value.imagePreparationRequest;
       void Promise.resolve().then(async () => {
@@ -473,14 +475,18 @@ export async function createFxEngine(options = {}) {
     } else if (value.fetchRequest) {
       const call = value.fetchRequest, controller = new AbortController();
       fetchControllers.set(call.id, controller);
+      fetchOwners.set(call.id, turn);
+      if (turn?.cancelRequested) controller.abort();
       void (async () => {
         let receivedHeaders = false;
         try {
+          controller.signal.throwIfAborted();
           const response = await (options.fetch || globalThis.fetch)(call.url, {
             method: call.method, headers: new Headers(call.headers),
             ...(call.body ? { body: new Uint8Array(Buffer.from(call.body, 'base64')) } : {}),
             signal: controller.signal,
           });
+          controller.signal.throwIfAborted();
           receivedHeaders = true;
           const reader = response.body?.getReader();
           if (reader) fetchReaders.set(call.id, reader);
@@ -489,16 +495,20 @@ export async function createFxEngine(options = {}) {
             if (reader) {
               for (;;) {
                 const { value: chunk, done } = await reader.read();
+                controller.signal.throwIfAborted();
                 if (done) break;
                 await request('fetchChunk', { fetchID: call.id, data: Buffer.from(chunk).toString('base64') });
               }
             }
+            controller.signal.throwIfAborted();
             await request('fetchEnd', { fetchID: call.id });
           } finally { fetchReaders.delete(call.id); reader?.releaseLock(); }
         } catch (error) {
           if (!receivedHeaders && !controller.signal.aborted) fetchErrorNames.push(error.name || 'Error');
-          await request('fetchFailure', { fetchID: call.id, error: String(error) }).catch(() => {});
-        } finally { fetchControllers.delete(call.id); }
+          if (!controller.signal.aborted) {
+            await request('fetchFailure', { fetchID: call.id, error: String(error) }).catch(() => {});
+          }
+        } finally { fetchControllers.delete(call.id); fetchOwners.delete(call.id); }
       })();
     } else if (value.toolCancelled) {
       toolScopes.get(value.toolCancelled)?.invalidate();
@@ -510,12 +520,20 @@ export async function createFxEngine(options = {}) {
       toolControllers.set(call.id, controller);
       toolOwners.set(call.id, call.turnId);
       const owner = [...turnStates.values()].find(state => state.public.id === call.turnId);
-      if (owner?.signal?.aborted) return;
-      Promise.resolve().then(() => tools.get(call.name).execute(call.input, {
+      if (owner?.signal?.aborted || owner?.cancelRequested) {
+        controller.abort();
+        toolControllers.delete(call.id);
+        toolOwners.delete(call.id);
+        return;
+      }
+      Promise.resolve().then(() => {
+        if (controller.signal.aborted || owner?.cancelRequested) return undefined;
+        return tools.get(call.name).execute(call.input, {
         signal: controller.signal, executionId: call.executionId, sessionId: call.sessionId,
         ...(call.context == null ? {} : { context: call.context }),
         ...(call.observation && options.hooks ? { observation: inputObservation(call) } : {}),
-      })).then(result => controller.signal.aborted ? undefined : request('toolResult', { toolID: call.id,
+        });
+      }).then(result => controller.signal.aborted ? undefined : request('toolResult', { toolID: call.id,
         ...(result?.type === 'libfx.tool-result' ? (
           Array.isArray(result.images) && result.images.some(image => typeof image?.sourceRef === 'string' && !image.sourceRef.isWellFormed())
             ? { error: 'Invalid tool image sourceRef' } : { rich: result }
@@ -630,6 +648,7 @@ export async function createFxEngine(options = {}) {
       async sessionSteer(sessionID, input, id, sessionOptions) {
         return request('sessionSteer', { sessionID, text: input, messageID: id, options: sessionOptions });
       },
+      async sessionSettle(sessionID) { await request('sessionSettle', { sessionID }); },
       async sessionCancel(sessionID) { return request('sessionCancel', { sessionID }); },
       sessionStream(sessionID, cursor = 0) {
         const readToken = randomUUID();
@@ -669,23 +688,34 @@ export async function createFxEngine(options = {}) {
       if (turn) throw new Error('a prompt is already running');
       const turnToken = randomUUID();
       const control = (op, args = {}) => request(op, { ...args, turnToken });
-      let ready;
+      let ready, readyResolved = false;
       const abortTools = () => {
         for (const [id, controller] of toolControllers) {
           if (toolOwners.get(id) === state.public.id) controller.abort();
         }
       };
+      const abortFetches = () => {
+        for (const [id, controller] of fetchControllers) {
+          if (fetchOwners.get(id) === state) controller.abort();
+        }
+      };
       const state = createTurn(args => {
         if (args.reason !== undefined && args.reason !== 'handoff') throw new TypeError('reason must be "handoff"');
         if (args.reason === 'handoff' && !options.persistence && !nativeStore) throw new Error('Handoff needs persistence');
+        // Dispatch before ending host work. An aborted host body must never
+        // race ahead of Swift cancellation as an ordinary provider EOF.
+        const cancellation = readyResolved ? control('cancel', args) : ready.then(() => control('cancel', args));
         abortTools();
-        return ready.then(() => control('cancel', args)).then(reply => {
+        return cancellation.then(reply => {
+          abortFetches();
           if (args.reason === 'handoff') handedOff = reply?.handedOff === true;
           return reply;
         });
       }, (input, inputID) => ready.then(() => control('steer', {
         text: Array.isArray(input) ? input.map(block => block.text).join('\n') : input, inputID,
-      })), inputID => ready.then(() => control('withdraw', { inputID })));
+      })), inputID => ready.then(() => control('withdraw', { inputID })),
+        () => ready.then(() => control('turnNext')),
+        () => ready.then(() => control('turnRelease')), abortFetches);
       turnStates.set(turnToken, state);
       state.signal = promptOptions.signal;
       turn = state;
@@ -707,8 +737,8 @@ export async function createFxEngine(options = {}) {
       ready = control(op, {
           ...args, ...(op === 'prompt' || publicID != null ? { turnID: publicID } : {}),
           ...(promptOptions.yieldAt === undefined ? {} : { yieldAt: promptOptions.yieldAt }),
-        }).then(reply => { if (reply?.turnID) state.public.id = reply.turnID; });
-      const abort = () => { abortTools(); state.cancellation = ready.then(() => control('cancel')).catch(error => state.fail(error)); };
+        }).then(reply => { readyResolved = true; if (reply?.turnID) state.public.id = reply.turnID; });
+      const abort = () => { void state.public.cancel(); };
       promptOptions.signal?.addEventListener('abort', abort, { once: true });
       state.cleanup = () => {
         promptOptions.signal?.removeEventListener('abort', abort);
@@ -746,7 +776,9 @@ export async function createFxEngine(options = {}) {
         const token = randomUUID();
         const control = (op, args = {}) => request(op, { ...args, turnToken: token });
         const state = createTurn(args => control('cancel', args), (text, inputID) => control('steer', { text, inputID }),
-          inputID => control('withdraw', { inputID }));
+          inputID => control('withdraw', { inputID }),
+          () => started.then(() => control('turnNext')),
+          () => started.then(() => control('turnRelease')));
         turnStates.set(token, state);
         let resolveTurn, rejectTurn, resolveAccepted, rejectAccepted;
         const started = new Promise((resolve, reject) => { resolveTurn = resolve; rejectTurn = reject; });
@@ -885,9 +917,10 @@ async function encodePrompt(input) {
   }));
 }
 
-function createTurn(cancel, steer, withdraw) {
+function createTurn(cancel, steer, withdraw, pull, release, abortHost) {
   const queue = [], waiters = [];
-  let done = false, failure;
+  let done = false, failure, readerDone = false;
+  let reads = Promise.resolve();
   let resolveResult, rejectResult;
   const result = new Promise((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });
   result.catch(() => {});
@@ -898,7 +931,9 @@ function createTurn(cancel, steer, withdraw) {
     public: {
       result,
       cancel(options = {}) {
-        state.cancellation = cancel(options).catch(error => state.fail(error));
+        const cancellation = cancel(options);
+        state.cancelRequested = true;
+        state.cancellation = cancellation.catch(error => state.fail(error));
         return state.cancellation;
       },
       [Symbol.for('libfx.swift.cancellation')]() { return state.cancellation; },
@@ -911,12 +946,38 @@ function createTurn(cancel, steer, withdraw) {
       withdraw,
       [Symbol.asyncIterator]() { return {
         next() {
+          if (pull) {
+            // Serialize concurrent JS next calls without prefetching an event.
+            const next = reads.then(async () => {
+              if (readerDone) return { done: true };
+              if (failure) throw failure;
+              try {
+                const item = await pull();
+                if (readerDone) return { done: true };
+                if (item.done) readerDone = true;
+                return item;
+              } catch (error) { state.fail(error); throw error; }
+            });
+            reads = next.catch(() => {});
+            return next;
+          }
           if (queue.length) return Promise.resolve({ value: queue.shift(), done: false });
           if (failure) return Promise.reject(failure);
           if (done) return Promise.resolve({ done: true });
           return new Promise((resolve, reject) => waiters.push({ resolve, reject }));
         },
-        return() { void state.public.cancel(); return Promise.resolve({ done: true }); },
+        return() {
+          readerDone = true;
+          void state.public.cancel();
+          abortHost?.();
+          return Promise.resolve(state.cancellation).then(() => release?.()).then(() => ({ done: true }));
+        },
+        throw(error) {
+          readerDone = true;
+          void state.public.cancel();
+          abortHost?.();
+          return Promise.resolve(state.cancellation).then(() => release?.()).then(() => { throw error; });
+        },
       }; },
     },
   };
@@ -1066,6 +1127,9 @@ export function createFxAgent(options = {}) {
     async checkpoint() {
       defaultSession ??= agent.session();
       return defaultSession.checkpoint();
+    },
+    [Symbol.for('libfx.durableInternals')]: {
+      async settled(sessionID) { await (await ready).sessionSettle(sessionID); },
     },
     async __killForTest() { return (await ready).__killForTest(); },
     async close() { await (await ready).close(); },

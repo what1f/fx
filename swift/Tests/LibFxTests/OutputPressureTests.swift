@@ -26,6 +26,54 @@ private actor PressureTurn {
 }
 
 private final class PressureFailure: Error {}
+
+private actor PressureCheckpointGate {
+    let entered = PromptDispatch()
+    let release = AsyncResult<Void>()
+    func observe(_ event: FxLifecycleEvent) async {
+        guard case .checkpointSaved = event else { return }
+        await entered.resolve(sent: true)
+        _ = try? await release.wait()
+    }
+}
+
+private actor CompletedPressureRuntime: EngineTransport {
+    nonisolated let output: AsyncThrowingStream<Data, any Error>
+    private let continuation: AsyncThrowingStream<Data, any Error>.Continuation
+    init() { (output, continuation) = AsyncThrowingStream.makeStream() }
+    func start() {}
+    func setContext(sessionID: String, modelID: String) {}
+    func beginTurn() {}
+    func discardAttachments() {}
+    func abortEffects() {}
+    func putAttachment(_ data: Data, id: UInt32) throws { throw FxPersistenceError.invalidJournal }
+    func takeAttachment(id: UInt32) throws -> Data { throw FxPersistenceError.invalidJournal }
+    func close() { continuation.finish() }
+    func write(_ data: Data) throws {
+        let message = try JSONDecoder().decode(JSONValue.self, from: data)
+        guard let id = message["id"] else { return }
+        if message["method"] == .string("session/prompt") {
+            let update = JSONValue.object(["jsonrpc": .string("2.0"), "method": .string("session/update"),
+                "params": .object(["sessionId": .string("pressure"), "update": .object([
+                    "sessionUpdate": .string("agent_message_chunk"),
+                    "content": .object(["type": .string("text"), "text": .string("x")]),
+                ])])])
+            for _ in 0..<512 { try emit(update) }
+            try emit(.object(["jsonrpc": .string("2.0"), "id": id, "result": .object(["stopReason": .string("end_turn")])]))
+        } else {
+            let result: JSONValue = message["method"] == .string("libfx/new")
+                ? .object(["sessionId": .string("pressure"), "configOptions": .array([
+                    .object(["id": .string("model"), "currentValue": .string("fixture/output")]),
+                ])]) : .object([:])
+            try emit(.object(["jsonrpc": .string("2.0"), "id": id, "result": result]))
+        }
+    }
+    private func emit(_ value: JSONValue) throws {
+        var data = try JSONEncoder().encode(value)
+        data.append(10)
+        continuation.yield(data)
+    }
+}
 private actor PressureReaderCancellation {
     var queue: TurnOutput?
     let finished = PromptDispatch()
@@ -78,6 +126,44 @@ private func pressureDigest(_ turn: FxTurn) async throws -> (Int, SHA256.Digest)
 }
 
 @Suite(.serialized, .timeLimit(.minutes(1))) struct OutputPressureTests {
+    @Test func cancellationDuringTerminalCheckpointStillDeterminesTheResult() async throws {
+        let gate = PressureCheckpointGate()
+        var configuration = pressureConfiguration(PressureHTTP(response: pressureDelta("saved") + pressureFinish))
+        configuration.checkpointAfterBytes = 0
+        configuration.onLifecycleEvent = { await gate.observe($0) }
+        let engine = try await FxEngine.open(configuration: configuration, persistence: FxMemoryPersistence())
+        let turn = try await engine.prompt("checkpoint")
+        _ = await gate.entered.wait()
+        await turn.cancel()
+        await gate.release.resolve(.success(()))
+        #expect(try await turn.result.stopReason == .cancelled)
+        #expect(await engine.recoveryState == nil)
+        try await engine.close()
+    }
+
+    @Test func cancellationWinsOverAnAlreadyBufferedSuccessfulRPCReply() async throws {
+        let probe = PressureProbe()
+        let engine = try await FxEngine.openForConformance(
+            configuration: pressureConfiguration(PressureHTTP(response: ""), probe: probe),
+            transport: CompletedPressureRuntime())
+        let turn = try await engine.prompt("buffered reply")
+        _ = await probe.reached.wait()
+        await turn.cancel()
+        #expect(try await turn.result.stopReason == .cancelled)
+        try await engine.close()
+    }
+
+    @Test func closeRejectsAnAlreadyBufferedSuccessfulRPCReply() async throws {
+        let probe = PressureProbe()
+        let engine = try await FxEngine.openForConformance(
+            configuration: pressureConfiguration(PressureHTTP(response: ""), probe: probe),
+            transport: CompletedPressureRuntime())
+        let turn = try await engine.prompt("buffered reply")
+        _ = await probe.reached.wait()
+        try await engine.close()
+        await #expect(throws: FxError.closed) { _ = try await turn.result }
+    }
+
     @Test func readerCancellationDoesNotReplaceAKnownFailureWithEOF() async throws {
         let failure = PressureFailure(), cancellation = PressureReaderCancellation()
         let queue = TurnOutput(onCancel: { await cancellation.cancel(with: failure) })
@@ -181,6 +267,26 @@ private func pressureDigest(_ turn: FxTurn) async throws -> (Int, SHA256.Digest)
         await holder.set(turn)
         #expect(try await turn.result.stopReason == .cancelled)
         #expect(await probe.samples.count == 1)
+        try await engine.close()
+    }
+
+    @Test func cancellationWinsOverACompletedProviderBehindUnreadOutput() async throws {
+        let probe = PressureProbe()
+        let http = PressureHTTP(response: String(repeating: pressureDelta(String(repeating: "x", count: 16 * 1024)), count: 256) + pressureFinish)
+        let engine = try await FxEngine.open(configuration: pressureConfiguration(http, probe: probe))
+        let turn = try await engine.prompt("cancel completed provider output")
+        _ = await probe.reached.wait()
+        // Keep this turn unread while a separate owner completes. The native
+        // provider may finish, but its reply has not crossed the output reader.
+        let other = try await FxEngine.open(configuration: pressureConfiguration(PressureHTTP(response: pressureDelta("independent") + pressureFinish)))
+        let independent = try await other.prompt("separate owner")
+        #expect(try await pressureDigest(independent).0 == 11)
+        try await other.close()
+        await turn.cancel()
+        #expect(try await turn.result.stopReason == .cancelled)
+        let next = try await engine.prompt("reuse")
+        #expect(try await pressureDigest(next).0 == 12)
+        #expect(try await next.result.stopReason == .endTurn)
         try await engine.close()
     }
 

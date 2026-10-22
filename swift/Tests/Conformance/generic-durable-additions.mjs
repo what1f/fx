@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const cases = [
+  'a crash during lookup reruns the idempotent call under the same execution id',
   'a crash during save reruns the idempotent call under the same execution id',
 ];
 const results = [];

@@ -8,5 +8,10 @@ package protocol EngineTransport: CoreTransport {
     func putAttachment(_ data: Data, id: UInt32) async throws
     func takeAttachment(id: UInt32) async throws -> Data
     func discardAttachments() async
+    func stopStartingEffects() async
     func abortEffects() async
+}
+
+extension EngineTransport {
+    package func stopStartingEffects() async {}
 }

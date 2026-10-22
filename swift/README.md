@@ -44,6 +44,8 @@ do {
 
 Read a turn's events once. Await `result` to observe its completion. Call `cancel()` on the turn to stop model requests and cooperative tool tasks. Call `close()` on the engine to release the core; repeated close calls await the same shutdown and report the same persistence failure, if any.
 
+Cancellation returns after submitting the stop request. Await the turn's `result` before starting another turn. If the stop request fails, the result preserves that error and the engine refuses further prompts.
+
 Unread output pauses its producer when 256 events or 1 MiB of encoded events fill the queue. An empty queue can hold one indivisible event up to the 64 MiB frame bound. Consume events or cancel the turn to release pressure; awaiting only `result` does not drain the queue. The `.outputBackpressure` lifecycle event reports occupancy, and its callback can await cancellation. Cancellation and engine close release blocked output without requiring a reader to resume.
 
 Cancelling a Swift task that awaits `turn.result` cancels the turn and makes that waiter throw `CancellationError`.
@@ -403,6 +405,8 @@ Call `try await session.checkpoint()` to export the conversation, including stor
 Pass an implementation of `FxSessionHarness` to `FxAgent(harness:store:)` to run conversation turns without the Zig engine. The default `configuration:` initializer uses the same worker with the Zig executor. Both use the same session views, queue deliveries, ownership checks, cancellation and persisted output.
 
 The harness validates session settings and input, prepares seed checkpoints, and opens an `FxHarnessSession` from `FxHarnessContext`. A session reports its interrupted or completed turn, starts or resumes a turn, exports checkpoints and joins pending writes on close. Each `FxHarnessTurn` supplies a bounded event stream, its result, and cancellation, handoff and steering operations. Check `context.checkOwnership()` before external effects and after awaiting permission.
+
+Implement `flushPersistence()` to acknowledge pending journal writes independently of the running turn. The default throws an unsupported error; it does not acknowledge writes.
 
 A terminal result must acknowledge its durable journal writes. After that result is saved, the next input can start while the previous executor closes. `agent.close()` joins all executor cleanup tasks and reports their errors; cleanup errors do not replace already stored turn results.
 

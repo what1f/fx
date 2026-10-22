@@ -26,6 +26,7 @@ private actor PermissionTransport: EngineTransport {
             if message["method"] == .string("session/prompt") { promptID = message["id"]; return }
             if message["method"] == .string("session/cancel"), let promptID {
                 try emit(.object(["id": promptID, "result": .object(["stopReason": .string("cancelled")])]))
+                if let id = message["id"] { try emit(.object(["id": id, "result": .null])) }
                 return
             }
             if let id = message["id"], message["method"] != nil {

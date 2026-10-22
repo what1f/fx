@@ -8,7 +8,10 @@ actor SessionStorageProxy: FxSessionStorage {
     let base: FxSessionStore
     private var failure: (String, SessionStorageTestFailure, remaining: Int)?
     private(set) var calls: [String] = []
-    init(_ base: FxSessionStore) { self.base = base }
+    private let beforeJournalAppend: (@Sendable (Data, Bool) async throws -> Void)?
+    init(_ base: FxSessionStore, beforeJournalAppend: (@Sendable (Data, Bool) async throws -> Void)? = nil) {
+        self.base = base; self.beforeJournalAppend = beforeJournalAppend
+    }
     func failNext(_ operation: String, with error: SessionStorageTestFailure, after successfulCalls: Int = 0) {
         failure = (operation, error, successfulCalls)
     }
@@ -93,6 +96,7 @@ actor SessionStorageProxy: FxSessionStorage {
     }
     func appendJournal(_ lease: FxSessionLease, expected: String?, key: String, data: Data, barrier: Bool, marks: [FxSessionJournalMark]?) async throws -> String {
         try before("appendJournal")
+        try await beforeJournalAppend?(data, barrier)
         return try await base.appendJournal(lease, expected: expected, key: key, data: data, barrier: barrier, marks: marks)
     }
     func saveJournalCheckpoint(_ lease: FxSessionLease, _ checkpoint: FxStoredCheckpoint) async throws {
