@@ -113,7 +113,7 @@
       "upstream": "sdk/tests/test-checkpoint.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: all five upstream native/native checkpoint scenarios through Swift, retaining original assertions for text, reasoning with text, reasoning-only, provider terminal tools and image restoration; loader skips only the unused WASM fixture read in native mode"
     },
     {
       "upstream": "sdk/tests/test-core-browser.mjs",

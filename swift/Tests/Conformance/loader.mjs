@@ -12,6 +12,13 @@ export async function resolve(specifier, context, nextResolve) {
 
 export async function load(url, context, nextLoad) {
   const result = await nextLoad(url, context);
+  if (url.endsWith('/sdk/tests/test-checkpoint.mjs')) {
+    const source = result.source.toString();
+    const asset = 'const wasm = await readFile(resolve(scriptDir, "../../zig-out/bin/fx-core.wasm"));';
+    if (source.split(asset).length !== 2) throw new Error('Upstream checkpoint fixture changed; review native asset loading');
+    return { ...result, source: source.replace(asset,
+      'const wasm = sourceBackend === "wasm" || targetBackend === "wasm" ? await readFile(resolve(scriptDir, "../../zig-out/bin/fx-core.wasm")) : undefined;') };
+  }
   if (url.endsWith('/sdk/tests/test-journal.mjs')) {
     let source = result.source.toString();
     const asset = 'const wasm = await readFile(resolve(scriptDir, "../../zig-out/bin/fx-core.wasm"));';

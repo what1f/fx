@@ -319,6 +319,8 @@ try await store.close()
 
 A session view does not create stored data. `prompt` returns after durable acceptance, and inputs run in order within a session. Retrying a stored message ID returns its existing work and sets `isRepeated`; it does not replace the saved input. Each turn iterator replays its own durable events independently. Cancelling a reader leaves the work running. Call `turn.cancel()` to cancel that input, or `session.cancel()` to cancel the currently started input. `agent.close()` stops intake and waits for accepted work.
 
+When this agent owns the active turn, steering and cancellation also wait until its worker has checked the stored update. Updates owned by another process are discovered asynchronously. A steering receipt confirms acceptance; the user-message event confirms that the model received the guidance.
+
 Set `FxSessionOptions` on a session view to capture the model, instructions, and tool context for subsequent inputs. Tools receive the logical session ID, public message ID, and captured context. `session.events(after:)` reads persisted entries by cursor and waits for later entries. Cancel its consuming task to stop reading.
 
 Use `try await session.steer("Focus on the tests", id: "guidance-1")` to add durable guidance. Text joins the running turn at its next safe boundary and can interrupt a streaming response. When the session is idle, guidance starts a turn. A steer containing an image ends the current turn and runs as a new turn; later text can join that turn. Acceptance waits for storage, and retrying the same steering ID leaves the original input unchanged. Prompt and steering IDs share a namespace; reusing an ID for the other kind throws `FxSessionError.messageIDInUse`.

@@ -95,8 +95,8 @@ private actor SteeringGate {
         await gate.waitForEntry()
         _ = try await session.steer("after cancellation", id: "guide")
         _ = try await session.steer("and keep the second guidance", id: "guide-2")
-        while try await store.databaseValueForSteeringTest(session: "s", id: "guide") == 0 { await Task.yield() }
-        while try await store.databaseValueForSteeringTest(session: "s", id: "guide-2") == 0 { await Task.yield() }
+        #expect(try await store.databaseValueForSteeringTest(session: "s", id: "guide") == 1)
+        #expect(try await store.databaseValueForSteeringTest(session: "s", id: "guide-2") == 1)
         try await session.cancel()
         await gate.waitForCancellation()
         await gate.release()
@@ -130,6 +130,43 @@ private actor SteeringGate {
         let entries = try await store.entries(session: "s", agent: "default", after: 0)
         let starts = entries.compactMap { if case .started(let id, _) = $0.event { return id }; return nil }
         #expect(starts == ["prompt", "image"])
+        try await store.close()
+    }
+
+    @Test func localSteerReachesTheNextRequestWithoutAPollingDelay() async throws {
+        let gate = SteeringGate(), http = SteeringHTTP(.tool), store = try FxSessionStore()
+        let tool = FxTool(name: "lookup", description: "Look up", inputSchema: .object(["type": .string("object")]), isIdempotent: true) { _, _ in
+            await gate.enter(); return "looked up"
+        }
+        let agent = try FxAgent(configuration: configuration(http, tools: [tool]), store: store)
+        let session = try await agent.session(id: "s")
+        let turn = try await session.prompt("lookup", id: "prompt")
+        await gate.waitForEntry()
+        _ = try await session.steer("immediate guidance", id: "guide")
+        #expect(try await store.databaseValueForSteeringTest(session: "s", id: "guide") == 1)
+        await gate.release()
+        #expect(try await turn.result.stopReason == .endTurn)
+        #expect(await http.bodies.count == 2)
+        #expect(await http.bodies.last?.contains("immediate guidance") == true)
+        try await agent.close()
+        try await store.close()
+    }
+
+    @Test(arguments: [false, true]) func localCancellationPrecedesAnImmediatelyReleasedTool(wholeSession: Bool) async throws {
+        let gate = SteeringGate(), http = SteeringHTTP(.tool), store = try FxSessionStore()
+        let tool = FxTool(name: "lookup", description: "Look up", inputSchema: .object(["type": .string("object")]), isIdempotent: true) { _, _ in
+            await gate.enter(); return "looked up"
+        }
+        let agent = try FxAgent(configuration: configuration(http, tools: [tool]), store: store)
+        let session = try await agent.session(id: "s")
+        let turn = try await session.prompt("lookup", id: "prompt")
+        await gate.waitForEntry()
+        if wholeSession { try await session.cancel() } else { try await turn.cancel() }
+        await gate.release()
+        #expect(try await turn.result.stopReason == .cancelled)
+        let fresh = try await session.prompt("still usable", id: "fresh")
+        #expect(try await fresh.result.stopReason == .endTurn)
+        try await agent.close()
         try await store.close()
     }
 

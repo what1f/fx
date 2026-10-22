@@ -67,6 +67,7 @@ jobs:
           node swift/Tests/Conformance/journal-admission.mjs tool-images
           node swift/Tests/Conformance/journal-admission.mjs checkpoints
           node swift/Tests/Conformance/journal-admission.mjs turn-identity
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-checkpoint.mjs native native
           node swift/Tests/Conformance/persistence-errors.mjs
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-tool-contract.mjs native
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native
@@ -93,6 +94,7 @@ jobs:
           node swift/Tests/Conformance/journal-admission.mjs tool-images
           node swift/Tests/Conformance/journal-admission.mjs checkpoints
           node swift/Tests/Conformance/journal-admission.mjs turn-identity
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-checkpoint.mjs native native
           node swift/Tests/Conformance/persistence-errors.mjs
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-tool-contract.mjs native
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native

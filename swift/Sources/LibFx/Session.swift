@@ -13,7 +13,7 @@ public struct FxSession: Sendable, Identifiable {
         try await agent.accept(session: self.id, options: options, content: content, id: id)
     }
     @discardableResult public func resume() async throws -> FxSessionTurn? { try await agent.resume(id) }
-    public func cancel() async throws { try await agent.store.cancel(session: id, agent: agent.name) }
+    public func cancel() async throws { try await agent.cancel(id) }
     public func checkpoint() async throws -> Data { try await agent.checkpoint(id, options: options) }
     public func steer(_ text: String, id: String = UUID().uuidString) async throws -> FxSteeringReceipt {
         try await steer([.text(text)], id: id)
@@ -77,7 +77,7 @@ public struct FxSessionTurn: Sendable, Identifiable, AsyncSequence {
             }
         }
     }
-    public func cancel() async throws { try await agent.store.cancel(session: sessionID, agent: agent.name, id: id) }
+    public func cancel() async throws { try await agent.cancel(sessionID, id: id) }
     public struct AsyncIterator: AsyncIteratorProtocol {
         let id: String
         var source: FxSessionEvents.AsyncIterator

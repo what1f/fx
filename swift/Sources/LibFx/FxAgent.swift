@@ -10,6 +10,12 @@ public actor FxAgent {
     private let deliveryPolicy: FxDeliveryPolicy?
     private var workers: [String: Task<Void, Never>] = [:]
     private var failures: [String: any Error] = [:]
+    private struct ControlCheck {
+        let inputID: String
+        var pause: Task<Void, Never>?
+        var waiters: [CheckedContinuation<Void, Never>] = []
+    }
+    private var controlChecks: [String: ControlCheck] = [:]
     private var intakes = 0
     private var closed = false
 
@@ -50,6 +56,7 @@ public actor FxAgent {
         try Task.checkCancellation()
         let repeated = try await store.accept(session: session, agent: name, id: id, content: content, options: options, checkpoint: initialCheckpoint, steering: steering)
         kick(session)
+        if steering { await synchronizeControls(session) }
         return FxSessionTurn(id: id, sessionID: session, isRepeated: repeated, agent: self)
     }
 
@@ -101,6 +108,25 @@ public actor FxAgent {
 
     func failure(_ session: String) throws {
         if let failure = failures[session] { throw failure }
+    }
+
+    func cancel(_ session: String, id: String? = nil) async throws {
+        try await store.cancel(session: session, agent: name, id: id)
+        if id == nil || controlChecks[session]?.inputID == id { await synchronizeControls(session) }
+    }
+
+    private func synchronizeControls(_ session: String) async {
+        guard controlChecks[session] != nil else { return }
+        await withCheckedContinuation { continuation in
+            controlChecks[session]?.waiters.append(continuation)
+            controlChecks[session]?.pause?.cancel()
+        }
+    }
+
+    private func finishControlChecks(_ session: String) {
+        guard let checks = controlChecks.removeValue(forKey: session) else { return }
+        checks.pause?.cancel()
+        for waiter in checks.waiters { waiter.resume() }
     }
 
     private func kick(_ session: String) {
@@ -179,6 +205,8 @@ public actor FxAgent {
             return false
         }
         do {
+            controlChecks[lease.sessionID] = ControlCheck(inputID: input.id)
+            defer { finishControlChecks(lease.sessionID) }
             let turnID = sessionCoreInputID(input.id)
             let recovery = await engine.recoveryState
             let spent = try await store.deliveryCutoffs(lease, id: input.id) >= 3
@@ -199,8 +227,13 @@ public actor FxAgent {
             if input.cancelRequested || spent && recovery?.runningCalls.isEmpty == true { await turn.cancel() }
             let controls = Task { () throws -> Bool in
                 var ending = false
+                defer { finishControlChecks(lease.sessionID) }
                 do {
                     while !Task.isCancelled {
+                        // Acknowledge only updates present before this storage read.
+                        let waiters = controlChecks[lease.sessionID]?.waiters ?? []
+                        controlChecks[lease.sessionID]?.waiters.removeAll()
+                        defer { for waiter in waiters { waiter.resume() } }
                         if try await store.cancelled(lease, id: input.id) {
                             await turn.cancel()
                             return false
@@ -226,7 +259,15 @@ public actor FxAgent {
                                 try await turn.endForSteeringAction()
                             }
                         }
-                        try await Task.sleep(for: .milliseconds(20))
+                        if controlChecks[lease.sessionID]?.waiters.isEmpty == false { continue }
+                        let pause = Task<Void, Never> {
+                            do { try await Task.sleep(for: .milliseconds(20)) } catch {}
+                        }
+                        controlChecks[lease.sessionID]?.pause = pause
+                        await withTaskCancellationHandler {
+                            _ = await pause.result
+                        } onCancel: { pause.cancel() }
+                        controlChecks[lease.sessionID]?.pause = nil
                     }
                 } catch is CancellationError {} catch { await turn.cancel(); throw error }
                 return false
