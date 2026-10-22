@@ -393,7 +393,7 @@ The worker asks the core to yield at a safe boundary when the reserve begins. It
 
 The durable event sequence includes `.yielded` and `.resumed`, with one final `.ended` for the whole turn. Safe tools can resume with their original execution IDs; ambiguous writes remain stopped. After three consecutive deadline cutoffs at the same step, a tool is no longer rerun, or a stalled model turn is cancelled. Counts survive reopening the store and reset when the core advances to another step. Active cutoffs emit `.sessionDeadline` observations. Host transports and tools must cooperate with cancellation. Without a queue, the agent schedules the next delivery locally.
 
-To publish work to an external queue, implement `FxSessionQueue` and pass it as `queue:` to both the sending agent and the worker. Each wakeup contains only the agent name and session ID. Both agents must use the same durable store. The host owns queue transport and routes messages to the matching agent.
+To publish work to an external queue, implement `FxSessionQueue` and pass it as `queue:` to both the sending agent and the worker. Published wakeups contain the agent name, session ID, and accepted input ID, without prompt content or credentials. Both agents must use the same durable store. The host owns queue transport and routes messages to the matching agent.
 
 ```swift
 let worker = try FxAgent(configuration: configuration, name: "assistant",
@@ -408,6 +408,24 @@ case .retry(let delay): break // Retain it and redeliver after this delay.
 Here, `queue` is your `FxSessionQueue` implementation, and `wakeup` is the decoded queue message. `enqueue` must return when the queue accepts the message, without waiting for execution. `prompt`, `steer`, and `resume` wait for publishing after durable acceptance. If publishing fails, the saved input remains: retry its original ID or call `resume`. Acceptance and publishing are separate operations, so a process failure between them requires host recovery of pending work.
 
 A delivery policy covers the entire external delivery, including queued inputs. A busy owner returns `.retry`; duplicate messages for finished work return `.complete`. Retain and redeliver messages when `deliver` throws. Cancelling its awaiting task leaves durable execution running. In queue mode, `close()` waits for active deliveries and leaves other accepted inputs in storage for a later worker. The SDK does not implement a cloud queue client.
+
+### Receive HTTP wakeups
+
+Add the optional `LibFxHTTP` product and Apple `HTTPTypes` product to your server target. `FxHTTPWakeHandler` accepts an `HTTPRequest` and body bytes from your existing server. Register each store's `FxAgentRouter` under an explicit route key. Your queue publisher can encode its received wakeup directly:
+
+```swift
+import Foundation
+import LibFxHTTP
+import HTTPTypes
+
+let body = try JSONEncoder().encode(FxHTTPWakeRequest(store: "main", wakeup: wakeup))
+let handler = FxHTTPWakeHandler(routes: ["main": router])
+let response = try await handler.handle(request, body: body)
+```
+
+Here, `router` is your store's router, and `request` comes from your server. Keep its workers alive while serving requests and limit body collection to 16 KiB. The handler runs only input already stored under that store and session; request content cannot create a prompt or cancel work. Unknown inputs return 200 without execution. Completed deliveries return 200, pending retries return 503 with `Retry-After`, and delivery errors return 500. The optional `onError` callback receives the original error; HTTP responses have empty bodies. Cancelled requests throw while the durable worker continues. Retain messages after a non-success response or disconnected request. A manually constructed session wakeup without `inputID` cannot be encoded as an HTTP wake request.
+
+Release writes receive one immediate retry after a host error. The `.storageFailed` lifecycle notification retains that error. Cancellation, `FxError`, `FxSessionError`, and `FxPersistenceError`, including fencing, do not retry. A second failure propagates without replaying executor effects; retain an external delivery for later recovery.
 
 When the active cutoff expires while the engine is opening, the worker cancels preparation, waits for cleanup, and stops with `FxSessionError.preparationTimedOut`. The accepted input remains pending without a final result. Fix the underlying service, then call `session.resume()` to retry its original ID. The worker does not retry preparation automatically; `agent.close()` reports the failure if it remains unresolved. HTTP clients, credential callbacks, and asynchronous persistence loads must cooperate with cancellation. A callback that ignores cancellation delays cleanup and the timeout result.
 

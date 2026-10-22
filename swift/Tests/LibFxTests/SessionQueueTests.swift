@@ -55,6 +55,8 @@ private actor QueueHTTP: FxHTTPClient {
         let producer = try agent(store: store, queue: queue, http: http)
         let session = try await producer.session(id: "queued-session")
         let turn = try await session.prompt("private prompt", id: "input")
+        try await producer.cancel(session.id, id: "unknown")
+        #expect(await queue.messages.map(\.inputID) == ["input", "input"])
         #expect(await http.requests.isEmpty)
         #expect(try await store.result(session: session.id, agent: "default", id: "input") == nil)
         let wakeup = try #require(await queue.messages.first)

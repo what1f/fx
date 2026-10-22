@@ -65,4 +65,21 @@ public actor FxAgentRouter {
     public func deliver(_ wakeup: FxSessionWakeup, policy: FxDeliveryPolicy? = nil) async throws -> FxDeliveryOutcome {
         try await agent(named: wakeup.agent).deliver(wakeup, policy: policy)
     }
+
+    package var hasWakeAgents: Bool { agents.values.contains { $0.agent != nil } }
+
+    /// HTTP deliveries reference accepted input; their bodies never create work.
+    package func deliverAccepted(_ wakeup: FxSessionWakeup, inputID: String,
+                                 policy: FxDeliveryPolicy?) async throws -> FxDeliveryOutcome {
+        _ = try agent(named: wakeup.agent)
+        guard validSessionIdentifier(wakeup.sessionID), validSessionIdentifier(inputID) else { return .complete }
+        guard let owner = try await store.owner(session: wakeup.sessionID) else { return .complete }
+        do {
+            _ = try await store.result(session: wakeup.sessionID, agent: owner, id: inputID)
+        } catch FxSessionError.notFound {
+            return .complete
+        }
+        try Task.checkCancellation()
+        return try await agent(named: owner).deliver(FxSessionWakeup(agent: owner, sessionID: wakeup.sessionID), policy: policy)
+    }
 }

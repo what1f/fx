@@ -24,6 +24,9 @@ public protocol FxSessionStorage: Sendable {
     func hasWork(session: String, agent: String) async throws -> Bool
     /// Returns nil while another live worker owns the session.
     func claim(session: String, agent: String) async throws -> FxSessionLease?
+    /// Releases only this lease. Repeating a committed release must be harmless
+    /// and must not release a newer owner. A failed write retains local ownership
+    /// resources until a successful retry or storage shutdown.
     func release(_ lease: FxSessionLease) async throws
     func checkLease(_ lease: FxSessionLease) async throws
     func next(_ lease: FxSessionLease) async throws -> FxSessionInput?

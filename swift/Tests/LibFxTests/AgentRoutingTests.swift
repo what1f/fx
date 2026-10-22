@@ -146,9 +146,9 @@ private actor RoutingQueue: FxSessionQueue {
         let replacement = try await router.makeAgent(harness: RoutedCalculation(name: "owner", trace: trace), name: "owner", queue: queue)
         let resumed = try #require(try await foreign.resume())
         let wakeup = try #require(await queue.messages.last)
-        #expect(wakeup == FxSessionWakeup(agent: "owner", sessionID: view.id))
+        #expect(wakeup == FxSessionWakeup(agent: "owner", sessionID: view.id, inputID: "one"))
         let keys = try JSONSerialization.jsonObject(with: JSONEncoder().encode(wakeup)) as? [String: Any]
-        #expect(Set(keys?.keys.map { $0 } ?? []) == ["agent", "sessionID"])
+        #expect(Set(keys?.keys.map { $0 } ?? []) == ["agent", "sessionID", "inputID"])
         #expect(try await router.deliver(wakeup) == .complete)
         #expect(try await router.deliver(wakeup) == .complete)
         #expect(try await first.result.stopReason == .endTurn)

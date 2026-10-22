@@ -8,6 +8,7 @@ public enum FxLifecycleEvent: Sendable {
     case checkpointMismatch(sessionID: String, fields: [FxCheckpointField], saved: FxCheckpointIdentity, current: FxCheckpointIdentity)
     case deliveryDeadline(sessionID: String, epoch: Int64, cutoffs: Int)
     case harnessFailed(sessionID: String, inputID: String, error: any Error)
+    case storageFailed(sessionID: String, error: any Error)
     case permissionRequested(sessionID: String, turnID: String, toolID: String)
     case permissionResolved(sessionID: String, turnID: String, toolID: String, decision: FxPermissionDecision)
 }

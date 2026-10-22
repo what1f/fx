@@ -4,9 +4,11 @@ import Foundation
 public struct FxSessionWakeup: Sendable, Codable, Equatable {
     public let agent: String
     public let sessionID: String
+    /// The accepted input that caused publication. Nil is for manual session deliveries.
+    public let inputID: String?
 
-    public init(agent: String, sessionID: String) {
-        self.agent = agent; self.sessionID = sessionID
+    public init(agent: String, sessionID: String, inputID: String? = nil) {
+        self.agent = agent; self.sessionID = sessionID; self.inputID = inputID
     }
 }
 

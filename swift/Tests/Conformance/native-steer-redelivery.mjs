@@ -100,7 +100,7 @@ actor Gateway: FxHTTPClient {
             _ = try await session.steer(input, id: "guidance")
         }
         let wakeup = try JSONDecoder().decode(FxSessionWakeup.self, from: Data(contentsOf: directory.appendingPathComponent("wakeup.json")))
-        guard wakeup == FxSessionWakeup(agent: "default", sessionID: session.id) else { throw FxError.invalidInput("Wrong persisted wakeup") }
+        guard wakeup == FxSessionWakeup(agent: "default", sessionID: session.id, inputID: "guidance") else { throw FxError.invalidInput("Wrong persisted wakeup") }
         let deliveryPolicy = try FxDeliveryPolicy(maximumDuration: .seconds(30), reserve: .seconds(1))
         var outcome = try await agent.deliver(wakeup, policy: deliveryPolicy)
         if mode == "recover" {

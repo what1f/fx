@@ -31,7 +31,7 @@ private actor AdmissionQueue: FxSessionQueue {
             let turn = try await session.submit(input, id: "one")
             #expect(!turn.isRepeated)
             #expect(await storage.calls == ["accept"])
-            #expect(await queue.messages == [FxSessionWakeup(agent: "default", sessionID: session.id)])
+            #expect(await queue.messages == [FxSessionWakeup(agent: "default", sessionID: session.id, inputID: "one")])
             let lease = try #require(try await database.claim(session: session.id, agent: "default"))
             let stored = try #require(try await database.input(lease, id: "one"))
             #expect(stored.options == options)

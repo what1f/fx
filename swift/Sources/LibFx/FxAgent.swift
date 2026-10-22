@@ -109,7 +109,7 @@ public actor FxAgent {
             }
             try Task.checkCancellation()
             let repeated = try await store.accept(session: session, agent: name, id: id, content: content, options: options, checkpoint: seed, steering: steering, deferringImageLimits: harness.defersImageLimits)
-            try await schedule(session)
+            try await schedule(session, inputID: id)
             if steering { await synchronizeControls(session) }
             return FxSessionTurn(id: id, sessionID: session, isRepeated: repeated, eventCursor: 0, agent: self)
         } catch FxSessionError.wrongAgent {
@@ -181,7 +181,7 @@ public actor FxAgent {
             return try await owner.resume(session)
         }
         guard let point else { return nil }
-        try await schedule(session)
+        try await schedule(session, inputID: point.id)
         return FxSessionTurn(id: point.id, sessionID: session, isRepeated: false, eventCursor: point.cursor, agent: self)
     }
 
@@ -227,8 +227,8 @@ public actor FxAgent {
             guard let owner = try await routedOwner(session) else { throw FxSessionError.wrongAgent }
             return try await owner.cancel(session, id: id)
         }
-        if let queue, try await store.hasWork(session: session, agent: name) {
-            try await queue.enqueue(FxSessionWakeup(agent: name, sessionID: session))
+        if let queue, let point = try await store.resumePoint(session: session, agent: name) {
+            try await queue.enqueue(FxSessionWakeup(agent: name, sessionID: session, inputID: point.id))
         }
         if id == nil || controlChecks[session]?.inputID == id { await synchronizeControls(session) }
     }
@@ -265,8 +265,8 @@ public actor FxAgent {
         for waiter in checks.waiters { waiter.resume() }
     }
 
-    private func schedule(_ session: String) async throws {
-        if let queue { try await queue.enqueue(FxSessionWakeup(agent: name, sessionID: session)) }
+    private func schedule(_ session: String, inputID: String) async throws {
+        if let queue { try await queue.enqueue(FxSessionWakeup(agent: name, sessionID: session, inputID: inputID)) }
         else { kick(session) }
     }
 
@@ -352,8 +352,6 @@ public actor FxAgent {
                     if yielded { break }
                 }
                 try await leaseGuard?.check()
-                await stopOwnership(lease)
-                try await store.release(lease)
             } catch let failure as OpeningStorageFailure {
                 // Reopen only after ownership is released. Accepted input and its
                 // journal remain authoritative across the next claim.
@@ -364,7 +362,7 @@ public actor FxAgent {
                     throw FxPersistenceError.fenced
                 }
                 await stopOwnership(lease)
-                try await store.release(lease)
+                try await releaseOwnership(lease)
                 guard let policy = openingRetryPolicy, openingRetries < policy.maxRetries,
                       !(failure.cause is CancellationError), policy.shouldRetry(failure.cause) else {
                     throw failure.cause
@@ -385,9 +383,24 @@ public actor FxAgent {
                 try? await store.release(lease)
                 throw failure
             }
+            await stopOwnership(lease)
+            try await releaseOwnership(lease)
             if external {
                 return try await store.hasWork(session: session, agent: name) ? .retry(after: .zero) : .complete
             }
+        }
+    }
+
+    private func releaseOwnership(_ lease: FxSessionLease) async throws {
+        do { try await store.release(lease) }
+        catch {
+            // Retrying release never replays executor effects. Semantic failures
+            // and cancellation cannot be repaired by repeating the same write.
+            guard !(error is CancellationError), !(error is FxPersistenceError),
+                  !(error is FxSessionError), !(error is FxError) else { throw error }
+            await onLifecycleEvent?(.storageFailed(sessionID: lease.sessionID, error: error))
+            try Task.checkCancellation()
+            try await store.release(lease)
         }
     }
 

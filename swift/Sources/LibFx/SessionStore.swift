@@ -217,8 +217,8 @@ public actor FxSessionStore: FxRenewableSessionStorage {
 
     public func release(_ lease: FxSessionLease) throws {
         guard held[lease.sessionID]?.lease == lease else { return }
-        defer { if let descriptor = held.removeValue(forKey: lease.sessionID)?.descriptor { closeDescriptor(descriptor) } }
         try database.execute("UPDATE fx_sessions SET owner=NULL,lease_until=NULL WHERE id=? AND owner=? AND epoch=?", [.text(lease.sessionID), .text(lease.owner), .integer(lease.epoch)])
+        if let descriptor = held.removeValue(forKey: lease.sessionID)?.descriptor { closeDescriptor(descriptor) }
     }
 
     public func checkLease(_ lease: FxSessionLease) throws {

@@ -92,9 +92,11 @@ import Foundation
 let package = Package(
     name: "Consumer", platforms: [.macOS(.v14)],
     dependencies: [.package(name: "LibFx", path: ProcessInfo.processInfo.environment["LIBFX_SWIFT_PACKAGE"]!),
-                   .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.1")],
+                   .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.1"),
+                   .package(url: "https://github.com/apple/swift-http-types.git", from: "1.8.0")],
     targets: [.executableTarget(name: "Consumer", dependencies: [.product(name: "LibFx", package: "LibFx"),
-                   .product(name: "LibFxMCP", package: "LibFx"), .product(name: "MCP", package: "swift-sdk")])]
+                   .product(name: "LibFxMCP", package: "LibFx"), .product(name: "MCP", package: "swift-sdk"),
+                   .product(name: "LibFxHTTP", package: "LibFx"), .product(name: "HTTPTypes", package: "swift-http-types")])]
 )
 SWIFT
 cat > "$task_tmp/Sources/Consumer/Consumer.swift" <<'SWIFT'
@@ -102,6 +104,12 @@ import Foundation
 import LibFx
 import LibFxMCP
 import MCP
+import LibFxHTTP
+import HTTPTypes
+actor WakeQueue: FxSessionQueue {
+    var messages: [FxSessionWakeup] = []
+    func enqueue(_ wakeup: FxSessionWakeup) { messages.append(wakeup) }
+}
 struct ConsumerQueue: FxSessionQueue {
     struct Delivery: Decodable { let id: String; let wakeup: FxSessionWakeup }
     let endpoint: URL
@@ -516,7 +524,7 @@ struct SubscriptionHTTP: FxHTTPClient {
         let queuedSession = try await publisher.session(id: "queue-consumer")
         let queuedTurn = try await queuedSession.prompt("queued consumer", id: "queue-input")
         try await publisher.close()
-        guard let message = try await queue.take(), message.wakeup == FxSessionWakeup(agent: "default", sessionID: queuedSession.id) else {
+        guard let message = try await queue.take(), message.wakeup == FxSessionWakeup(agent: "default", sessionID: queuedSession.id, inputID: "queue-input") else {
             throw FxError.protocolViolation("Missing queued input")
         }
         let queueWorker = try FxAgent(configuration: FxConfiguration(apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()),
@@ -630,7 +638,7 @@ struct SubscriptionHTTP: FxHTTPClient {
             CalculationInput(values: [999]), id: calculation.id)
         guard repeatedCalculation.isRepeated,
               let calculationWakeup = await calculationQueue.take(),
-              calculationWakeup == FxSessionWakeup(agent: "default", sessionID: calculationSession.id),
+              calculationWakeup == FxSessionWakeup(agent: "default", sessionID: calculationSession.id, inputID: calculation.id),
               try await calculationWorker.deliver(calculationWakeup) == .complete else {
             throw FxError.protocolViolation("Typed queue delivery failed")
         }
@@ -695,6 +703,24 @@ struct SubscriptionHTTP: FxHTTPClient {
         try await sender.close()
         try await routedStore.close()
         print("Swift routing consumer passed: canonical executor, typed updates and replay after owner close")
+        let wakeStore = try FxSessionStore(), wakeRouter = FxAgentRouter(store: wakeStore), wakeQueue = WakeQueue()
+        let wakeAgent = try await wakeRouter.makeAgent(harness: ScriptedSessionHarness(), queue: wakeQueue)
+        let wakeSession = try await wakeAgent.session(id: "http-wake-consumer")
+        let wakeTurn = try await wakeSession.prompt("wake", id: "accepted")
+        let wakeHandler = FxHTTPWakeHandler(routes: ["consumer": wakeRouter])
+        let wakeRequest = HTTPRequest(method: .post, scheme: "https", authority: "example.com", path: "/wake")
+        guard let publishedWakeup = await wakeQueue.messages.first else { throw FxPersistenceError.invalidJournal }
+        let wakeBody = try JSONEncoder().encode(FxHTTPWakeRequest(store: "consumer", wakeup: publishedWakeup))
+        let wakeResponse = try await wakeHandler.handle(wakeRequest, body: wakeBody)
+        guard wakeResponse.response.status == .ok, wakeResponse.body.isEmpty,
+              try await wakeTurn.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
+        let forged = try JSONEncoder().encode(FxHTTPWakeRequest(store: "consumer", agent: "default",
+            sessionID: "absent", inputID: "forged"))
+        guard try await wakeHandler.handle(wakeRequest, body: forged).response.status == .ok,
+              try await wakeStore.owner(session: "absent") == nil else { throw FxPersistenceError.invalidJournal }
+        try await wakeAgent.close()
+        try await wakeStore.close()
+        print("Swift HTTP wake consumer passed: public imports, accepted input and unknown-input refusal")
         let leasePolicy = try FxSessionLeasePolicy(duration: .seconds(30), renewalInterval: .seconds(10))
         let timedStore = try FxSessionStore(url: directory.appendingPathComponent("timed.sqlite"), leasePolicy: leasePolicy)
         let openingRetry = try FxOpeningRetryPolicy { ($0 as? URLError)?.code == .networkConnectionLost }
@@ -721,7 +747,7 @@ assert.deepEqual(requests.map(request => request.url), ['/v1/chat/completions', 
 assert.ok(requests.slice(0, 2).every(request => request.auth === 'Bearer consumer-provider-key'));
 console.log('Foundation HTTP consumer and credential redirect isolation passed');
 const queue = JSON.parse(require('node:fs').readFileSync(process.argv[3], 'utf8'));
-assert.deepEqual(queue.published, [{ agent: 'default', sessionID: 'queue-consumer' }]);
+assert.deepEqual(queue.published, [{ agent: 'default', sessionID: 'queue-consumer', inputID: 'queue-input' }]);
 assert.deepEqual(queue.acknowledged, ['1']);
 console.log('Foundation HTTP queue publish, delivery and acknowledgement passed');
 JS

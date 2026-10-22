@@ -42,6 +42,10 @@ func encodeLifecycleEvent(_ event: FxLifecycleEvent) -> JSONValue {
         fields["sessionId"] = .string(sessionID)
         fields["messageId"] = .string(inputID)
         fields["message"] = .string((error as? any LocalizedError)?.errorDescription ?? String(describing: error))
+    case .storageFailed(let sessionID, let error):
+        fields["type"] = .string("session.error")
+        fields["sessionId"] = .string(sessionID)
+        fields["message"] = .string((error as? any LocalizedError)?.errorDescription ?? String(describing: error))
     case .deliveryDeadline(let sessionID, let epoch, let cutoffs):
         fields["type"] = .string("session.deadline")
         fields["sessionId"] = .string(sessionID)
