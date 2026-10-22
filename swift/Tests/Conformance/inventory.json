@@ -221,7 +221,7 @@
       "upstream": "sdk/tests/test-journal.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "partial: isolated native/native probe passes the first four cases; replay-safe read-only admission is blocked by synchronous journal appends; full owner pending"
     },
     {
       "upstream": "sdk/tests/test-libfx-benchmark.mjs",

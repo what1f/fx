@@ -174,7 +174,7 @@ export async function createFxEngine(options = {}) {
       },
     };
   }
-  const exited = new Promise(resolve => child.once('exit', (code, signal) => {
+  const exited = new Promise(resolve => child.once('close', (code, signal) => {
     for (const relay of toolScopes.values()) relay.invalidate();
     toolScopes.clear();
     if (runtimeStarted) {
@@ -188,6 +188,12 @@ export async function createFxEngine(options = {}) {
     for (const queued of followUps.values()) { queued.rejectAccepted(error); queued.rejectTurn(error); }
     resolve({ code, signal });
   }));
+  async function finish() {
+    child.stdin.end();
+    const status = await exited;
+    lines.close();
+    if (status.code !== 0 || stderr) throw new Error(`Swift driver exited: ${status.code ?? status.signal}${stderr ? `\n${stderr}` : ''}`);
+  }
   child.on('error', error => {
     for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
@@ -406,9 +412,7 @@ export async function createFxEngine(options = {}) {
           if (closed) return;
           closed = true;
           signal.removeEventListener('abort', abort);
-          try { await request('close'); } finally { child.stdin.end(); await exited; lines.close(); }
-          const status = await exited;
-          if (status.code !== 0 || stderr) throw new Error(`Swift observation fixture failed: ${status.code ?? status.signal}\n${stderr}`);
+          try { await request('close'); } finally { await finish(); }
         },
       };
     }
@@ -430,11 +434,11 @@ export async function createFxEngine(options = {}) {
     }
     if (options.__inspect) {
       try { return await request('inspectSession', { path: options.sessionStorePath, sessionID: options.sessionID, agentName: options.name }); }
-      finally { child.stdin.end(); await exited; lines.close(); }
+      finally { await finish(); }
     }
     if (options.__listModels) {
       try { return await request('listModels', { apiKey: options.apiKey }); }
-      finally { child.stdin.end(); await exited; lines.close(); }
+      finally { await finish(); }
     }
     const opened = await request(options.__agent ? 'openAgent' : 'open', { options: {
       ...configuration,
@@ -506,8 +510,7 @@ export async function createFxEngine(options = {}) {
         if (closed) return;
         closed = true;
         await Promise.allSettled([...sessionIntakes]);
-        try { await request('close'); } finally { child.stdin.end(); await exited; lines.close(); }
-        if (stderr) throw new Error(stderr);
+        try { await request('close'); } finally { await finish(); }
       },
     };
     resumable = opened.resumable;
@@ -582,8 +585,7 @@ export async function createFxEngine(options = {}) {
       async close() {
         if (closed) return;
         closed = true;
-        try { await request('close'); } finally { child.stdin.end(); await exited; lines.close(); }
-        if (stderr) throw new Error(stderr);
+        try { await request('close'); } finally { await finish(); }
       },
     };
   } catch (error) { child.stdin.end(); await exited; lines.close(); throw error; }

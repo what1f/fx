@@ -8,6 +8,12 @@ The optional `LibFxMCP` product uses the official Swift MCP SDK 0.12.1. Eleven t
 
 All assertions in the upstream `test-mcp-adapter.mjs` pass for native stdio and HTTP text, images, image-only, and image-error modes. Swift owns catalog processing, context composition, result conversion, and request cancellation. JavaScript forwards the fixture client's operations and retains its transport. One explicit shape normalization expands the stdio fixture's nonstandard prompt content array into single-block messages, preserving every block and role. The independent Release consumer imports `LibFxMCP`, uses the official HTTP transport against a local MCP server, reads tools/resources/prompts, calls a tool, and closes the adapter. This is local fixture evidence, not a production MCP service or authentication qualification. The Release consumer also drives a tool through a real Zig engine and the local MCP HTTP server, then checks the owning tool identity and the start/end span pair.
 
+## Conformance driver termination
+
+The test bridge waits for Node's [`close` event](https://nodejs.org/download/release/v25.9.0/docs/api/child_process.html#event-close), after the child and its output streams have closed. Normal engine, durable-agent, helper, inspection and model-list operations require exit code zero and empty stderr. Named SIGKILL recovery helpers still return the intentional termination status to their crash assertions.
+
+`driver-lifecycle.mjs` checks 26 harness cases: clean exit, nonzero exit after the close response, termination by signal, immediate stderr, stderr emitted by a short-lived descendant after the worker exits, and a failed spawn. It checks the complete error message for unexpected output. These cases use a synthetic protocol peer to verify failure detection; they do not qualify SDK functionality. The other conformance checks continue to run actual Swift engines and adapters. Instrumented hooks and MCP checks also pass through this stricter close path.
+
 ## Tool admission and error results
 
 All assertions in upstream `test-tool-contract.mjs` pass through Swift. The bridge converts JavaScript object-keyed tools into typed Swift descriptors and rejects mismatched names and non-Boolean write declarations before spawning a worker. A checked loader adaptation skips the unused WASM asset read for the native backend. A preload that rejects WASM reads fails the original fixture and passes the adapted native fixture. The bridge preserves the host error message without supplying the SDK's fallback text. Swift provides nonempty text for empty thrown or returned errors, includes the tool name, and respects `LocalizedError.errorDescription`.
@@ -158,7 +164,7 @@ Additional executable checks passed:
 - `handoff.mjs`: Swift and JavaScript in both source and target roles; the source makes no later journal writes or automatic snapshots, the target receives the pending steer and skips the ambiguous write, and the source's turn-end observation marks the handoff.
 - `follow-up.mjs`: reference JavaScript and Swift automatic queues, durable acceptance and exactly one placement per input, plus recovery in both source and target roles; held inputs wait for explicit resume while current inputs run independently.
 
-`node swift/Tests/Conformance/run.mjs` passed all 61 selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
+`node swift/Tests/Conformance/run.mjs` passed all 62 checks, including selected upstream/interoperability scenarios and the separate driver-termination gate. It records results under `.build/conformance-results.json`. It does not run every inventory entry.
 
 `swift test --package-path swift --sanitize=thread` passed all 185 Swift tests without a sanitizer warning. The first focused run reported concurrent access to the native handle during shutdown. The transport now waits for the [Dispatch source's cancellation handler](https://developer.apple.com/documentation/dispatch/dispatch_source_set_cancel_handler) and destroys the handle on its actor. This check instruments Swift code; the precompiled Zig archive is not instrumented. The Swift CI workflow repeats the check after conformance testing.
 
@@ -169,6 +175,10 @@ The session byte decoder now looks up Base64 fields by name. Swift JSON encoding
 After this decoder change, `zig build test` passed. The original Node checkpoint and journal suites also passed for native to native, native to Wasm, and Wasm to native using newly built artifacts and Node's JSPI flag. These local Node 25 runs do not replace Node 24 CI.
 
 `zig build`, the freshly built CLI's help command, Zig formatting checks for the changed files, and the public-surface audit passed. The help command proves startup only; it is not real-model agent evidence. See [C bridge validation](BRIDGE-VALIDATION.md) for the C consumer and original Node backend regression checks.
+
+## Journal admission probe
+
+An isolated native/native run of the complete upstream journal file retains its assertions and uses the Swift driver, host byte-storage fixtures and JavaScript error-class identities. It supplies only those fixture exports and omits unused WASM loading. The first four cases pass. The next case fails because a replay-safe read-only tool starts after its intent has landed, while the upstream assertion expects it to start before that non-barrier append completes. The current RPC reader awaits every append and the tool task also waits for the writer tail. The full journal owner remains unqualified. Async non-barrier append admission, ordered writes, error propagation and close ownership must be verified together before this gap is closed.
 
 ## Required remaining gates
 

@@ -88,6 +88,8 @@ A generated inventory records every upstream SDK test file. Each test must be cl
 
 Run the unchanged Node backend tests after shared-runtime changes. Run the reusable upstream scenarios through both backends against the same scripted HTTP services. Compare semantic events and provider requests after normalizing random identifiers and timestamps. Preserve causal ordering without imposing a total order on concurrent tools.
 
+The JavaScript test bridge must wait for process and output-stream closure and reject nonzero exits, unexpected signals and stderr on normal operations. Synthetic driver fault injection verifies this gate separately from SDK behavior; intentional crash tests retain their explicit termination assertions.
+
 Add Swift-native tests for C buffer ownership, repeated close, object destruction, concurrent cancellation, malformed frames, and resource cleanup. Use Address Sanitizer and Thread Sanitizer in supported builds. Force process exit at tool and journal boundaries; check safe recovery and uncertain write handling.
 
 Run real-model smoke tests only with available credentials. Report unavailable credentials as an unverified gate. Build and run a clean Swift Package consumer using the packaged artifacts. Follow repository CI and runtime qualification before declaring the SDK complete.
