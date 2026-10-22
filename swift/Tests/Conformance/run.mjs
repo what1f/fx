@@ -18,8 +18,8 @@ const checks = [
   { name: 'upstream/test-skills-adapter-disk', args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-skills-adapter.mjs', 'disk', 'native',
   ] },
-  ...['test-host-tools', 'test-tool-contract', 'test-agent-step-limit', 'test-host-tool-cancel', 'test-agent-steering', 'test-list-models', 'test-agent-effort', 'test-agent-fast', 'test-agent-provider-tools', 'test-agent-ultrafast-options', 'test-agent-request-context', 'test-agent-bootstrap', 'test-agent-transport-retry', 'test-agent-tool-start', 'test-agent-reserved-tool-names'].map(name => ({
-    name: `upstream/${name}`, args: ['--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', `sdk/tests/${name}.mjs`, 'native'],
+  ...['test-journal', 'test-host-tools', 'test-tool-contract', 'test-agent-step-limit', 'test-host-tool-cancel', 'test-agent-steering', 'test-list-models', 'test-agent-effort', 'test-agent-fast', 'test-agent-provider-tools', 'test-agent-ultrafast-options', 'test-agent-request-context', 'test-agent-bootstrap', 'test-agent-transport-retry', 'test-agent-tool-start', 'test-agent-reserved-tool-names'].map(name => ({
+    name: `upstream/${name}`, args: ['--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', `sdk/tests/${name}.mjs`, 'native', ...(name === 'test-journal' ? ['native'] : [])],
   })),
   { name: 'upstream/test-agent-steering-hooks', args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-agent-steering.mjs', 'native', '--hooks',
@@ -53,8 +53,7 @@ const checks = [
   ].map(([kind, test]) => ({ name: `upstream/test-durable-delivery-${kind}`, expected: '1/1 durable tests passed', env: { LIBFX_TEST_ONLY: test }, args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable.mjs', 'memory', 'native',
   ] })),
-  ...['recovery', 'continuation', 'failures', 'inputs', 'versions', 'cancellation', 'image-recovery'].map(group => ({ name: `journal-${group}`, args: ['swift/Tests/Conformance/journal-admission.mjs', group] })),
-  ...['persistence-errors', 'journal-admission', 'driver-lifecycle', 'smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'input-observation', 'tool-observation', 'mcp-observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing', 'turn-identity', 'handoff', 'follow-up', 'custom-provider', 'provider-suites', 'agent-crash', 'session-checkpoint', 'session-steering-crash'].map(name => ({
+  ...['persistence-errors', 'driver-lifecycle', 'smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'input-observation', 'tool-observation', 'mcp-observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing', 'turn-identity', 'handoff', 'follow-up', 'custom-provider', 'provider-suites', 'agent-crash', 'session-checkpoint', 'session-steering-crash'].map(name => ({
     name, args: [`swift/Tests/Conformance/${name}.mjs`],
   })),
 ];

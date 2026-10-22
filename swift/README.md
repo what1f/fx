@@ -250,6 +250,12 @@ let store = try FxSQLitePersistence(url: databaseURL)
 
 Choose a file URL in your application's storage directory. `FxMemoryPersistence` provides an in-memory reference implementation for tests; it does not survive process exit.
 
+`FxSQLitePersistence` and durable session storage keep image bytes separately, using their SHA-256 names in journal records and snapshots. Repeated images share the same stored bytes within a conversation. A custom store can adopt `FxImagePersistence` to provide the same behavior. Stores that implement only `FxPersistence` or `FxCheckpointPersistence` continue to save images inline.
+
+Set `configuration.imageWindow = try FxImageWindow(maximumImages: 100, maximumBytes: 20 * 1024 * 1024)` to restrict retained conversation images. This requires image persistence. The core removes older images from the conversation and leaves a note in their place; it does not delete stored blobs. Restoring loads the images still required by the saved conversation. A missing blob throws `FxPersistenceError.missingImage` with its name. Custom image reads and writes must cooperate with task cancellation.
+
+A failed prompt-image write rejects the turn before sending it to the model. If storage rejects an image returned by a tool, that image remains inline so the completed tool result is preserved.
+
 ```swift
 let engine = try await FxEngine.open(configuration: configuration, persistence: store)
 if let recovery = await engine.recoveryState {

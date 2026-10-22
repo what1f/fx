@@ -84,7 +84,7 @@ public actor FxAgent {
         config.observation = nil
         config.onLifecycleEvent = nil
         let temporary = try await FxEngine.open(configuration: config, sessionID: session,
-                                                 persistence: ReadOnlySessionPersistence(snapshot: snapshot))
+                                                 persistence: ReadOnlySessionPersistence(snapshot: snapshot, store: store, session: session, agent: name))
         do {
             let data = try await temporary.checkpoint()
             try await temporary.close()

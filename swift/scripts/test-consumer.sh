@@ -98,6 +98,16 @@ struct MockHTTP: FxHTTPClient {
         })
     }
 }
+struct ImageHTTP: FxHTTPClient {
+    let base64: String
+    func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        guard request.httpMethod == "POST", let body = request.httpBody,
+              String(decoding: body, as: UTF8.self).contains(base64) else {
+            throw FxError.protocolViolation("Missing consumer image")
+        }
+        return try await MockHTTP().send(request)
+    }
+}
 struct ProviderSearchHTTP: FxHTTPClient {
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         if request.httpMethod == "GET" {
@@ -214,6 +224,25 @@ struct SubscriptionHTTP: FxHTTPClient {
         }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
+        let imageURL = directory.appendingPathComponent("images.sqlite")
+        let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jP0cAAAAASUVORK5CYII=")!
+        var imageConfig = FxConfiguration(apiKey: "consumer-test-key", model: "swift/consumer",
+            httpClient: ImageHTTP(base64: png.base64EncodedString()), checkpointAfterBytes: 0)
+        imageConfig.modelCatalog = try FxModelCatalog(response: Data(#"{"data":[{"id":"swift/consumer","type":"language","tags":["vision","file-input"]}]}"#.utf8))
+        imageConfig.imageWindow = try FxImageWindow(maximumImages: 2)
+        let imageStore = try FxSQLitePersistence(url: imageURL)
+        let imagePersistence: any FxImagePersistence = imageStore
+        let imageEngine = try await FxEngine.open(configuration: imageConfig, persistence: imagePersistence)
+        let picture = try await imageEngine.prompt([.image(FxImage(data: png, format: .png))])
+        guard try await picture.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
+        try await imageEngine.close()
+        try await imageStore.close()
+        let reopenedImages = try FxSQLitePersistence(url: imageURL)
+        let recalled = try await FxEngine.open(configuration: imageConfig, persistence: reopenedImages)
+        let recalledTurn = try await recalled.prompt("recall the image")
+        guard try await recalledTurn.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
+        try await recalled.close()
+        try await reopenedImages.close()
         let store = try FxSQLitePersistence(url: directory.appendingPathComponent("conversation.sqlite"))
         let transportEvents = TransportEvents()
         let lifecycleEvents = LifecycleEvents()

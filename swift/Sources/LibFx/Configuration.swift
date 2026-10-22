@@ -6,6 +6,8 @@ public struct FxConfiguration: Sendable {
     public var model: FxModel
     /// A supplied Gateway catalog replaces its model-list request.
     public var modelCatalog: FxModelCatalog?
+    /// A smaller image window requires an FxImagePersistence store.
+    public var imageWindow: FxImageWindow?
     public var instructions: String
     public var tools: [FxTool]
     public var providerTools: [FxProviderTool]
@@ -52,6 +54,7 @@ public struct FxConfiguration: Sendable {
         self.provider = provider
         self.model = model
         self.modelCatalog = nil
+        self.imageWindow = nil
         self.instructions = instructions
         self.tools = tools
         self.providerTools = providerTools

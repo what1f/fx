@@ -33,12 +33,20 @@ public protocol FxCheckpointPersistence: FxPersistence {
     func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) async throws
 }
 
+/// Stores image bytes separately from journal records. Methods must cooperate with cancellation.
+public protocol FxImagePersistence: FxPersistence {
+    /// A name is the lowercase SHA-256 of the bytes. Repeated identical writes must succeed.
+    func storeImage(_ data: Data, named name: String) async throws
+    func loadImage(named name: String) async throws -> Data?
+}
+
 public enum FxPersistenceError: Error, Sendable, Equatable {
     case fenced
     case invalidJournal
     case unsupportedVersion
     case sizeLimit
     case invalidCursor
+    case missingImage(String)
 }
 
 /// An in-memory store for tests and conversations that do not survive process exit.

@@ -228,6 +228,12 @@ export async function createFxEngine(options = {}) {
       return { error: failure.wrapped };
     }
     const message = value.message ?? value.failed;
+    if (message === 'Invalid session ID') {
+      return { error: new TypeError("sessionId must be 1 to 255 letters, digits, '.', '_' or '-'") };
+    }
+    if (value.persistenceError === 'missingImage') {
+      return { error: Object.assign(new Error(`libfx image store does not hold image ${value.imageName}`), { code: 'FX_JOURNAL_IMAGE_MISSING', image: value.imageName }) };
+    }
     if (value.persistenceError === 'unsupportedVersion' || message === 'libfx journal was written by a newer fx' ||
         message === 'libfx checkpoint was written by a newer fx') {
       return { error: new FxJournalVersionError(message ?? 'libfx journal was written by a newer fx') };
@@ -383,6 +389,12 @@ export async function createFxEngine(options = {}) {
           } else if (call.kind === 'saveCheckpoint') {
             await options.persistence.saveCheckpoint({ through: call.through, data: new Uint8Array(Buffer.from(call.data, 'base64')) });
             result = null;
+          } else if (call.kind === 'putImage') {
+            await options.persistence[Symbol.for('libfx.persistenceImages')].put(call.name, new Uint8Array(Buffer.from(call.data, 'base64')));
+            result = null;
+          } else if (call.kind === 'getImage') {
+            const bytes = await options.persistence[Symbol.for('libfx.persistenceImages')].get(call.name);
+            result = bytes == null ? null : Buffer.from(bytes).toString('base64');
           } else {
             const { id, kind, ...input } = call;
             result = await options.persistence.append({ ...input, data: new Uint8Array(Buffer.from(input.data, 'base64')) });
@@ -402,7 +414,8 @@ export async function createFxEngine(options = {}) {
             cause = cause.cause;
           }
           let description;
-          try { description = String(error); } catch { description = 'Host persistence operation failed'; }
+          try { description = error instanceof Error ? error.message : String(error); }
+          catch { description = 'Host persistence operation failed'; }
           await request('persistenceResult', { persistenceID: call.id, error: description, code }).catch(() => {});
         }
       })();
@@ -447,7 +460,8 @@ export async function createFxEngine(options = {}) {
       const owner = [...turnStates.values()].find(state => state.public.id === call.turnId);
       if (owner?.signal?.aborted) return;
       Promise.resolve().then(() => tools.get(call.name).execute(call.input, {
-        signal: controller.signal, executionId: call.executionId, sessionId: call.sessionId, context: call.context,
+        signal: controller.signal, executionId: call.executionId, sessionId: call.sessionId,
+        ...(call.context == null ? {} : { context: call.context }),
         ...(call.observation && options.hooks ? { observation: inputObservation(call) } : {}),
       })).then(result => controller.signal.aborted ? undefined : request('toolResult', { toolID: call.id,
         ...(result?.type === 'libfx.tool-result' ? { rich: result } : {
@@ -508,6 +522,7 @@ export async function createFxEngine(options = {}) {
     }
     const opened = await request(options.__agent ? 'openAgent' : 'open', { options: {
       ...configuration,
+      sessionId: options.sessionId,
       model: swiftModel(options),
       ...(options.hooks ? { hooks: options.hooks } : {}),
       hasCredentials: typeof options.credentials === 'function',
@@ -517,6 +532,8 @@ export async function createFxEngine(options = {}) {
       hasOnCredentials: typeof options.onCredentials === 'function',
       hasRuntimeFactory: Boolean(runtimeFactory),
       hasPersistence: Boolean(persistence),
+      hasImagePersistence: Boolean(persistence?.[Symbol.for('libfx.persistenceImages')]),
+      ...(persistence?.[Symbol.for('libfx.persistenceImages')] && options[Symbol.for('libfx.imageWindow')] ? { imageWindow: options[Symbol.for('libfx.imageWindow')] } : {}),
       hasCheckpointPersistence: typeof persistence?.saveCheckpoint === 'function',
       ...(checkpoint ? { checkpoint: Buffer.from(checkpoint).toString('base64') } : {}),
       tools: (options.tools || []).map(({ execute, ...descriptor }) => descriptor),

@@ -42,6 +42,7 @@ public actor FxSessionStore {
             try database.execute("CREATE TABLE IF NOT EXISTS fx_session_events (cursor INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, epoch INTEGER NOT NULL, data BLOB NOT NULL)")
             try database.execute("CREATE INDEX IF NOT EXISTS fx_session_events_read ON fx_session_events(session,cursor)")
             try database.execute("CREATE TABLE IF NOT EXISTS fx_session_records (session TEXT NOT NULL, cursor INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY(session,cursor))")
+            try database.execute("CREATE TABLE IF NOT EXISTS fx_session_images (session TEXT NOT NULL, name TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY(session,name))")
             try database.execute("CREATE TABLE IF NOT EXISTS fx_session_writes (session TEXT NOT NULL, key TEXT NOT NULL, cursor INTEGER NOT NULL, digest BLOB NOT NULL, PRIMARY KEY(session,key))")
             if version == 1 {
                 try database.execute("ALTER TABLE fx_inputs ADD COLUMN kind TEXT NOT NULL DEFAULT 'prompt'")
@@ -304,6 +305,38 @@ public actor FxSessionStore {
         try database.transaction(mode: "DEFERRED") {
             try checkAgent(session, agent: agent)
             return try readJournal(session)
+        }
+    }
+
+    func storeImage(_ data: Data, named name: String, lease: SessionLease) throws {
+        try Task.checkCancellation()
+        guard PersistedImages.name(for: data) == name else { throw FxError.invalidInput("Image name does not match its bytes") }
+        try database.transaction {
+            try checkLease(lease)
+            try database.execute("INSERT OR IGNORE INTO fx_session_images (session,name,data) VALUES (?,?,?)",
+                                 [.text(lease.sessionID), .text(name), .blob(data)])
+        }
+    }
+
+    func loadImage(named name: String, session: String, agent: String) throws -> Data? {
+        try Task.checkCancellation()
+        return try database.transaction(mode: "DEFERRED") {
+            try checkAgent(session, agent: agent)
+            return try readImage(named: name, session: session)
+        }
+    }
+
+    func loadImage(named name: String, lease: SessionLease) throws -> Data? {
+        try Task.checkCancellation()
+        return try database.transaction(mode: "DEFERRED") {
+            try checkLease(lease)
+            return try readImage(named: name, session: lease.sessionID)
+        }
+    }
+
+    private func readImage(named name: String, session: String) throws -> Data? {
+        try database.statement("SELECT data FROM fx_session_images WHERE session=? AND name=?", [.text(session), .text(name)]) { statement in
+            try database.step(statement) ? database.bytes(statement, column: 0) : nil
         }
     }
 

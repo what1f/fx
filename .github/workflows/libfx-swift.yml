@@ -62,6 +62,11 @@ jobs:
           node swift/Tests/Conformance/journal-admission.mjs versions
           node swift/Tests/Conformance/journal-admission.mjs cancellation
           node swift/Tests/Conformance/journal-admission.mjs image-recovery
+          node swift/Tests/Conformance/journal-admission.mjs image-storage
+          node swift/Tests/Conformance/journal-admission.mjs image-limits
+          node swift/Tests/Conformance/journal-admission.mjs tool-images
+          node swift/Tests/Conformance/journal-admission.mjs checkpoints
+          node swift/Tests/Conformance/journal-admission.mjs turn-identity
           node swift/Tests/Conformance/persistence-errors.mjs
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-tool-contract.mjs native
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native
@@ -83,6 +88,11 @@ jobs:
           node swift/Tests/Conformance/journal-admission.mjs versions
           node swift/Tests/Conformance/journal-admission.mjs cancellation
           node swift/Tests/Conformance/journal-admission.mjs image-recovery
+          node swift/Tests/Conformance/journal-admission.mjs image-storage
+          node swift/Tests/Conformance/journal-admission.mjs image-limits
+          node swift/Tests/Conformance/journal-admission.mjs tool-images
+          node swift/Tests/Conformance/journal-admission.mjs checkpoints
+          node swift/Tests/Conformance/journal-admission.mjs turn-identity
           node swift/Tests/Conformance/persistence-errors.mjs
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-tool-contract.mjs native
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native

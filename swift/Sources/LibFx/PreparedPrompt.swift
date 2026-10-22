@@ -1,6 +1,6 @@
 import Foundation
 
-struct PreparedPrompt {
+struct PreparedPrompt: Sendable {
     let blocks: [JSONValue]
     let images: [Data]
 

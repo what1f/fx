@@ -19,7 +19,7 @@ public enum FxSQLiteError: Error, Sendable, Equatable, LocalizedError {
 }
 
 /// A local store for one conversation. Separate instances coordinate through SQLite transactions.
-public actor FxSQLitePersistence: FxCheckpointPersistence {
+public actor FxSQLitePersistence: FxCheckpointPersistence, FxImagePersistence {
     private let database: SQLiteDatabase
 
     public init(url: URL) throws {
@@ -45,6 +45,7 @@ public actor FxSQLitePersistence: FxCheckpointPersistence {
             }
             guard version == 1 else { throw FxSQLiteError.unsupportedVersion(version) }
             try database.execute("CREATE TABLE IF NOT EXISTS fx_records (cursor INTEGER PRIMARY KEY, data BLOB NOT NULL)")
+            try database.execute("CREATE TABLE IF NOT EXISTS fx_images (name TEXT PRIMARY KEY, data BLOB NOT NULL)")
             try database.execute("CREATE TABLE IF NOT EXISTS fx_writes (key TEXT PRIMARY KEY, cursor INTEGER NOT NULL, digest BLOB NOT NULL)")
         }
         self.database = database
@@ -99,6 +100,19 @@ public actor FxSQLitePersistence: FxCheckpointPersistence {
             // Updating the snapshot and pruning its prefix share one commit.
             try database.execute("UPDATE fx_state SET checkpoint_cursor=?, checkpoint=? WHERE id=1", [.integer(through), .blob(checkpoint.data)])
             try database.execute("DELETE FROM fx_records WHERE cursor<=?", [.integer(through)])
+        }
+    }
+
+    public func storeImage(_ data: Data, named name: String) throws {
+        try Task.checkCancellation()
+        guard PersistedImages.name(for: data) == name else { throw FxError.invalidInput("Image name does not match its bytes") }
+        try database.execute("INSERT OR IGNORE INTO fx_images (name,data) VALUES (?,?)", [.text(name), .blob(data)])
+    }
+
+    public func loadImage(named name: String) throws -> Data? {
+        try Task.checkCancellation()
+        return try database.statement("SELECT data FROM fx_images WHERE name=?", [.text(name)]) { statement in
+            try database.step(statement) ? database.bytes(statement, column: 0) : nil
         }
     }
 

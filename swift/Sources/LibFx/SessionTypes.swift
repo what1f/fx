@@ -66,7 +66,7 @@ struct SessionLease: Sendable, Equatable {
     let epoch: Int64
 }
 
-struct SessionPersistence: FxCheckpointPersistence {
+struct SessionPersistence: FxCheckpointPersistence, FxImagePersistence {
     let store: FxSessionStore
     let lease: SessionLease
     func load() async throws -> FxPersistenceSnapshot { try await store.loadJournal(lease) }
@@ -74,13 +74,24 @@ struct SessionPersistence: FxCheckpointPersistence {
         try await store.appendJournal(lease, expected: expected, key: idempotencyKey, data: data)
     }
     func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) async throws { try await store.saveJournalCheckpoint(lease, checkpoint) }
+    func storeImage(_ data: Data, named name: String) async throws { try await store.storeImage(data, named: name, lease: lease) }
+    func loadImage(named name: String) async throws -> Data? {
+        try await store.loadImage(named: name, lease: lease)
+    }
 }
 
-struct ReadOnlySessionPersistence: FxPersistence {
+struct ReadOnlySessionPersistence: FxImagePersistence {
     let snapshot: FxPersistenceSnapshot
+    let store: FxSessionStore
+    let session: String
+    let agent: String
     func load() async throws -> FxPersistenceSnapshot { snapshot }
     func append(expected: String?, idempotencyKey: String, data: Data, barrier: Bool) async throws -> String {
         throw FxPersistenceError.fenced
+    }
+    func storeImage(_ data: Data, named name: String) async throws { throw FxPersistenceError.fenced }
+    func loadImage(named name: String) async throws -> Data? {
+        try await store.loadImage(named: name, session: session, agent: agent)
     }
 }
 

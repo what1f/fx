@@ -58,11 +58,11 @@ public struct FxToolResult: Sendable, Equatable, ExpressibleByStringLiteral {
 
     public init(stringLiteral value: String) { self.init(text: value) }
 
-    func response(toolName: String) throws -> JSONValue {
+    func response(toolName: String, storedImages: [Int: String] = [:]) throws -> JSONValue {
         guard images.count <= 8 else { throw FxError.invalidInput("A tool result accepts at most 8 images") }
         var content = text
         if !images.isEmpty {
-            let encoded = try images.map { image -> JSONValue in
+            let encoded = try images.enumerated().map { index, image -> JSONValue in
                 try image.validate()
                 var fields = image.fields
                 if let data = image.data {
@@ -70,6 +70,7 @@ public struct FxToolResult: Sendable, Equatable, ExpressibleByStringLiteral {
                         throw FxError.invalidInput("Tool image exceeds the size limit")
                     }
                     fields["data"] = .string(data.base64EncodedString())
+                    if let name = storedImages[index] { fields["stored"] = .string(name) }
                 }
                 return .object(fields)
             }

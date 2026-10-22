@@ -8,6 +8,7 @@ public actor FxEngine {
     private let tools: [String: FxTool]
     private let permissions: PermissionRequests
     private let journal: JournalWriter?
+    private let imagePersistence: (any FxImagePersistence)?
     private let observation: FxObservationOptions?
     private let onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)?
     private let checkpointAfterBytes: Int?
@@ -30,13 +31,14 @@ public actor FxEngine {
     private var cancelling = false
     private var turnCancelled = false
     private var promptDispatch: PromptDispatch?
+    private var imagePreparation: Task<[JSONValue], any Error>?
     private var checkpointing = false
     private var checkpointSaveTask: Task<Void, any Error>?
     private var closingTask: Task<Void, any Error>?
 
     private init(
         sessionID: String, rpc: RPCClient, transport: any EngineTransport,
-        tools: [String: FxTool], journal: JournalWriter?, observation: FxObservationOptions?, checkpointAfterBytes: Int?, checkpointMetadata: CheckpointMetadata, onPermission: PermissionRequests.Handler?, onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)?
+        tools: [String: FxTool], journal: JournalWriter?, imagePersistence: (any FxImagePersistence)?, observation: FxObservationOptions?, checkpointAfterBytes: Int?, checkpointMetadata: CheckpointMetadata, onPermission: PermissionRequests.Handler?, onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)?
     ) {
         self.sessionID = sessionID
         self.rpc = rpc
@@ -53,6 +55,7 @@ public actor FxEngine {
         } else { permissionHandler = nil }
         self.permissions = PermissionRequests(sessionID: sessionID, rpc: rpc, handler: permissionHandler)
         self.journal = journal
+        self.imagePersistence = imagePersistence
         self.observation = observation
         self.onLifecycleEvent = onLifecycleEvent
         self.checkpointAfterBytes = checkpointAfterBytes
@@ -84,6 +87,9 @@ public actor FxEngine {
         }
         if let bytes = configuration.checkpointAfterBytes, bytes < 0 {
             throw FxError.invalidInput("Checkpoint interval must not be negative")
+        }
+        if configuration.imageWindow != nil && !(persistence is any FxImagePersistence) {
+            throw FxError.invalidInput("An image window requires image persistence")
         }
         if case .gateway(let key) = configuration.provider,
            key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -153,7 +159,7 @@ public actor FxEngine {
                 throw FxError.protocolViolation("Runtime does not support observation")
             }
             let journal = persistence.map { JournalWriter(store: $0, head: loaded?.head, lastSequence: loaded?.lastSequence ?? 0, tailBytes: loaded?.tailBytes ?? 0) }
-            let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes, checkpointMetadata: checkpointMetadata, onPermission: configuration.onPermission, onLifecycleEvent: configuration.onLifecycleEvent)
+            let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, imagePersistence: persistence as? any FxImagePersistence, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes, checkpointMetadata: checkpointMetadata, onPermission: configuration.onPermission, onLifecycleEvent: configuration.onLifecycleEvent)
             await journal?.setHandler { [weak engine] result in await engine?.journalSettled(result) }
             await rpc.setHandler { [weak engine] message in await engine?.handle(message) }
             if let checkpoint {
@@ -164,18 +170,44 @@ public actor FxEngine {
                 checkpointMetadata.compare(restored["checkpointMeta"], sessionID: id, observation: configuration.observation, onLifecycleEvent: configuration.onLifecycleEvent)
             }
             if let loaded {
-                var params: [String: JSONValue] = ["sessionId": .string(id)]
-                var attachment: UInt32 = 1
-                if !loaded.events.isEmpty {
-                    try await transport.putAttachment(JSONEncoder().encode(JSONValue.array(loaded.events)), id: attachment)
-                    params["journalAttachment"] = .number(Double(attachment))
-                    attachment += 1
+                let imageStore = persistence as? any FxImagePersistence
+                func openJournal() async throws -> JSONValue {
+                    var params: [String: JSONValue] = ["sessionId": .string(id)]
+                    if imageStore != nil { params["imageStore"] = .bool(true) }
+                    if let window = configuration.imageWindow { params["imageWindow"] = window.value }
+                    var attachment: UInt32 = 1
+                    if !loaded.events.isEmpty {
+                        try await transport.putAttachment(JSONEncoder().encode(JSONValue.array(loaded.events)), id: attachment)
+                        params["journalAttachment"] = .number(Double(attachment))
+                        attachment += 1
+                    }
+                    if let checkpoint = loaded.checkpoint {
+                        try await transport.putAttachment(checkpoint, id: attachment)
+                        params["snapshotAttachment"] = .number(Double(attachment))
+                    }
+                    return try await rpc.request("libfx/journal_open", .object(params))
                 }
-                if let checkpoint = loaded.checkpoint {
-                    try await transport.putAttachment(checkpoint, id: attachment)
-                    params["snapshotAttachment"] = .number(Double(attachment))
+                var opened = try await openJournal()
+                if case .array(let needed) = opened["imagesNeeded"] {
+                    var staged: Set<String> = []
+                    for image in needed {
+                        try Task.checkCancellation()
+                        guard let name = image.string else { throw FxError.protocolViolation("Invalid required image name") }
+                        guard staged.insert(name).inserted else { continue }
+                        guard let imageStore, let bytes = try await imageStore.loadImage(named: name) else {
+                            throw FxPersistenceError.missingImage(name)
+                        }
+                        try Task.checkCancellation()
+                        try await transport.putAttachment(bytes, id: 1)
+                        _ = try await rpc.request("libfx/journal_images", .object([
+                            "sessionId": .string(id), "images": .array([.object(["name": .string(name), "attachment": .number(1)])]),
+                        ]))
+                    }
+                    opened = try await openJournal()
+                    if case .array(let missing) = opened["imagesNeeded"] {
+                        throw FxPersistenceError.missingImage(missing.first?.string ?? "")
+                    }
                 }
-                let opened = try await rpc.request("libfx/journal_open", .object(params))
                 checkpointMetadata.compare(opened["checkpointMeta"], sessionID: id, observation: configuration.observation, onLifecycleEvent: configuration.onLifecycleEvent)
                 await engine.setRecovery(opened)
                 configuration.onLifecycleEvent?(.journalOpened(FxJournalRestoration(
@@ -359,7 +391,7 @@ public actor FxEngine {
             metadata["inputAccepted"] = .bool(followUp.acceptedInCore)
         }
         let prepared = try PreparedPrompt(content, allowEmpty: resuming)
-        let blocks = prepared.blocks, images = prepared.images
+        let images = prepared.images
         let id = UUID()
         turnID = id
         publicTurnID = publicID
@@ -385,6 +417,14 @@ public actor FxEngine {
         let task = Task {
             do {
                 await transport.beginTurn()
+                guard !closed else { throw FxError.closed }
+                var blocks = prepared.blocks
+                if !images.isEmpty, let imagePersistence, !turnCancelled {
+                    let preparation = Task { try await PersistedImages.prompt(prepared, store: imagePersistence) }
+                    imagePreparation = preparation
+                    blocks = try await preparation.value
+                    if turnID == id { imagePreparation = nil }
+                }
                 for (index, bytes) in images.enumerated() {
                     try await transport.putAttachment(bytes, id: UInt32(index + 1))
                 }
@@ -427,6 +467,10 @@ public actor FxEngine {
             } catch {
                 await dispatch.resolve(sent: false)
                 await transport.discardAttachments()
+                if turnID == id, turnCancelled, !closed, error is CancellationError {
+                    self.finish(turn: id)
+                    return FxTurnResult(stopReason: .cancelled, usage: FxUsage(nil))
+                }
                 if turnID == id, turnCancelled, !closed,
                    case FxError.rpc(_, "Cancelled", _) = error {
                     do { try await journal?.check() }
@@ -537,7 +581,7 @@ public actor FxEngine {
                     guard let tool else { throw FxError.invalidInput("Unknown tool") }
                     let value = try await tool.execute(params["input"] ?? .null, context)
                     try Task.checkCancellation()
-                    response = try value.response(toolName: name)
+                    response = try await PersistedImages.tool(value, name: name, store: self.imagePersistence)
                 } catch {
                     let message = (error as? any LocalizedError)?.errorDescription ?? String(describing: error)
                     response = .object(["content": .string(message.isEmpty ? "Tool \(name) failed without a message" : message), "isError": .bool(true)])
@@ -622,6 +666,7 @@ public actor FxEngine {
     private func cancel(turn id: UUID) async {
         guard isActive(id), !cancelling else { return }
         turnCancelled = true
+        imagePreparation?.cancel()
         cancelling = true
         defer { cancelling = false; startNextFollowUp() }
         for task in toolTasks.values { task.cancel() }
@@ -677,6 +722,8 @@ public actor FxEngine {
 
     private func finish(turn id: UUID, error: (any Error)? = nil) {
         guard turnID == id else { return }
+        imagePreparation?.cancel()
+        imagePreparation = nil
         for task in toolTasks.values { task.cancel() }
         toolTasks.removeAll()
         invalidateToolObservations()
@@ -754,11 +801,13 @@ public actor FxEngine {
     public func close() async throws {
         if let closingTask { try await closingTask.value; return }
         closed = true
+        let preparation = imagePreparation
         failFollowUps(FxError.closed)
         if let turnID { finish(turn: turnID, error: FxError.closed) }
         let checkpointSave = checkpointSaveTask
         let task = Task {
             let saved = await checkpointSave?.result
+            _ = await preparation?.result
             await permissions.cancelAll()
             await rpc.close()
             try await journal?.check()

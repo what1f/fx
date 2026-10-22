@@ -33,6 +33,21 @@ private struct RelayedCheckpointStore: FxCheckpointPersistence {
     func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) async throws { try await driver.saveCheckpoint(checkpoint) }
 }
 
+private struct RelayedImageStore<Store: FxPersistence>: FxImagePersistence {
+    let base: Store
+    let driver: Driver
+    func load() async throws -> FxPersistenceSnapshot { try await base.load() }
+    func append(expected: String?, idempotencyKey: String, data: Data, barrier: Bool) async throws -> String {
+        try await base.append(expected: expected, idempotencyKey: idempotencyKey, data: data, barrier: barrier)
+    }
+    func storeImage(_ data: Data, named name: String) async throws { try await driver.storeImage(data, named: name) }
+    func loadImage(named name: String) async throws -> Data? { try await driver.loadImage(named: name) }
+}
+
+extension RelayedImageStore: FxCheckpointPersistence where Store: FxCheckpointPersistence {
+    func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) async throws { try await base.saveCheckpoint(checkpoint) }
+}
+
 /// Test-only protocol adapter. Engine behavior stays in LibFx.
 actor Driver: FxHTTPClient, FxPersistence {
     private var fixtureTransport: FixtureTransport?
@@ -107,6 +122,9 @@ actor Driver: FxHTTPClient, FxPersistence {
             return ["persistenceFailureID": .number(Double(relayed.id))]
         }
         if let persistence = error as? FxPersistenceError {
+            if case .missingImage(let name) = persistence {
+                return ["persistenceError": .string("missingImage"), "imageName": .string(name)]
+            }
             return ["persistenceError": .string(String(describing: persistence))]
         }
         return [:]
@@ -259,6 +277,9 @@ actor Driver: FxHTTPClient, FxPersistence {
                 let response = catalog["data"] == nil ? JSONValue.object(["data": catalog]) : catalog
                 config.modelCatalog = try FxModelCatalog(response: JSONEncoder().encode(response))
             }
+            if let window = options["imageWindow"] {
+                config.imageWindow = try FxImageWindow(maximumImages: window["images"]?.integer, maximumBytes: window["bytes"]?.integer)
+            }
             if let name = options["provider"]?["name"]?.string,
                let base = options["provider"]?["baseUrl"]?.string, let url = URL(string: base) {
                 var models: [String: FxCustomProvider.ModelCapabilities] = [:]
@@ -358,6 +379,10 @@ actor Driver: FxHTTPClient, FxPersistence {
             let checkpoint = options["checkpoint"]?.string.flatMap { Data(base64Encoded: $0) }
             if let path = options["sqlitePath"]?.string {
                 store = try FxSQLitePersistence(url: URL(fileURLWithPath: path))
+            } else if options["hasImagePersistence"] == .bool(true) {
+                if options["hasCheckpointPersistence"] == .bool(true) {
+                    store = RelayedImageStore(base: RelayedCheckpointStore(driver: self), driver: self)
+                } else { store = RelayedImageStore(base: self, driver: self) }
             } else if options["hasCheckpointPersistence"] == .bool(true) {
                 store = RelayedCheckpointStore(driver: self)
             } else if options["hasPersistence"] == .bool(true) { store = self }
@@ -369,7 +394,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                 fixtureTransport = transport
                 engine = try await FxEngine.openForConformance(configuration: config, transport: transport)
             } else {
-                engine = try await FxEngine.open(configuration: config, checkpoint: checkpoint, persistence: store)
+                engine = try await FxEngine.open(configuration: config, sessionID: options["sessionId"]?.string, checkpoint: checkpoint, persistence: store)
             }
             let recovery = await engine!.recoveryState
             return .object([
@@ -766,6 +791,17 @@ actor Driver: FxHTTPClient, FxPersistence {
         _ = try await persistenceRequest("saveCheckpoint", [
             "through": .string(checkpoint.through), "data": .string(checkpoint.data.base64EncodedString()),
         ])
+    }
+
+    func storeImage(_ data: Data, named name: String) async throws {
+        _ = try await persistenceRequest("putImage", ["name": .string(name), "data": .string(data.base64EncodedString())])
+    }
+
+    func loadImage(named name: String) async throws -> Data? {
+        let value = try await persistenceRequest("getImage", ["name": .string(name)])
+        if value == .null { return nil }
+        guard let encoded = value.string, let data = Data(base64Encoded: encoded) else { throw FxPersistenceError.invalidJournal }
+        return data
     }
 
     private func sessionOptions(_ options: JSONValue) -> FxSessionOptions {
