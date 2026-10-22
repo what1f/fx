@@ -65,6 +65,13 @@ public struct FxUsage: Sendable, Equatable, Codable {
     public let cacheWriteTokens: Int?
     public let reasoningTokens: Int?
 
+    public init(inputTokens: Int? = nil, outputTokens: Int? = nil, cacheReadTokens: Int? = nil,
+                cacheWriteTokens: Int? = nil, reasoningTokens: Int? = nil) {
+        self.inputTokens = inputTokens; self.outputTokens = outputTokens
+        self.cacheReadTokens = cacheReadTokens; self.cacheWriteTokens = cacheWriteTokens
+        self.reasoningTokens = reasoningTokens
+    }
+
     init(_ value: JSONValue?) {
         inputTokens = value?["inputTokens"]?.integer
         outputTokens = value?["outputTokens"]?.integer
@@ -81,10 +88,14 @@ public struct FxTurnResult: Sendable, Equatable, Codable {
     }
     public let stopReason: StopReason
     public let usage: FxUsage
+    public init(stopReason: StopReason, usage: FxUsage = .init()) {
+        self.stopReason = stopReason; self.usage = usage
+    }
 }
 
 public struct FxSteeringReceipt: Sendable, Equatable {
     public let id: String
+    public init(id: String) { self.id = id }
 }
 
 public enum FxWithdrawal: String, Sendable {
@@ -97,7 +108,7 @@ public struct FxTurn: AsyncSequence, Sendable, Identifiable {
     public typealias Element = FxEvent
     public typealias AsyncIterator = AsyncThrowingStream<FxEvent, any Error>.Iterator
     public let id: String
-    let events: AsyncThrowingStream<FxEvent, any Error>
+    public let events: AsyncThrowingStream<FxEvent, any Error>
     let completion: Task<FxTurnResult, any Error>
     let cancelAction: @Sendable () async -> Void
     let handoffAction: @Sendable () async throws -> Void

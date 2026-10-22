@@ -393,4 +393,12 @@ When the active cutoff expires while the engine is opening, the worker cancels p
 
 Call `try await session.checkpoint()` to export the conversation, including stored images, without changing the session or taking ownership from its worker. Export reads a consistent stored snapshot and sends no model request. While a worker runs, the export includes only progress already stored. Pass the bytes as `checkpoint:` to a new `FxAgent` to seed new sessions. Existing stored sessions retain their own history. Exporting an unused session creates no stored data.
 
+### Supply a session executor
+
+Pass an implementation of `FxSessionHarness` to `FxAgent(harness:store:)` to run conversation turns without the Zig engine. The default `configuration:` initializer uses the same worker with the Zig executor. Both use the same session views, queue deliveries, ownership checks, cancellation and persisted output.
+
+The harness validates session settings and input, prepares seed checkpoints, and opens an `FxHarnessSession` from `FxHarnessContext`. A session reports its interrupted or completed turn, starts or resumes a turn, exports checkpoints and joins pending writes on close. Each `FxHarnessTurn` supplies a bounded event stream, its result, and cancellation, handoff and steering operations. Check `context.checkOwnership()` before external effects and after awaiting permission.
+
+Use `context.persistence.append(expected:idempotencyKey:data:marks:barrier:)` for custom records, supplying an empty marks array when the record changes no routing state. Marks and bytes commit atomically; a retry must keep both unchanged. Checkpoint bytes belong to the harness and are not wrapped in the Zig format. The conversation interface currently uses `FxPromptContent`, `FxSessionOptions` and `FxEvent`. Arbitrary typed inputs and outputs, plus automatic replacement and bounded retries of an executor that exits mid-turn, remain pending; this is not yet the complete generic durable API.
+
 The agent/session surface is still partial. Remote service integrations, generic durable execution, and full upstream durable-session qualification remain pending. Complete upstream custom-provider, Codex, and Grok test files have local proof. The session store's host event format is Swift-specific; core journal and checkpoint interoperability is a separate tested contract.

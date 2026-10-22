@@ -293,6 +293,18 @@ Nine native queue tests cover separate sending and executing owners, secret-free
 
 Local qualification for this batch: all 260 native tests pass in normal, Address Sanitizer and Thread Sanitizer builds. The independent public Release consumer passes, including the HTTP queue acknowledgement check. The final normal conformance run passes 90/90 entries, including actual-driver runtime smoke and both worker termination fixtures. An intermediate run failed the original one-millisecond yield case after changing zero-reserve cutoff semantics; restoring the upstream behavior fixes that regression, with the original assertion retained. This does not resolve the previously documented intermittent cancellation failure. The normal driver is restored. No CI was triggered.
 
+## Conversation execution harness
+
+`FxAgent(harness:store:)` accepts an `FxSessionHarness`. The ordinary configuration initializer installs `KernelSessionHarness`, which keeps Zig-specific configuration, permissions, tool identities and safe rerun decisions out of the scheduler. Both executors use the same durable worker. The preparation deadline helper joins cleanup and closes an executor that loses the race with its timeout, following Swift task groups' [child-task joining rule](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0304-structured-concurrency.md).
+
+`FxHarnessPersistence` adds an append with explicit ordered marks. SQLite commits the opaque bytes and marks together, and its idempotency digest includes the marks with deterministic encoding. Nil marks on the lower-level store method retain the current Zig record decoder. Seed checkpoints reach storage already formatted by the harness. The seed regression verifies that reusing a public input ID in a new seeded session starts new work: a completed runtime ID implies a lost host result only when that input was already started in this session.
+
+Seven native tests use a scripted executor with public imports and its own record and checkpoint formats. They cover settings and input rejection before storage, execution and deduplication, yielding across database reopening, read-only export and seeds, targeted cancellation with queued work, preparation timeout cleanup with retained input, and atomic marks with changed-mark idempotency rejection. The independent Release consumer compiles this same executor outside the package and verifies its streamed output, result and checkpoint header without invoking the Zig kernel for that conversation.
+
+Local qualification: all 267 native tests pass normally and under Thread Sanitizer. Address Sanitizer passes the 267-test suite, then all seven harness tests again after strengthening per-input settings validation. The normal conformance runner passes 90/90 entries with empty stderr; the complete upstream instruction-limits owner and actual-driver smoke also pass after that final validation change. The independent public Release consumer passes with the scripted harness, injected session storage, HTTP queue, MCP and provider transport. The normal driver is restored. No CI was triggered.
+
+This is the conversation executor interface, not complete generic durable qualification. Inputs and output events still use the conversation types. Arbitrary payloads, automatic executor replacement, persisted stop counts, repeated-stop cancellation and halt behavior, plus the unchanged upstream generic-core assertions, remain required work. The scripted fixture does not claim those behaviors.
+
 ## Required remaining gates
 
 - Full classified upstream test coverage and full durable agent/session behavior. Both sign-in helper files now pass locally; live-provider authorization remains unverified.

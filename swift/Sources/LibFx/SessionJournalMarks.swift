@@ -2,7 +2,7 @@ import Foundation
 
 /// Ordered changes that a session store commits with a journal record.
 /// Input identities use `FxSessionInput.runtimeID(for:)`.
-public enum FxSessionJournalMark: Sendable, Equatable {
+public enum FxSessionJournalMark: Sendable, Equatable, Codable {
     case accepted(String)
     case withdrawn(String)
     case placed(String)

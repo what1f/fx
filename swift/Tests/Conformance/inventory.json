@@ -167,7 +167,7 @@
       "upstream": "sdk/tests/test-durable-core.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "pending upstream assertions: the Swift conversation harness now runs non-Zig executors through the existing worker with opaque journal marks, checkpoint seeds, recovery, cancellation and preparation deadlines; seven native tests and an independent public consumer qualify this interface only; arbitrary payloads, stopped-executor replacement, persisted retry counts and halt semantics remain pending"
     },
     {
       "upstream": "sdk/tests/test-durable-harness.mjs",

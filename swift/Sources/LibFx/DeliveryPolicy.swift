@@ -23,22 +23,30 @@ public struct FxDeliveryPolicy: Sendable {
     }
 }
 
-private enum EnginePreparation: Sendable {
-    case opened(FxEngine)
+private enum SessionPreparation<Session: Sendable>: Sendable {
+    case opened(Session)
     case failed(any Error)
     case timedOut
 }
 
 func openSessionEngine(configuration: FxConfiguration, sessionID: String,
                        persistence: any FxPersistence, deadline: ContinuousClock.Instant?) async throws -> FxEngine {
+    try await prepareSession(deadline: deadline,
+        open: { try await FxEngine.open(configuration: configuration, sessionID: sessionID, persistence: persistence) },
+        close: { try await $0.close() })
+}
+
+func prepareSession<Session: Sendable>(deadline: ContinuousClock.Instant?,
+    open: @escaping @Sendable () async throws -> Session,
+    close: @escaping @Sendable (Session) async throws -> Void) async throws -> Session {
     guard let deadline else {
-        return try await FxEngine.open(configuration: configuration, sessionID: sessionID, persistence: persistence)
+        return try await open()
     }
     try Task.checkCancellation()
     guard ContinuousClock.now < deadline else { throw FxSessionError.preparationTimedOut }
-    return try await withThrowingTaskGroup(of: EnginePreparation.self) { group in
+    return try await withThrowingTaskGroup(of: SessionPreparation<Session>.self) { group in
         group.addTask {
-            do { return .opened(try await FxEngine.open(configuration: configuration, sessionID: sessionID, persistence: persistence)) }
+            do { return .opened(try await open()) }
             catch { return .failed(error) }
         }
         group.addTask {
@@ -50,11 +58,11 @@ func openSessionEngine(configuration: FxConfiguration, sessionID: String,
         // An open can finish at the same time as the timer. Join both tasks and
         // close any engine whose result the caller will not receive.
         for try await remaining in group {
-            if case .opened(let engine) = remaining { try? await engine.close() }
+            if case .opened(let engine) = remaining { try? await close(engine) }
         }
         switch first {
         case .opened(let engine):
-            if Task.isCancelled { try? await engine.close(); throw CancellationError() }
+            if Task.isCancelled { try? await close(engine); throw CancellationError() }
             return engine
         case .failed(let error): throw error
         case .timedOut:

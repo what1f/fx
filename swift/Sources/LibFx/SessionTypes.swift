@@ -84,12 +84,15 @@ public struct FxSessionLease: Sendable, Equatable, Codable {
     }
 }
 
-struct SessionPersistence: FxCheckpointPersistence, FxImagePersistence {
+struct SessionPersistence: FxHarnessPersistence {
     let store: any FxSessionStorage
     let lease: FxSessionLease
     func load() async throws -> FxPersistenceSnapshot { try await sessionStorageOperation { try await store.loadJournal(lease) } }
     func append(expected: String?, idempotencyKey: String, data: Data, barrier: Bool) async throws -> String {
-        try await sessionStorageOperation { try await store.appendJournal(lease, expected: expected, key: idempotencyKey, data: data, barrier: barrier) }
+        try await sessionStorageOperation { try await store.appendJournal(lease, expected: expected, key: idempotencyKey, data: data, barrier: barrier, marks: nil) }
+    }
+    func append(expected: String?, idempotencyKey: String, data: Data, marks: [FxSessionJournalMark], barrier: Bool) async throws -> String {
+        try await sessionStorageOperation { try await store.appendJournal(lease, expected: expected, key: idempotencyKey, data: data, barrier: barrier, marks: marks) }
     }
     func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) async throws { try await sessionStorageOperation { try await store.saveJournalCheckpoint(lease, checkpoint) } }
     func storeImage(_ data: Data, named name: String) async throws { try await sessionStorageOperation { try await store.storeImage(data, named: name, lease: lease) } }
@@ -98,7 +101,7 @@ struct SessionPersistence: FxCheckpointPersistence, FxImagePersistence {
     }
 }
 
-struct ReadOnlySessionPersistence: FxImagePersistence {
+struct ReadOnlySessionPersistence: FxHarnessPersistence {
     let snapshot: FxPersistenceSnapshot
     let store: any FxSessionStorage
     let session: String
@@ -107,6 +110,10 @@ struct ReadOnlySessionPersistence: FxImagePersistence {
     func append(expected: String?, idempotencyKey: String, data: Data, barrier: Bool) async throws -> String {
         throw FxPersistenceError.fenced
     }
+    func append(expected: String?, idempotencyKey: String, data: Data, marks: [FxSessionJournalMark], barrier: Bool) async throws -> String {
+        throw FxPersistenceError.fenced
+    }
+    func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) async throws { throw FxPersistenceError.fenced }
     func storeImage(_ data: Data, named name: String) async throws { throw FxPersistenceError.fenced }
     func loadImage(named name: String) async throws -> Data? {
         try await store.loadImage(named: name, session: session, agent: agent)

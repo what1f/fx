@@ -83,6 +83,7 @@ done
 provider_port="$(cat "$task_tmp/port")"
 mkdir -p "$task_tmp/Sources/Consumer"
 cp "$repo_root/swift/Tests/LibFxTests/SessionStorageProxy.swift" "$task_tmp/Sources/Consumer/SessionStorageProxy.swift"
+cp "$repo_root/swift/Tests/LibFxTests/ScriptedSessionHarness.swift" "$task_tmp/Sources/Consumer/ScriptedSessionHarness.swift"
 cat > "$task_tmp/Package.swift" <<'SWIFT'
 // swift-tools-version: 6.2
 import PackageDescription
@@ -560,6 +561,18 @@ struct SubscriptionHTTP: FxHTTPClient {
         let tokenResponse = try await FxURLSessionHTTPClient().send(tokenRequest)
         guard tokenResponse.statusCode == 307 else { throw FxError.protocolViolation("Token redirect was followed") }
         tokenResponse.cancel()
+        let harnessStore = try FxSessionStore()
+        let scripted = try FxAgent(harness: ScriptedSessionHarness(), store: harnessStore)
+        let scriptedSession = try await scripted.session(id: "public-harness")
+        let scriptedTurn = try await scriptedSession.prompt("consumer", id: "input")
+        var scriptedText = ""
+        for try await event in scriptedTurn { if case .text(let delta) = event { scriptedText += delta } }
+        guard scriptedText == "consumer-0 consumer-1 consumer-2 ",
+              try await scriptedTurn.result.stopReason == .endTurn,
+              try await scriptedSession.checkpoint().starts(with: Data("SCRIPT1\n".utf8)) else {
+            throw FxError.protocolViolation("Unexpected custom executor result")
+        }
+        try await scripted.close(); try await harnessStore.close()
         print("Swift package consumer passed")
     }
 }

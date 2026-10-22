@@ -81,9 +81,9 @@ actor SessionStorageProxy: FxSessionStorage {
         try before("loadJournal")
         return try await base.loadJournal(lease)
     }
-    func appendJournal(_ lease: FxSessionLease, expected: String?, key: String, data: Data, barrier: Bool) async throws -> String {
+    func appendJournal(_ lease: FxSessionLease, expected: String?, key: String, data: Data, barrier: Bool, marks: [FxSessionJournalMark]?) async throws -> String {
         try before("appendJournal")
-        return try await base.appendJournal(lease, expected: expected, key: key, data: data, barrier: barrier)
+        return try await base.appendJournal(lease, expected: expected, key: key, data: data, barrier: barrier, marks: marks)
     }
     func saveJournalCheckpoint(_ lease: FxSessionLease, _ checkpoint: FxStoredCheckpoint) async throws {
         try before("saveJournalCheckpoint")

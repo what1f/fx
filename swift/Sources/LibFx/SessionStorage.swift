@@ -7,6 +7,7 @@ import Foundation
 /// to one agent; accessing it with another name must throw `FxSessionError.wrongAgent`.
 /// Implementations must cooperate with task cancellation.
 public protocol FxSessionStorage: Sendable {
+    /// Checkpoint bytes, when supplied, are already in the harness snapshot format.
     /// Accepts an input once in session order. Returns true for an existing ID.
     /// Prompt and steering IDs share a namespace. A retry must not modify stored input.
     func accept(session: String, agent: String, id: String, content: [FxPromptContent], options: FxSessionOptions,
@@ -32,9 +33,10 @@ public protocol FxSessionStorage: Sendable {
     func entries(session: String, agent: String, after cursor: Int64) async throws -> [FxSessionEntry]
     func snapshot(session: String, agent: String) async throws -> FxPersistenceSnapshot
     func loadJournal(_ lease: FxSessionLease) async throws -> FxPersistenceSnapshot
-    /// Enforces the expected head and idempotency key. Applies the ordered changes
-    /// from `FxSessionJournalMark.decode(_:)` atomically with the record's bytes.
-    func appendJournal(_ lease: FxSessionLease, expected: String?, key: String, data: Data, barrier: Bool) async throws -> String
+    /// Enforces the expected head and idempotency key, including explicit marks.
+    /// Commits marks atomically with the record. Nil decodes the current Zig format;
+    /// custom harnesses supply their ordered marks, including an empty array.
+    func appendJournal(_ lease: FxSessionLease, expected: String?, key: String, data: Data, barrier: Bool, marks: [FxSessionJournalMark]?) async throws -> String
     func saveJournalCheckpoint(_ lease: FxSessionLease, _ checkpoint: FxStoredCheckpoint) async throws
     func storeImage(_ data: Data, named name: String, lease: FxSessionLease) async throws
     func loadImage(named name: String, lease: FxSessionLease) async throws -> Data?

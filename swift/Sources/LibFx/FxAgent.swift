@@ -4,7 +4,8 @@ import Foundation
 public actor FxAgent {
     public nonisolated let name: String
     let store: any FxSessionStorage
-    private let configuration: FxConfiguration
+    private let harness: any FxSessionHarness
+    private let onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)?
     private let initialCheckpoint: Data?
     private let checkpointAfterBytes: Int?
     private let deliveryPolicy: FxDeliveryPolicy?
@@ -24,11 +25,27 @@ public actor FxAgent {
 
     public init(configuration: FxConfiguration, name: String = "default", store: any FxSessionStorage, checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024, deliveryPolicy: FxDeliveryPolicy? = nil, queue: (any FxSessionQueue)? = nil) throws {
         try configuration.validateInstructions()
+        try self.init(harness: KernelSessionHarness(configuration: configuration), name: name, store: store,
+                  checkpoint: checkpoint, checkpointAfterBytes: checkpointAfterBytes,
+                  deliveryPolicy: deliveryPolicy, queue: queue, onLifecycleEvent: { event in
+            await configuration.onLifecycleEvent?(event)
+            if case .deliveryDeadline(let sessionID, let epoch, let cutoffs) = event {
+                configuration.observation?.deliver(FxObservation(journal: .sessionDeadline, sessionID: sessionID,
+                    data: .object(["epoch": .number(Double(epoch)), "cutoffs": .number(Double(cutoffs))])))
+            }
+        })
+    }
+
+    public init(harness: any FxSessionHarness, name: String = "default", store: any FxSessionStorage,
+                checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024,
+                deliveryPolicy: FxDeliveryPolicy? = nil, queue: (any FxSessionQueue)? = nil,
+                onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil) throws {
         guard validSessionIdentifier(name), name.utf8.count <= 64,
               let first = name.utf8.first, (48...57).contains(first) || (65...90).contains(first) || (97...122).contains(first) else { throw FxError.invalidInput("Invalid agent name") }
-        self.configuration = configuration
-        self.initialCheckpoint = checkpoint
         if let checkpointAfterBytes, checkpointAfterBytes < 0 { throw FxError.invalidInput("Checkpoint interval must not be negative") }
+        self.harness = harness
+        self.onLifecycleEvent = onLifecycleEvent
+        self.initialCheckpoint = checkpoint
         self.checkpointAfterBytes = checkpointAfterBytes
         self.deliveryPolicy = deliveryPolicy
         self.queue = queue
@@ -39,7 +56,7 @@ public actor FxAgent {
     /// Creates a view. Data is stored when the first input is accepted.
     public func session(id: String = UUID().uuidString, options: FxSessionOptions = .init()) throws -> FxSession {
         guard !closed else { throw FxError.closed }
-        try configured(for: options).validateInstructions()
+        try harness.validate(options: options)
         guard validSessionIdentifier(id) else { throw FxError.invalidInput("Invalid session ID") }
         return FxSession(id: id, options: options, agent: self)
     }
@@ -47,7 +64,8 @@ public actor FxAgent {
     func accept(session: String, options: FxSessionOptions, content: [FxPromptContent], id: String, steering: Bool = false) async throws -> FxSessionTurn {
         guard !closed else { throw FxError.closed }
         guard validSessionIdentifier(id) else { throw FxError.invalidInput("Invalid session or message ID") }
-        _ = try PreparedPrompt(content, deferringImageLimits: configuration.prepareImage != nil)
+        try harness.validate(options: options)
+        try harness.validate(input: content, options: options)
         guard try JSONEncoder().encode(options).count <= 1024 * 1024 else { throw FxError.invalidInput("Session settings exceed the size limit") }
         if steering, content.allSatisfy({ if case .text = $0 { return true }; return false }) {
             let text = content.compactMap { if case .text(let text) = $0 { return text }; return nil }.joined(separator: "\n")
@@ -56,18 +74,13 @@ public actor FxAgent {
         intakes += 1
         defer { intakes -= 1 }
         try Task.checkCancellation()
+        var seed: Data?
         if let checkpoint = initialCheckpoint {
             do { _ = try await store.snapshot(session: session, agent: name) }
-            catch FxSessionError.notFound {
-                var config = configured(for: options)
-                config.observation = nil
-                config.onLifecycleEvent = nil
-                let temporary = try await FxEngine.open(configuration: config, checkpoint: checkpoint)
-                try await temporary.close()
-            }
+            catch FxSessionError.notFound { seed = try await harness.prepareCheckpoint(checkpoint, options: options) }
         }
         try Task.checkCancellation()
-        let repeated = try await store.accept(session: session, agent: name, id: id, content: content, options: options, checkpoint: initialCheckpoint, steering: steering, deferringImageLimits: configuration.prepareImage != nil)
+        let repeated = try await store.accept(session: session, agent: name, id: id, content: content, options: options, checkpoint: seed, steering: steering, deferringImageLimits: harness.defersImageLimits)
         try await schedule(session)
         if steering { await synchronizeControls(session) }
         return FxSessionTurn(id: id, sessionID: session, isRepeated: repeated, eventCursor: 0, agent: self)
@@ -92,31 +105,20 @@ public actor FxAgent {
         let snapshot: FxPersistenceSnapshot
         do { snapshot = try await store.snapshot(session: session, agent: name) }
         catch FxSessionError.notFound {
-            let temporary = try await FxEngine.open(configuration: configured(for: options), checkpoint: initialCheckpoint)
-            do {
-                let data = try await temporary.checkpoint()
-                try await temporary.close()
-                return data
-            } catch { try? await temporary.close(); throw error }
+            if let initialCheckpoint {
+                let seed = try await harness.prepareCheckpoint(initialCheckpoint, options: options)
+                snapshot = FxPersistenceSnapshot(checkpoint: FxStoredCheckpoint(through: "1", data: seed), head: "1")
+            } else { snapshot = FxPersistenceSnapshot() }
         }
-        var config = configured(for: options)
-        config.checkpointAfterBytes = nil
-        config.observation = nil
-        config.onLifecycleEvent = nil
-        let temporary = try await FxEngine.open(configuration: config, sessionID: session,
-                                                 persistence: ReadOnlySessionPersistence(snapshot: snapshot, store: store, session: session, agent: name))
+        let context = FxHarnessContext(sessionID: session, inputID: nil, options: options,
+            persistence: ReadOnlySessionPersistence(snapshot: snapshot, store: store, session: session, agent: name),
+            checkpointAfterBytes: nil, ownership: {})
+        let engine = try await harness.open(context)
         do {
-            let data = try await temporary.checkpoint()
-            try await temporary.close()
+            let data = try await engine.checkpoint()
+            try await engine.close()
             return data
-        } catch { try? await temporary.close(); throw error }
-    }
-
-    private func configured(for options: FxSessionOptions) -> FxConfiguration {
-        var config = configuration
-        if let model = options.model { config.model = model }
-        if let instructions = options.instructions { config.instructions = instructions }
-        return config
+        } catch { try? await engine.close(); throw error }
     }
 
     func failure(_ session: String) throws {
@@ -234,43 +236,14 @@ public actor FxAgent {
             try await finish(input, lease: lease, reason: .cancelled)
             return false
         }
-        var config = configured(for: input.options)
-        config.checkpointAfterBytes = checkpointAfterBytes
         let store = self.store
-        config.validatePermission = { try await store.checkLease(lease) }
-        if let onLifecycleEvent = configuration.onLifecycleEvent {
-            let publicTurnID = input.id
-            config.onLifecycleEvent = { event in
-                switch event {
-                case .permissionRequested(_, _, let toolID):
-                    await onLifecycleEvent(.permissionRequested(sessionID: lease.sessionID, turnID: publicTurnID, toolID: toolID))
-                case .permissionResolved(_, _, let toolID, let decision):
-                    await onLifecycleEvent(.permissionResolved(sessionID: lease.sessionID, turnID: publicTurnID, toolID: toolID, decision: decision))
-                default: await onLifecycleEvent(event)
-                }
-            }
-        }
-        if let onPermission = configuration.onPermission {
-            config.onPermission = { request in
-                try await store.checkLease(lease)
-                let decision = try await onPermission(request.scoped(sessionID: lease.sessionID, turnID: input.id))
-                try await store.checkLease(lease)
-                return decision
-            }
-        }
-        config.tools = configuration.tools.map { tool in
-            FxTool(name: tool.name, description: tool.description, inputSchema: tool.inputSchema,
-                   isIdempotent: tool.isIdempotent, writes: tool.writes) { value, context in
-                try await store.checkLease(lease)
-                let context = FxToolContext(executionID: context.executionID, sessionID: lease.sessionID,
-                                            turnID: input.id, context: input.options.context, observation: context.observation)
-                return try await tool.execute(value, context)
-            }
-        }
-        let engine: FxEngine
+        let context = FxHarnessContext(sessionID: lease.sessionID, inputID: input.id, options: input.options,
+            persistence: SessionPersistence(store: store, lease: lease), checkpointAfterBytes: checkpointAfterBytes,
+            ownership: { try await store.checkLease(lease) })
+        let engine: any FxHarnessSession
         do {
-            engine = try await openSessionEngine(configuration: config, sessionID: lease.sessionID,
-                                                 persistence: SessionPersistence(store: store, lease: lease), deadline: deadlines?.stop)
+            engine = try await prepareSession(deadline: deadlines?.stop, open: { try await self.harness.open(context) },
+                                              close: { try await $0.close() })
         } catch let error as SessionStorageFailure { throw error }
         catch let error as FxSessionError { throw error }
         catch let error as FxPersistenceError { throw error }
@@ -288,14 +261,12 @@ public actor FxAgent {
             let turnID = sessionCoreInputID(input.id)
             let recovery = await engine.recoveryState
             let spent = try await sessionStorageOperation { try await store.deliveryCutoffs(lease, id: input.id) } >= 3
-            let turn: FxTurn
+            let turn: any FxHarnessTurn
             if let recovery {
                 guard input.wasStarted, recovery.turnID == turnID else { throw FxPersistenceError.invalidJournal }
-                let idempotent = Set(config.tools.filter(\.isIdempotent).map(\.name))
-                let rerun = Set(recovery.runningCalls.filter { !spent && !input.cancelRequested && idempotent.contains($0.name) }.map(\.executionID))
-                guard let resumed = try await engine.resume(replayingOutput: false, rerunning: rerun, yieldAt: deadlines?.yield) else { throw FxPersistenceError.invalidJournal }
+                guard let resumed = try await engine.resume(rerunning: !spent && !input.cancelRequested, yieldAt: deadlines?.yield) else { throw FxPersistenceError.invalidJournal }
                 turn = resumed
-            } else if await engine.completedTurnID == turnID {
+            } else if input.wasStarted, await engine.completedTurnID == turnID {
                 // The core committed completion, but the host result was not committed.
                 // Usage and final outcome cannot be inferred safely from an empty replay.
                 try await finish(input, lease: lease, reason: .unknown)
@@ -318,9 +289,7 @@ public actor FxAgent {
                         }
                         if let stop = deadlines?.stop, ContinuousClock.now >= stop {
                             let cutoffs = try await sessionStorageOperation { try await store.cutOffDelivery(lease, id: input.id) }
-                            await self.configuration.onLifecycleEvent?(.deliveryDeadline(sessionID: lease.sessionID, epoch: Int64(lease.epoch), cutoffs: cutoffs))
-                            self.configuration.observation?.deliver(FxObservation(journal: .sessionDeadline, sessionID: lease.sessionID,
-                                data: .object(["epoch": .number(Double(lease.epoch)), "cutoffs": .number(Double(cutoffs))])))
+                            await self.onLifecycleEvent?(.deliveryDeadline(sessionID: lease.sessionID, epoch: Int64(lease.epoch), cutoffs: cutoffs))
                             try await turn.handoff()
                             return true
                         }
@@ -334,7 +303,7 @@ public actor FxAgent {
                             }
                             if steering.ends {
                                 ending = true
-                                try await turn.endForSteeringAction()
+                                try await turn.endForSteering()
                             }
                         }
                         if controlChecks[lease.sessionID]?.waiters.isEmpty == false { continue }
@@ -351,13 +320,7 @@ public actor FxAgent {
                 return false
             }
             do {
-                for try await event in turn {
-                    var event = event
-                    if case .userMessage(let text, let id?) = event {
-                        event = .userMessage(text, id: try await sessionStorageOperation { try await store.publicInputID(id, session: lease.sessionID) } ?? id)
-                    }
-                    try await sessionStorageOperation { try await store.appendEvent(lease, .update(id: input.id, event)) }
-                }
+                try await publishEvents(turn, input: input, lease: lease)
                 let result = try await turn.result
                 controls.cancel()
                 let interrupted = try await controls.value
@@ -381,6 +344,17 @@ public actor FxAgent {
             try await finish(input, lease: lease, reason: .error, error: "Conversation failed")
         }
         return false
+    }
+
+    private func publishEvents(_ turn: any FxHarnessTurn, input: FxSessionInput, lease: FxSessionLease) async throws {
+        let store = self.store
+        for try await event in turn.events {
+            var event = event
+            if case .userMessage(let text, let id?) = event {
+                event = .userMessage(text, id: try await sessionStorageOperation { try await store.publicInputID(id, session: lease.sessionID) } ?? id)
+            }
+            try await sessionStorageOperation { try await store.appendEvent(lease, .update(id: input.id, event)) }
+        }
     }
 
     private func finish(_ input: FxSessionInput, lease: FxSessionLease, reason: FxTurnResult.StopReason,

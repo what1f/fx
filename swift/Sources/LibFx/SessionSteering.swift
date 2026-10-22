@@ -42,8 +42,8 @@ extension FxSessionStore {
 
     // Called inside the transaction that appends the core journal. A crash can
     // never preserve acceptance without also preserving its routing state.
-    func applyJournalMarks(_ data: Data, session: String) throws {
-        for mark in try FxSessionJournalMark.decode(data) {
+    func applyJournalMarks(_ marks: [FxSessionJournalMark], session: String) throws {
+        for mark in marks {
             switch mark {
             case .accepted(let id):
                 try database.execute("UPDATE fx_inputs SET accepted=1 WHERE session=? AND core_id=? AND kind='steer'", [.text(session), .text(id)])

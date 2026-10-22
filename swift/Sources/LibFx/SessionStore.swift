@@ -88,7 +88,7 @@ public actor FxSessionStore: FxSessionStorage {
                 return sqlite3_column_int(statement, 0) == 1
             }
             if created, let checkpoint {
-                try database.execute("UPDATE fx_sessions SET head=1,checkpoint_cursor=1,checkpoint=? WHERE id=?", [.blob(sessionSeed(checkpoint)), .text(session)])
+                try database.execute("UPDATE fx_sessions SET head=1,checkpoint_cursor=1,checkpoint=? WHERE id=?", [.blob(checkpoint), .text(session)])
             }
             try checkAgent(session, agent: agent)
             let prior = try database.statement("SELECT kind FROM fx_inputs WHERE session=? AND id=?", [.text(session), .text(id)]) { statement in
@@ -369,10 +369,14 @@ public actor FxSessionStore: FxSessionStorage {
         return FxPersistenceSnapshot(checkpoint: state.checkpoint, journal: records, head: state.head == 0 ? nil : String(state.head))
     }
 
-    public func appendJournal(_ lease: FxSessionLease, expected: String?, key: String, data: Data, barrier: Bool = true) throws -> String {
+    public func appendJournal(_ lease: FxSessionLease, expected: String?, key: String, data: Data, barrier: Bool = true, marks: [FxSessionJournalMark]? = nil) throws -> String {
         try database.transaction {
             try checkLease(lease)
-            let digest = Data(SHA256.hash(data: data))
+            struct MarkedWrite: Encodable { let data: Data; let marks: [FxSessionJournalMark] }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let identity = try marks.map { try encoder.encode(MarkedWrite(data: data, marks: $0)) } ?? data
+            let digest = Data(SHA256.hash(data: identity))
             if let cursor = try database.statement("SELECT cursor,digest FROM fx_session_writes WHERE session=? AND key=?", [.text(lease.sessionID), .text(key)], { statement -> String? in
                 guard try database.step(statement) else { return nil }
                 guard database.bytes(statement, column: 1) == digest else { throw FxPersistenceError.fenced }
@@ -383,7 +387,7 @@ public actor FxSessionStore: FxSessionStorage {
             guard state.head < Int64.max else { throw FxPersistenceError.sizeLimit }
             let cursor = state.head + 1
             try database.execute("INSERT INTO fx_session_records VALUES (?,?,?)", [.text(lease.sessionID), .integer(cursor), .blob(data)])
-            try applyJournalMarks(data, session: lease.sessionID)
+            try applyJournalMarks(marks ?? FxSessionJournalMark.decode(data), session: lease.sessionID)
             try database.execute("INSERT INTO fx_session_writes VALUES (?,?,?,?)", [.text(lease.sessionID), .text(key), .integer(cursor), .blob(digest)])
             try database.execute("UPDATE fx_sessions SET head=? WHERE id=?", [.integer(cursor), .text(lease.sessionID)])
             return String(cursor)
