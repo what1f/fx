@@ -353,7 +353,7 @@
       "upstream": "sdk/tests/test-native-host-tool-frame-limit.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "partial: native rich-image frame fallback passes; this original fixture has empty images and depends on JavaScript double encoding, whereas Swift encodes text-only results directly; full runtime continuation at the Swift frame boundary remains pending"
+      "status": "qualified native equivalent: HostToolFrameBoundaryTests uses the actual incoming RPC ID to send a text-only full frame exactly 8 MiB and one byte above. The exact frame reaches the real core and gets its separate configured content-limit error; the oversized frame becomes the Swift frame-limit fallback. Both continue the provider turn and reuse the same engine with one tool execution and one response. Normal, ASan and TSan runs pass both parameter cases. The original empty-image/double-encoded JavaScript fixture is not counted as executed."
     },
     {
       "upstream": "sdk/tests/test-native-host-tool-late-settle.mjs",

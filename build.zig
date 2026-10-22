@@ -117,6 +117,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const c_options = b.addOptions();
+    const c_sanitize_thread = b.option(bool, "libfx-tsan", "Instrument the C ABI core with Thread Sanitizer") orelse false;
     c_options.addOption([]const u8, "git_commit", git_commit);
     c_options.addOption([]const u8, "app_version", app_version);
     c_options.addOption([]const u8, "update_channel", @tagName(update_channel));
@@ -129,11 +130,13 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .safe,
             .link_libc = true,
+            .sanitize_thread = c_sanitize_thread,
         }),
     });
     c_core.bundle_compiler_rt = true;
     c_core.root_module.addImport("build_options", c_options.createModule());
-    _ = addSessionManager(b, c_core.root_module, target, .safe, null);
+    const c_session_manager = addSessionManager(b, c_core.root_module, target, .safe, null);
+    c_session_manager.sanitize_thread = c_sanitize_thread;
     const c_install = b.addInstallArtifact(c_core, .{});
     const c_step = b.step("libfx-c", "Build the libfx C ABI core library");
     c_step.dependOn(&c_install.step);
