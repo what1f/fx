@@ -13,7 +13,8 @@ extern "C" {
 typedef struct FxCore FxCore;
 typedef struct { uint8_t *data; size_t len; } FxBuffer;
 /* JSON fields match native libfx: apiKey, provider, configuredProviders, model,
-   effort, fast, ultrafast, home, workspaceRoot, gatewayChatUrl. */
+   effort, fast, ultrafast, home, workspaceRoot, gatewayChatUrl.
+   home and workspaceRoot must be absolute filesystem paths. */
 uint32_t fx_core_abi_version(void);
 FxCore *fx_core_create(const uint8_t *, size_t, FxBuffer *error);
 void fx_buffer_free(FxBuffer);

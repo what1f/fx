@@ -10,10 +10,15 @@ actor SessionStorageProxy: FxSessionStorage {
     private(set) var calls: [String] = []
     private let beforeJournalAppend: (@Sendable (Data, Bool) async throws -> Void)?
     let beforeLeaseRenewal: (@Sendable () async throws -> Void)?
+    private let afterClaim: (@Sendable (FxSessionLease?) async throws -> Void)?
+    private let afterLeaseCheck: (@Sendable (FxSessionLease) async throws -> Void)?
     init(_ base: FxSessionStore, beforeJournalAppend: (@Sendable (Data, Bool) async throws -> Void)? = nil,
-         beforeLeaseRenewal: (@Sendable () async throws -> Void)? = nil) {
+         beforeLeaseRenewal: (@Sendable () async throws -> Void)? = nil,
+         afterClaim: (@Sendable (FxSessionLease?) async throws -> Void)? = nil,
+         afterLeaseCheck: (@Sendable (FxSessionLease) async throws -> Void)? = nil) {
         self.base = base; self.beforeJournalAppend = beforeJournalAppend
         self.beforeLeaseRenewal = beforeLeaseRenewal
+        self.afterClaim = afterClaim; self.afterLeaseCheck = afterLeaseCheck
     }
     func failNext(_ operation: String, with error: any Error, after successfulCalls: Int = 0, count: Int = 1) {
         failure = (operation, error, successfulCalls, count)
@@ -47,7 +52,9 @@ actor SessionStorageProxy: FxSessionStorage {
     }
     func claim(session: String, agent: String) async throws -> FxSessionLease? {
         try before("claim")
-        return try await base.claim(session: session, agent: agent)
+        let lease = try await base.claim(session: session, agent: agent)
+        try await afterClaim?(lease)
+        return lease
     }
     func release(_ lease: FxSessionLease) async throws {
         try before("release")
@@ -55,7 +62,8 @@ actor SessionStorageProxy: FxSessionStorage {
     }
     func checkLease(_ lease: FxSessionLease) async throws {
         try before("checkLease")
-        return try await base.checkLease(lease)
+        try await base.checkLease(lease)
+        try await afterLeaseCheck?(lease)
     }
     func next(_ lease: FxSessionLease) async throws -> FxSessionInput? {
         try before("next")

@@ -62,6 +62,7 @@ fn create(data: []const u8) !*Core {
     errdefer alloc.free(home);
     const workspace = (try string(value, "workspaceRoot", native.max_path_bytes, true)).?;
     errdefer alloc.free(workspace);
+    if (!std.Io.Dir.path.isAbsolute(home) or !std.Io.Dir.path.isAbsolute(workspace)) return error.InvalidPath;
     const url = (try string(value, "gatewayChatUrl", native.max_url_bytes, false)) orelse try alloc.dupe(u8, gateway.default_chat_url);
     errdefer alloc.free(url);
     try streamable_http.validateEndpoint(url);
