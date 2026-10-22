@@ -19,7 +19,7 @@ private final class CoreHandle: @unchecked Sendable {
     deinit { destroy() }
 }
 
-actor NativeTransport: CoreTransport {
+actor NativeTransport: EngineTransport {
     nonisolated let output: AsyncThrowingStream<Data, any Error>
     private let continuation: AsyncThrowingStream<Data, any Error>.Continuation
     private let handle: CoreHandle

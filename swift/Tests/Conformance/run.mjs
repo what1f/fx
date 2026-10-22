@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const checks = [
-  { name: 'upstream/test-hooks-engine-MCP-selection', env: { LIBFX_SWIFT_HOOKS_ENGINE_ONLY: '1' }, args: [
+  { name: 'upstream/test-hooks-engine-MCP-runtime-selection', env: { LIBFX_SWIFT_HOOKS_WITHOUT_STANDALONE: '1' }, args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-hooks.mjs', 'native',
   ] },
   ...[

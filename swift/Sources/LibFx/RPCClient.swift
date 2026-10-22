@@ -1,7 +1,7 @@
 import Foundation
 
 /// The byte transport owns its runtime and terminates output when it closes.
-protocol CoreTransport: Sendable {
+package protocol CoreTransport: Sendable {
     var output: AsyncThrowingStream<Data, any Error> { get }
     func write(_ bytes: Data) async throws
     func close() async

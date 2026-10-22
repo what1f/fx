@@ -71,6 +71,8 @@ export async function createFxEngine(options = {}) {
   const fetchControllers = new Map();
   const fetchReaders = new Map();
   const inputEffects = new Map(), toolScopes = new Map();
+  let fixtureRuntime;
+  const fixtureMethods = new Map();
   let nextID = 1, turn = null, closed = false, stderr = '', runtimeStarted = false;
   let resumable = false, recoveryCalls = [], recoveryTurnID = null;
 
@@ -167,7 +169,13 @@ export async function createFxEngine(options = {}) {
   const fetchErrorNames = [];
   lines.on('line', line => {
     const value = JSON.parse(line);
-    if (value.inputEffect) {
+    if (value.fixtureSend) {
+      const message = value.fixtureSend;
+      if (message.id !== undefined) fixtureMethods.set(message.id, message.method);
+      fixtureRuntime.write(JSON.stringify(message) + '\n');
+    } else if (value.fixtureClosed) {
+      fixtureRuntime.closeStdin();
+    } else if (value.inputEffect) {
       void inputEffects.get(value.inputEffect)?.().catch(error => {
         try { options.hooks?.onError?.(error); } catch {}
       });
@@ -351,8 +359,24 @@ export async function createFxEngine(options = {}) {
         .catch(() => {}).finally(() => toolControllers.delete(call.id));
     }
   });
-  const { fetch, nativeAddon, backend, onEvent, tools: _tools, checkpoint, persistence, ...configuration } = options;
+  const { fetch, nativeAddon, backend, onEvent, tools: _tools, checkpoint, persistence, runtimeFactory, ...configuration } = options;
   try {
+    if (runtimeFactory) {
+      fixtureRuntime = await runtimeFactory({ ...options,
+        hostToolExecutor: (name, input, sessionID, callID) => request('fixtureTool', { name, input, sessionID, callID }),
+      });
+      fixtureRuntime.setLineHandler(async message => {
+        if (fixtureMethods.get(message.id) === 'libfx/new' && message.result && !message.result.configOptions) {
+          // The JS fixture omits the selected model from its protocol envelope.
+          // Supply that metadata only; the production Swift handshake still runs.
+          message = { ...message, result: { ...message.result,
+            configOptions: [{ id: 'model', currentValue: options.model ?? 'fixture/injected' }],
+          } };
+        }
+        if (message.id !== undefined) fixtureMethods.delete(message.id);
+        await request('fixtureReceive', { message });
+      });
+    }
     if (options.__inspect) {
       try { return await request('inspectSession', { path: options.sessionStorePath, sessionID: options.sessionID, agentName: options.name }); }
       finally { child.stdin.end(); await exited; lines.close(); }
@@ -370,6 +394,7 @@ export async function createFxEngine(options = {}) {
       credentialsType: typeof options.credentials, onCredentialsType: typeof options.onCredentials,
       refreshLockType: typeof options.refreshLock,
       hasOnCredentials: typeof options.onCredentials === 'function',
+      hasRuntimeFactory: Boolean(runtimeFactory),
       hasPersistence: Boolean(persistence),
       hasCheckpointPersistence: typeof persistence?.saveCheckpoint === 'function',
       ...(checkpoint ? { checkpoint: Buffer.from(checkpoint).toString('base64') } : {}),

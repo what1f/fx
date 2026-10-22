@@ -4,7 +4,7 @@ import Foundation
 public actor FxEngine {
     public nonisolated let sessionID: String
     private let rpc: RPCClient
-    private let transport: NativeTransport
+    private let transport: any EngineTransport
     private let tools: [String: FxTool]
     private let permissions: PermissionRequests
     private let journal: JournalWriter?
@@ -35,7 +35,7 @@ public actor FxEngine {
     private var closingTask: Task<Void, any Error>?
 
     private init(
-        sessionID: String, rpc: RPCClient, transport: NativeTransport,
+        sessionID: String, rpc: RPCClient, transport: any EngineTransport,
         tools: [String: FxTool], journal: JournalWriter?, observation: FxObservationOptions?, checkpointAfterBytes: Int?, checkpointMetadata: CheckpointMetadata, onPermission: PermissionRequests.Handler?, onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)?
     ) {
         self.sessionID = sessionID
@@ -60,6 +60,23 @@ public actor FxEngine {
     }
 
     public static func open(configuration: FxConfiguration, sessionID: String? = nil, checkpoint: Data? = nil, persistence: (any FxPersistence)? = nil) async throws -> FxEngine {
+        try await open(configuration: configuration, sessionID: sessionID, checkpoint: checkpoint, persistence: persistence, transport: nil)
+    }
+
+    package static func openForConformance(configuration: FxConfiguration, transport: any EngineTransport) async throws -> FxEngine {
+        do { return try await open(configuration: configuration, sessionID: nil, checkpoint: nil, persistence: nil, transport: transport) }
+        catch { await transport.close(); throw error }
+    }
+
+    package func drainConformanceFrames() async throws {
+        _ = try await rpc.request("libfx/conformance_barrier")
+    }
+
+    package func joinConformanceTool(_ callID: String) async {
+        await toolTasks[callID]?.value
+    }
+
+    private static func open(configuration: FxConfiguration, sessionID: String?, checkpoint: Data?, persistence: (any FxPersistence)?, transport injectedTransport: (any EngineTransport)?) async throws -> FxEngine {
         try Task.checkCancellation()
         if let sessionID, !validSessionIdentifier(sessionID) { throw FxError.invalidInput("Invalid session ID") }
         guard checkpoint == nil || persistence == nil else {
@@ -97,7 +114,9 @@ public actor FxEngine {
         }
         let httpClient = ProviderHTTPClient(client: configuration.httpClient, provider: configuration.provider)
         try Task.checkCancellation()
-        let transport = try NativeTransport(options: configuration.nativeOptions, httpClient: httpClient, modelID: configuration.model.id, onTransportEvent: configuration.onTransportEvent)
+        let transport: any EngineTransport
+        if let injectedTransport { transport = injectedTransport }
+        else { transport = try NativeTransport(options: configuration.nativeOptions, httpClient: httpClient, modelID: configuration.model.id, onTransportEvent: configuration.onTransportEvent) }
         let rpc = RPCClient(transport: transport, observer: configuration.wireObserver)
         do {
             try await transport.start()
@@ -462,11 +481,14 @@ public actor FxEngine {
                         toolObservations.removeValue(forKey: callID)?.invalidate()
                     }
                 }
-                if event.kind == .turnEnded {
+                if event.kind == .turnEnded, event.sessionID == sessionID {
                     for (id, tool) in toolObservations where tool.scope.executionID == event.executionID {
                         tool.invalidate()
                         toolObservations.removeValue(forKey: id)
                     }
+                }
+                if event.kind == .journalError, event.sessionID == sessionID, event.data["fenced"] == .bool(true) {
+                    invalidateToolObservations()
                 }
                 observation.deliver(event)
             } catch { observation.onError(error) }

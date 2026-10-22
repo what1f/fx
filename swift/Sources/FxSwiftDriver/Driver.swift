@@ -26,6 +26,7 @@ private struct RelayedCheckpointStore: FxCheckpointPersistence {
 
 /// Test-only protocol adapter. Engine behavior stays in LibFx.
 actor Driver: FxHTTPClient, FxPersistence {
+    private var fixtureTransport: FixtureTransport?
     private let inputObservations = InputObservationRelay(emit: DriverOutput.emit)
     private var mcpAdapter: FxMCPAdapter?
     private var mcpTransport: DriverMCPTransport?
@@ -123,6 +124,19 @@ actor Driver: FxHTTPClient, FxPersistence {
 
     private func run(_ value: JSONValue) async throws -> JSONValue {
         switch value["op"]?.string {
+        case "fixtureReceive":
+            guard let fixtureTransport else { throw FxError.closed }
+            try await fixtureTransport.receive(value["message"] ?? .null)
+            try await engine?.drainConformanceFrames()
+            return .null
+        case "fixtureTool":
+            guard let fixtureTransport, let engine else { throw FxError.closed }
+            let callID = value["callID"]?.string ?? ""
+            let reply = try await fixtureTransport.executeTool(name: value["name"]?.string ?? "", input: value["input"] ?? .null,
+                sessionID: value["sessionID"]?.string ?? "", callID: callID)
+            await engine.joinConformanceTool(callID)
+            if reply["error"] != nil { return .object(["cancelled": .bool(true)]) }
+            return reply["result"] ?? .null
         case "mcpOpen":
             let transport = DriverMCPTransport { [weak self] data in
                 guard let message = try? JSONDecoder().decode(JSONValue.self, from: data) else { return }
@@ -319,10 +333,16 @@ actor Driver: FxHTTPClient, FxPersistence {
             } else if options["hasCheckpointPersistence"] == .bool(true) {
                 store = RelayedCheckpointStore(driver: self)
             } else if options["hasPersistence"] == .bool(true) { store = self }
-            engine = try await FxEngine.open(
-                configuration: config, checkpoint: checkpoint,
-                persistence: store
-            )
+            if options["hasRuntimeFactory"] == .bool(true) {
+                guard checkpoint == nil, store == nil else {
+                    throw FxError.invalidInput("Injected runtime fixtures do not support persistence")
+                }
+                let transport = FixtureTransport()
+                fixtureTransport = transport
+                engine = try await FxEngine.openForConformance(configuration: config, transport: transport)
+            } else {
+                engine = try await FxEngine.open(configuration: config, checkpoint: checkpoint, persistence: store)
+            }
             let recovery = await engine!.recoveryState
             return .object([
                 "sessionId": .string(engine!.sessionID), "resumable": .bool(await engine!.hasResumableWork),

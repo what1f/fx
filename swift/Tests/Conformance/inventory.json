@@ -196,8 +196,8 @@
     {
       "upstream": "sdk/tests/test-hooks.mjs",
       "classification": "adapted",
-      "reason": "Engine, journal, durable resume, input-wait and MCP assertions run through the real Swift SDK. An explicit selection retains all assertions outside the injected JavaScript-runtime descendant/authority block and standalone JavaScript helper cancellation block. Those two blocks remain pending Swift-backed execution. Native tests and differential checks separately cover parent projection, effect identity, bounds, invalidation and cancellation. The bridge forwards scope identity and invalidation; Swift owns MCP spans, server/tool names and correlation IDs.",
-      "status": "partial: engine/MCP selection passed; injected-runtime and standalone-helper upstream blocks pending"
+      "reason": "Engine, journal, durable resume, input-wait and MCP assertions run through the real Swift SDK. An explicit selection retains all assertions outside the standalone JavaScript helper cancellation block. The injected-runtime descendant/authority assertions run through the production Swift engine and RPC reader via package-only transport injection, with awaited frame delivery and omitted wire metadata supplied by the bridge. The outer parent helper still constructs JavaScript metadata and is not Swift helper coverage. The standalone helper block remains pending Swift-backed execution. Native tests and differential checks separately cover parent projection, effect identity, bounds, invalidation and cancellation. The bridge forwards scope identity and invalidation; Swift owns MCP spans, server/tool names and correlation IDs.",
+      "status": "partial: engine/MCP/runtime selection passed; standalone-helper upstream block pending"
     },
     {
       "upstream": "sdk/tests/test-host-tool-cancel.mjs",
