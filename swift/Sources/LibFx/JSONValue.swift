@@ -48,6 +48,7 @@ public enum JSONValue: Codable, Sendable, Equatable {
 }
 
 public enum FxError: Error, Sendable, Equatable {
+    case steeringQueueFull
     case closed
     case handedOff
     case cancelled

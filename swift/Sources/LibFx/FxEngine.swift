@@ -21,6 +21,9 @@ public actor FxEngine {
     private var followUpAcceptanceTask: Task<Void, Never>?
     private var lastCompletedTurnID: String?
     private var journalFailure: (any Error)?
+    private var terminalFailure: (any Error)?
+    private var failedPrompt: (id: UUID, error: any Error)?
+    private var pendingSteering: [UUID: (count: Int, bytes: Int)] = [:]
     private var turnID: UUID?
     private var publicTurnID: String?
     private var output: AsyncThrowingStream<FxEvent, any Error>.Continuation?
@@ -78,6 +81,17 @@ public actor FxEngine {
 
     package func drainConformanceFrames() async throws {
         _ = try await rpc.request("libfx/conformance_barrier")
+    }
+
+    package func waitForConformanceTermination() async { await rpc.waitForTermination() }
+
+    private func transportFailed(_ error: any Error) {
+        guard !closed, terminalFailure == nil else { return }
+        terminalFailure = error
+        imagePreparation?.cancel()
+        if let turnID {
+            failedPrompt = (turnID, error)
+        }
     }
 
     package func joinConformanceTool(_ callID: String) async {
@@ -173,6 +187,7 @@ public actor FxEngine {
             let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, imagePersistence: persistence as? any FxImagePersistence, prepareImage: configuration.prepareImage, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes, checkpointMetadata: checkpointMetadata, onPermission: configuration.onPermission, onLifecycleEvent: configuration.onLifecycleEvent)
             await journal?.setHandler { [weak engine] result in await engine?.journalSettled(result) }
             await rpc.setHandler { [weak engine] message in await engine?.handle(message) }
+            await rpc.setFailureHandler { [weak engine] error in await engine?.transportFailed(error) }
             if let checkpoint {
                 try await transport.putAttachment(checkpoint, id: 1)
                 let restored = try await rpc.request("libfx/restore", .object([
@@ -249,6 +264,7 @@ public actor FxEngine {
 
     public func prompt(_ content: [FxPromptContent], id: String = UUID().uuidString, yieldAt: Date? = nil) throws -> FxTurn {
         guard !closed else { throw FxError.closed }
+        if let terminalFailure { throw terminalFailure }
         guard !handedOff else { throw FxError.handedOff }
         if let journalFailure { throw journalFailure }
         guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
@@ -345,6 +361,7 @@ public actor FxEngine {
 
     var completedTurnID: String? { lastCompletedTurnID }
     var queuedCheckpointCount: Int { checkpointWaiters.count }
+    var pendingSteeringCount: Int { pendingSteering.values.reduce(0) { $0 + $1.count } }
 
     public var recoveryState: FxRecoveryState? { recovery }
     package var hasHandedOffForConformance: Bool { handedOff }
@@ -387,6 +404,7 @@ public actor FxEngine {
 
     private func startTurn(_ content: [FxPromptContent], publicID: String, yieldAt: Date? = nil, resuming: Bool = false, replayingOutput: Bool = true, rerunning: Set<String> = [], followUp: QueuedFollowUp? = nil) throws -> FxTurn {
         guard !closed else { throw FxError.closed }
+        if let terminalFailure { throw terminalFailure }
         guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
         var metadata: [String: JSONValue] = [:]
         if let yieldAt {
@@ -405,6 +423,7 @@ public actor FxEngine {
         let prepared = try PreparedPrompt(content, allowEmpty: resuming, deferringImageLimits: prepareImage != nil)
         let precedingCheckpoint = checkpointBarrier
         let id = UUID()
+        failedPrompt = nil
         turnID = id
         publicTurnID = publicID
         activeFollowUpID = followUp?.receipt.id
@@ -467,7 +486,12 @@ public actor FxEngine {
                     metadata["rerun"] = .array(rerunning.sorted().map(JSONValue.string))
                 }
                 params["_meta"] = .object(["fx": .object(metadata)])
-                let result = try await rpc.request("session/prompt", .object(params), onSent: { await dispatch.resolve(sent: true) })
+                let result = try await rpc.request("session/prompt", .object(params), beforeWrite: {
+                    try await self.checkPromptBeforeWrite(id, resuming: resuming)
+                }, onSent: {
+                    await dispatch.resolve(sent: true)
+                    await self.cancelAfterDispatchIfNeeded(id)
+                })
                 try await journal?.check()
                 try Task.checkCancellation()
                 let reason = FxTurnResult.StopReason(rawValue: result["stopReason"]?.string ?? "") ?? .unknown
@@ -486,6 +510,8 @@ public actor FxEngine {
                     usage: FxUsage(result["usage"])
                 )
             } catch {
+                let error = terminalFailure ?? error
+                if !turnCancelled { failedPrompt = (id, error) }
                 await dispatch.resolve(sent: false)
                 await transport.discardAttachments()
                 if turnID == id, turnCancelled, !closed, error is CancellationError {
@@ -608,7 +634,7 @@ public actor FxEngine {
                     response = .object(["content": .string(message.isEmpty ? "Tool \(name) failed without a message" : message), "isError": .bool(true)])
                 }
                 guard !Task.isCancelled, await self.isActive(expectedTurn) else { return }
-                try? await rpc.respond(id: requestID, result: response)
+                try? await rpc.respondToTool(id: requestID, result: response)
                 await self.removeTool(callID, turn: expectedTurn)
             }
         } else if message.method == "session/request_permission", let id = message.id {
@@ -685,7 +711,7 @@ public actor FxEngine {
     }
 
     private func cancel(turn id: UUID) async {
-        guard isActive(id), !cancelling else { return }
+        guard turnID == id, !closed, !cancelling else { return }
         turnCancelled = true
         imagePreparation?.cancel()
         cancelling = true
@@ -694,9 +720,20 @@ public actor FxEngine {
         toolTasks.removeAll()
         invalidateToolObservations()
         await permissions.cancel(scope: id)
+        if await promptDispatch?.currentResult() == nil { return }
         guard await promptDispatch?.wait() == true, turnID == id, !closed else { return }
         try? await rpc.notify("session/cancel", .object(["sessionId": .string(sessionID)]))
         await transport.abortEffects()
+    }
+
+    private func checkPromptBeforeWrite(_ id: UUID, resuming: Bool) throws {
+        guard !closed else { throw FxError.closed }
+        if let terminalFailure { throw terminalFailure }
+        guard turnID == id, !turnCancelled || resuming else { throw CancellationError() }
+    }
+
+    private func cancelAfterDispatchIfNeeded(_ id: UUID) async {
+        if turnID == id, !closed, turnCancelled { await cancel(turn: id) }
     }
 
     private func handoff(turn id: UUID) async throws {
@@ -714,7 +751,23 @@ public actor FxEngine {
         guard isActive(id) else { throw FxError.noActiveTurn }
         guard !text.isEmpty, text.utf8.count <= 64 * 1024 else { throw FxError.invalidInput("Steering text must contain 1–65536 UTF-8 bytes") }
         guard validInputID(inputID) else { throw FxError.invalidInput("Invalid steering ID") }
-        guard await promptDispatch?.wait() == true, isActive(id) else { throw FxError.noActiveTurn }
+        let dispatch = promptDispatch
+        let reserve = await dispatch?.currentResult() == nil
+        guard isActive(id) else { throw FxError.noActiveTurn }
+        if reserve {
+            let pending = pendingSteering[id] ?? (0, 0)
+            guard pending.count < 64, pending.bytes + text.utf8.count <= 1024 * 1024 else { throw FxError.steeringQueueFull }
+            pendingSteering[id] = (pending.count + 1, pending.bytes + text.utf8.count)
+        }
+        defer {
+            if reserve, let pending = pendingSteering[id] {
+                if pending.count == 1 { pendingSteering.removeValue(forKey: id) }
+                else { pendingSteering[id] = (pending.count - 1, pending.bytes - text.utf8.count) }
+            }
+        }
+        let sent = await dispatch?.wait()
+        if sent != true, let failedPrompt, failedPrompt.id == id { throw failedPrompt.error }
+        guard sent == true, isActive(id) else { throw FxError.noActiveTurn }
         _ = try await rpc.request("libfx/steer", .object([
             "sessionId": .string(sessionID), "text": .string(text), "id": .string(inputID),
         ]))

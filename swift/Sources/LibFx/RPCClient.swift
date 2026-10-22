@@ -21,6 +21,9 @@ actor RPCClient {
     private var pending: [Int: CheckedContinuation<JSONValue, any Error>] = [:]
     private var reader: Task<Void, Never>?
     private var handler: (@Sendable (RPCMessage) async -> Void)?
+    private var failureHandler: (@Sendable (any Error) async -> Void)?
+    private var failure: (any Error)?
+    private let termination = PromptDispatch()
     private var closed = false
     private var frame = Data()
     private let maxFrameBytes: Int
@@ -36,6 +39,13 @@ actor RPCClient {
 
     func setHandler(_ handler: @escaping @Sendable (RPCMessage) async -> Void) { self.handler = handler }
 
+    func setFailureHandler(_ handler: @escaping @Sendable (any Error) async -> Void) async {
+        failureHandler = handler
+        if let failure { await handler(failure) }
+    }
+
+    func waitForTermination() async { _ = await termination.wait() }
+
     func start() {
         guard reader == nil, !closed else { return }
         let output = transport.output
@@ -50,7 +60,7 @@ actor RPCClient {
         }
     }
 
-    func request(_ method: String, _ params: JSONValue = .object([:]), onSent: (@Sendable () async -> Void)? = nil) async throws -> JSONValue {
+    func request(_ method: String, _ params: JSONValue = .object([:]), beforeWrite: (@Sendable () async throws -> Void)? = nil, onSent: (@Sendable () async -> Void)? = nil) async throws -> JSONValue {
         guard !closed else { throw FxError.closed }
         try Task.checkCancellation()
         let id = nextID
@@ -64,7 +74,7 @@ actor RPCClient {
                         try await self.send(.object([
                             "jsonrpc": .string("2.0"), "id": .number(Double(id)),
                             "method": .string(method), "params": params,
-                        ]))
+                        ]), beforeWrite: beforeWrite)
                         await onSent?()
                     } catch { self.failRequest(id, error) }
                 }
@@ -82,6 +92,32 @@ actor RPCClient {
         try await send(.object(["jsonrpc": .string("2.0"), "id": id, "result": result]))
     }
 
+    func respondToTool(id: JSONValue, result: JSONValue) async throws {
+        var result = result
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        func frameSize() throws -> Int {
+            try encoder.encode(JSONValue.object(["jsonrpc": .string("2.0"), "id": id, "result": result])).count + 1
+        }
+        if try frameSize() > 8 * 1024 * 1024,
+           result["contentType"] == .string("rich"), let content = result["content"]?.string,
+           case .object(var rich) = try JSONDecoder().decode(JSONValue.self, from: Data(content.utf8)),
+           case .array(let images) = rich["images"], case .object(var fields) = result {
+            rich["images"] = .array(images.map { image in
+                guard image["sourceRef"] != nil, case .object(var fields) = image else { return image }
+                fields.removeValue(forKey: "data")
+                fields.removeValue(forKey: "stored")
+                return .object(fields)
+            })
+            fields["content"] = .string(String(decoding: try encoder.encode(JSONValue.object(rich)), as: UTF8.self))
+            result = .object(fields)
+        }
+        if try frameSize() > 8 * 1024 * 1024 {
+            result = .object(["content": .string("Host tool result exceeded the response frame limit"), "isError": .bool(true)])
+        }
+        try await respond(id: id, result: result)
+    }
+
     func respond(id: JSONValue, error: FxError) async throws {
         try await send(.object([
             "jsonrpc": .string("2.0"), "id": id,
@@ -89,11 +125,15 @@ actor RPCClient {
         ]))
     }
 
-    private func send(_ message: JSONValue) async throws {
+    private func send(_ message: JSONValue, beforeWrite: (@Sendable () async throws -> Void)? = nil) async throws {
         guard !closed else { throw FxError.closed }
-        var data = try JSONEncoder().encode(message)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        var data = try encoder.encode(message)
         data.append(10)
+        guard data.count <= 8 * 1024 * 1024 else { throw FxError.invalidInput("Request exceeds the 8388608 byte frame limit") }
         await observer?(.sent, message)
+        try await beforeWrite?()
         try Task.checkCancellation()
         try await transport.write(data)
     }
@@ -138,18 +178,21 @@ actor RPCClient {
         pending.removeValue(forKey: id)?.resume(throwing: error)
     }
 
-    private func finish(_ error: any Error) {
+    private func finish(_ error: any Error) async {
         guard !closed else { return }
         closed = true
+        failure = error
+        await failureHandler?(error)
         for waiter in pending.values { waiter.resume(throwing: error) }
         pending.removeAll()
         continuation.finish(throwing: error)
         reader?.cancel()
-        Task { await transport.close() }
+        await termination.resolve(sent: true)
+        await transport.close()
     }
 
     func close() async {
-        finish(FxError.closed)
+        await finish(FxError.closed)
         await transport.close()
     }
 }

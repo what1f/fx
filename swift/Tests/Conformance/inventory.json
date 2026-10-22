@@ -41,7 +41,7 @@
       "upstream": "sdk/tests/test-agent-images.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "partial: input/preparation and checkpoint sections pass through Swift with original assertions, including byte copies, Blob/File input, asynchronous host preparation, catalog diagnostics, final size errors, 16 concurrent exports, prompt/export ordering, callback reentrancy and restore bounds; loader explicitly selects these sections. Remaining synchronous input admission and later image cases are pending"
+      "status": "passed: complete upstream native file through Swift with original assertions; includes synchronous admission, Blob/File reads, preparation, transport failures, queued steering limits, cancellation before dispatch, checkpoints and recovery, image dimensions and history windows, rich tool fallback and response frame limits"
     },
     {
       "upstream": "sdk/tests/test-agent-provider-tools.mjs",

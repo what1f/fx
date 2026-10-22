@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const checks = [
-  { name: 'upstream/test-agent-images-checkpoints', expected: 'native image input, preparation and checkpoint sections passed', env: { LIBFX_SWIFT_IMAGE_PHASE: 'checkpoints' }, args: [
+  { name: 'upstream/test-agent-images', expected: 'native agent image prompts passed', args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-agent-images.mjs', 'native',
   ] },
   { name: 'upstream/test-hooks', args: [

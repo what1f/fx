@@ -2,6 +2,21 @@ import Foundation
 import Testing
 @testable import LibFx
 
+@Test func oversizedOutgoingRequestDoesNotWriteAndLeavesClientUsable() async throws {
+    let transport = ScriptedTransport()
+    let client = RPCClient(transport: transport)
+    await client.start()
+    do {
+        _ = try await client.request("echo", .string(String(repeating: "x", count: 8 * 1024 * 1024)))
+        Issue.record("Oversized request reached the transport")
+    } catch {
+        #expect(error as? FxError == .invalidInput("Request exceeds the 8388608 byte frame limit"))
+    }
+    #expect(await transport.writeCount() == 0)
+    #expect(try await client.request("echo", .string("usable")) == .string("usable"))
+    await client.close()
+}
+
 actor ScriptedTransport: CoreTransport {
     nonisolated let output: AsyncThrowingStream<Data, any Error>
     private let continuation: AsyncThrowingStream<Data, any Error>.Continuation
@@ -27,7 +42,38 @@ actor ScriptedTransport: CoreTransport {
     func inject(_ data: Data) { continuation.yield(data) }
     func disableReplies() { autoReply = false }
     func writeCount() -> Int { writes.count }
+    func lastWrite() -> JSONValue? { writes.last }
     func close() { closed = true; continuation.finish() }
+}
+
+@Test(arguments: [true, false])
+func toolResponseFrameOverflowPreservesReferencesOrReportsAnError(referenced: Bool) async throws {
+    let transport = ScriptedTransport()
+    let client = RPCClient(transport: transport)
+    let image = FxImage(data: Data(repeating: 1, count: 3072), format: .png,
+                        sourceReference: referenced ? "host:outer-frame" : nil)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.withoutEscapingSlashes]
+    let empty = try FxToolResult(text: "", images: [image]).response(toolName: "load")
+    let overhead = try #require(empty["content"]?.string?.utf8.count)
+    let text = String(repeating: "x", count: 8 * 1024 * 1024 - overhead - 32)
+    let result = try FxToolResult(text: text, images: [image]).response(toolName: "load")
+    let envelope = JSONValue.object(["jsonrpc": .string("2.0"), "id": .string("outer-image"), "result": result])
+    #expect(try encoder.encode(envelope).count + 1 > 8 * 1024 * 1024)
+    try await client.respondToTool(id: .string("outer-image"), result: result)
+    let written = try #require(await transport.lastWrite())
+    #expect(try encoder.encode(written).count + 1 <= 8 * 1024 * 1024)
+    if referenced {
+        #expect(written["result"]?["isError"] == .bool(false))
+        let content = try #require(written["result"]?["content"]?.string)
+        let rich = try JSONDecoder().decode(JSONValue.self, from: Data(content.utf8))
+        #expect(rich["text"] == .string(text))
+        #expect(rich["images"] == .array([.object(image.fields)]))
+    } else {
+        #expect(written["result"]?["isError"] == .bool(true))
+        #expect(written["result"]?["content"] == .string("Host tool result exceeded the response frame limit"))
+    }
+    await client.close()
 }
 
 @Test func rpcPreservesUnicodeAcrossByteBoundaries() async throws {

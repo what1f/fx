@@ -224,3 +224,17 @@ func ultrafastRoutingTakesPriorityOverFastWhenEnabled(ultrafast: Bool) async thr
         "type": .string("image"), "mimeType": .string("image/png"), "sourceRef": .string("screenshot-1"), "data": .string("AQID"),
     ])]))
 }
+
+@Test(arguments: [3145731, 3342336, 3932163])
+func richToolImageOverflowPreservesReferences(size: Int) throws {
+    let bytes = Data(repeating: 1, count: size)
+    let images = ["host:first", "host:second"].map { FxImage(data: bytes, format: .png, sourceReference: $0) }
+    let response = try FxToolResult(text: "host image", images: images).response(toolName: "load")
+    let content = try #require(response["content"]?.string)
+    let decoded = try JSONDecoder().decode(JSONValue.self, from: Data(content.utf8))
+    #expect(response["contentType"] == .string("rich"))
+    #expect(decoded["images"] == .array(images.map { .object($0.fields) }))
+    #expect(throws: FxError.self) {
+        try FxToolResult(text: "host image", images: images.map { _ in FxImage(data: bytes, format: .png) }).response(toolName: "load")
+    }
+}

@@ -24,7 +24,8 @@ public struct FxImage: Sendable, Equatable, Codable {
 
     func validate() throws {
         if let sourceReference {
-            guard !sourceReference.isEmpty, sourceReference.utf8.count <= 512,
+            guard sourceReference.utf8.count <= 512 else { throw FxError.invalidInput("Image reference exceeds the 512 byte limit") }
+            guard !sourceReference.isEmpty,
                   !sourceReference.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else {
                 throw FxError.invalidInput("Image reference must contain 1–512 UTF-8 bytes without control characters")
             }
@@ -59,23 +60,43 @@ public struct FxToolResult: Sendable, Equatable, ExpressibleByStringLiteral {
     public init(stringLiteral value: String) { self.init(text: value) }
 
     func response(toolName: String, storedImages: [Int: String] = [:]) throws -> JSONValue {
-        guard images.count <= 8 else { throw FxError.invalidInput("A tool result accepts at most 8 images") }
+        guard images.count <= 8 else { throw FxError.invalidInput("invalid typed tool result") }
         var content = text
         if !images.isEmpty {
-            let encoded = try images.enumerated().map { index, image -> JSONValue in
-                try image.validate()
+            var encoded = try images.enumerated().map { index, image -> JSONValue in
+                do { try image.validate() }
+                catch { throw FxError.invalidInput("Invalid tool image sourceRef or data") }
+                guard image.data != nil || image.sourceReference != nil else {
+                    throw FxError.invalidInput("invalid tool image")
+                }
                 var fields = image.fields
                 if let data = image.data {
-                    guard data.count <= 5 * 1024 * 1024 / 4 * 3 else {
-                        throw FxError.invalidInput("Tool image exceeds the size limit")
-                    }
-                    fields["data"] = .string(data.base64EncodedString())
-                    if let name = storedImages[index] { fields["stored"] = .string(name) }
+                    if data.count <= 5 * 1024 * 1024 / 4 * 3 {
+                        fields["data"] = .string(data.base64EncodedString())
+                        if let name = storedImages[index] { fields["stored"] = .string(name) }
+                    } else if image.sourceReference == nil { throw FxError.invalidInput("invalid tool image") }
                 }
                 return .object(fields)
             }
-            let bytes = try JSONEncoder().encode(JSONValue.object(["text": .string(text), "images": .array(encoded)]))
-            guard bytes.count <= 8 * 1024 * 1024 else { throw FxError.invalidInput("Tool result exceeds the size limit") }
+            func omitReferencedBytes() {
+                encoded = encoded.map { image in
+                    guard image["sourceRef"] != nil, case .object(var fields) = image else { return image }
+                    fields.removeValue(forKey: "data")
+                    fields.removeValue(forKey: "stored")
+                    return .object(fields)
+                }
+            }
+            func dataSize() -> Int { encoded.reduce(0) { $0 + ($1["data"]?.string?.utf8.count ?? 0) } }
+            if dataSize() > 8 * 1024 * 1024 { omitReferencedBytes() }
+            guard dataSize() <= 8 * 1024 * 1024 else { throw FxError.invalidInput("tool images exceed the result limit") }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.withoutEscapingSlashes]
+            func encode() throws -> Data {
+                try encoder.encode(JSONValue.object(["text": .string(text), "images": .array(encoded)]))
+            }
+            var bytes = try encode()
+            if bytes.count > 8 * 1024 * 1024 { omitReferencedBytes(); bytes = try encode() }
+            guard bytes.count <= 8 * 1024 * 1024 else { throw FxError.invalidInput("typed tool result exceeds the result limit") }
             content = String(decoding: bytes, as: UTF8.self)
         }
         if isError && content.isEmpty { content = "Tool \(toolName) failed without a message" }

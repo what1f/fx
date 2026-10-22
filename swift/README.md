@@ -206,7 +206,11 @@ A `.toolStarted` event carries an optional `FxToolInput`: `.complete(JSONValue)`
 
 Pass `providerTools: [.webSearch]` to `FxConfiguration` to advertise search executed by the model service. It has no host closure. Search calls and results appear as ordinary tool events and remain in checkpoint and journal history. Availability depends on the model service. Provider and host tool names share one namespace; duplicate names are rejected.
 
-Images use `Data` and a supported format. Each prompt accepts up to eight images, at most 3.75 MiB each and 6 MiB together, subject to the encoded request limit. The core checks image content and model capabilities.
+Images use `Data` and a supported format. Each prompt accepts up to eight images, at most 3.75 MiB each and 6 MiB together, subject to the encoded request limit. If a byte limit is exceeded, images with a source reference retain their reference and omit their bytes. The SDK checks image signatures; the core checks dimensions and model capabilities.
+
+Call `try configuration.validatePrompt(content)` to check input before opening an engine. Validation runs no image preparation or network requests. With `prepareImage` configured, byte limits and signatures are checked after preparation when the prompt runs. Image count, references and text frame limits still apply during validation.
+
+Tool image results use the same per-image limit and allow up to eight images. Their base64 data and rich JSON content must each fit 8 MiB. Referenced images omit bytes when needed to fit these limits. If the outer RPC response exceeds 8 MiB, the SDK first omits referenced image bytes, then returns a tool error if the response still cannot fit.
 
 Set `configuration.prepareImage` to resize or convert prompt images before admission. The asynchronous closure receives an `FxImage` and must return nonempty bytes and a supported format. The original source reference is retained. Size limits apply to the prepared bytes, so the input may exceed those limits. Reference-only images and restored conversation images do not call the closure. Preparation runs before image storage or a model request; a thrown error fails the turn with the original error. The closure must cooperate with cancellation. Cancelling a turn or closing the engine cancels preparation, and closing waits for it to exit.
 

@@ -9,24 +9,43 @@ actor FixtureTransport: EngineTransport {
     private var tools: [String: CheckedContinuation<JSONValue, any Error>] = [:]
     private var nextTool = 1
     private var closed = false
+    private var writes: [String: CheckedContinuation<Void, any Error>] = [:]
 
     init() { (output, continuation) = AsyncThrowingStream.makeStream(bufferingPolicy: .bufferingOldest(256)) }
     func start() {}
     func setContext(sessionID: String, modelID: String) {}
     func beginTurn() {}
     func abortEffects() {}
-    func discardAttachments() {}
-    func putAttachment(_ data: Data, id: UInt32) throws { throw FxError.invalidInput("Fixture has no attachments") }
+    func discardAttachments() { DriverOutput.emit(.object(["fixtureDiscard": .bool(true)])) }
+    func putAttachment(_ data: Data, id: UInt32) async throws {
+        try await relay("fixtureAttachment", .object(["id": .number(Double(id)), "data": .string(data.base64EncodedString())]))
+    }
     func takeAttachment(id: UInt32) throws -> Data { throw FxError.invalidInput("Fixture has no attachments") }
 
-    func write(_ bytes: Data) throws {
+    func write(_ bytes: Data) async throws {
         guard !closed else { throw FxError.closed }
         let message = try JSONDecoder().decode(JSONValue.self, from: bytes)
         if message["method"] == .string("libfx/conformance_barrier"), let id = message["id"] {
             try receive(.object(["id": id, "result": .object([:])]))
         } else if let id = message["id"]?.string, let tool = tools.removeValue(forKey: id) {
             tool.resume(returning: message)
-        } else { DriverOutput.emit(.object(["fixtureSend": message])) }
+        } else { try await relay("fixtureSend", message) }
+    }
+
+    private func relay(_ key: String, _ value: JSONValue) async throws {
+        let token = UUID().uuidString
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { continuation in
+                writes[token] = continuation
+                DriverOutput.emit(.object([key: value, "fixtureToken": .string(token)]))
+            }
+        } onCancel: { Task { await self.finishWrite(token, error: CancellationError()) } }
+    }
+
+    func finishWrite(_ token: String, error: (any Error)? = nil) {
+        guard let waiter = writes.removeValue(forKey: token) else { return }
+        if let error { waiter.resume(throwing: error) } else { waiter.resume() }
     }
 
     func receive(_ message: JSONValue) throws {
@@ -63,9 +82,21 @@ actor FixtureTransport: EngineTransport {
     func close() {
         guard !closed else { return }
         closed = true
+        for waiter in writes.values { waiter.resume(throwing: FxError.closed) }
+        writes.removeAll()
         for waiter in tools.values { waiter.resume(throwing: FxError.closed) }
         tools.removeAll()
         continuation.finish()
         DriverOutput.emit(.object(["fixtureClosed": .bool(true)]))
+    }
+
+    func fail(_ error: any Error) {
+        guard !closed else { return }
+        closed = true
+        for waiter in writes.values { waiter.resume(throwing: error) }
+        writes.removeAll()
+        for waiter in tools.values { waiter.resume(throwing: error) }
+        tools.removeAll()
+        continuation.finish(throwing: error)
     }
 }

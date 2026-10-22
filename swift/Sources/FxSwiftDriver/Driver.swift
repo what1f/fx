@@ -102,6 +102,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                 fields["category"] = .string(message == "Reasoning effort must not exceed 64 bytes" ? "range" : "type")
             }
             if case FxError.noActiveTurn = error { fields["message"] = .string("no prompt is running") }
+            if case FxError.steeringQueueFull = error { fields["message"] = .string("steering queue is full") }
             if case FxError.busy = error, value["op"] == .string("checkpoint") {
                 fields["message"] = .string("cannot checkpoint while a prompt is active")
             }
@@ -138,7 +139,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             return ["imagePreparationFailure": .string(relayed.token)]
         }
         if case FxError.invalidInput(let message) = error {
-            let range = ["Reasoning effort must not exceed 64 bytes", "Prompt image exceeds the size limit", "Prompt images exceed the count or size limit", "Prompt exceeds frame limit"].contains(message)
+            let range = ["Reasoning effort must not exceed 64 bytes", "Prompt image exceeds the size limit", "Prompt images exceed the count or size limit", "Prompt exceeds frame limit", "Prompt accepts at most 8 images", "Image reference exceeds the 512 byte limit"].contains(message)
             return ["message": .string(javascriptMessage(message)), "category": .string(range ? "range" : "type")]
         }
         if let relayed = error as? RelayedPersistenceError {
@@ -193,6 +194,15 @@ actor Driver: FxHTTPClient, FxPersistence {
             guard let fixtureTransport else { throw FxError.closed }
             try await fixtureTransport.receive(value["message"] ?? .null)
             try await engine?.drainConformanceFrames()
+            return .null
+        case "fixtureExit":
+            await fixtureTransport?.fail(FxError.transport("fx-core exited with code \(value["code"]?.integer ?? 0)"))
+            await engine?.waitForConformanceTermination()
+            return .null
+        case "fixtureWriteResult":
+            if let token = value["token"]?.string {
+                await fixtureTransport?.finishWrite(token, error: value["error"]?.string.map { FxError.transport($0) })
+            }
             return .null
         case "fixtureTool":
             guard let fixtureTransport, let engine else { throw FxError.closed }
@@ -389,6 +399,14 @@ actor Driver: FxHTTPClient, FxPersistence {
                 return try await self.requestPermission(request)
             }
             config.wireObserver = { [weak self] direction, message in
+                if direction == .received, message["result"]?["checkpointAttachment"] != nil {
+                    await self?.observeWireDelivery(direction, message, tokenField: "wireDeliveryToken")
+                    return
+                }
+                if direction == .sent, message["method"] == .string("session/prompt") {
+                    await self?.observeWireDelivery(direction, message, tokenField: "diagnosticToken")
+                    return
+                }
                 await self?.emit(.object(["diagnostic": .object([
                     "type": .string(direction == .sent ? "acp.send" : "acp.receive"), "message": message,
                 ])]))
@@ -611,6 +629,17 @@ actor Driver: FxHTTPClient, FxPersistence {
         case "withdraw":
             guard let token = value["turnToken"]?.string, let turn = turns[token] else { return .string(FxWithdrawal.alreadyPlaced.rawValue) }
             return .string(try await turn.withdraw(value["inputID"]?.string ?? "").rawValue)
+        case "validatePrompt":
+            guard case .array(let blocks) = value["blocks"] else { throw FxError.invalidInput("Invalid prompt descriptors") }
+            let descriptors = try blocks.map { block -> PromptInputDescriptor in
+                if let text = block["text"]?.string, block["type"] == .string("text") { return .text(text) }
+                guard block["type"] == .string("image"), let mime = block["mimeType"]?.string,
+                      let format = FxImageFormat(rawValue: mime) else { throw FxError.invalidInput("Unsupported image format") }
+                return .image(format: format, reference: block["sourceRef"]?.string, byteCount: block["byteCount"]?.integer,
+                              prefix: block["prefix"]?.string.flatMap { Data(base64Encoded: $0) })
+            }
+            let admission = try PromptAdmission(descriptors, deferringImageLimits: value["preparing"] == .bool(true))
+            return .array(admission.retainedImages.sorted().map { .number(Double($0)) })
         case "checkpoint":
             guard let engine else { throw FxError.closed }
             return .string(try await engine.checkpoint().base64EncodedString())
@@ -695,7 +724,14 @@ actor Driver: FxHTTPClient, FxPersistence {
             else if let result = value["rich"] {
                 do {
                     let images: [FxImage]
-                    if case .array(let entries) = result["images"] { images = try entries.map(image) }
+                    if case .array(let entries) = result["images"] {
+                        images = try entries.map { value in
+                            guard value["data"] != nil || value["sourceRef"] != nil else {
+                                throw FxError.invalidInput("invalid tool image")
+                            }
+                            return try image(value)
+                        }
+                    }
                     else { images = [] }
                     waiter.resume(returning: FxToolResult(
                         text: result["text"]?.string ?? "", images: images, isError: result["isError"] == .bool(true)
@@ -770,6 +806,12 @@ actor Driver: FxHTTPClient, FxPersistence {
 
     private func javascriptMessage(_ message: String) -> String {
         switch message {
+        case "Prompt must not be empty": return "prompt is empty"
+        case "Prompt accepts at most 8 images": return "prompt cannot contain more than 8 images"
+        case "Prompt images exceed the count or size limit": return "prompt images exceed the libfx byte limit"
+        case "Image reference exceeds the 512 byte limit": return "sourceRef exceeds the 512 byte limit"
+        case "Image reference must contain 1–512 UTF-8 bytes without control characters": return "sourceRef must contain 1 to 512 bytes without control characters"
+        case "Unsupported image format": return "mimeType must be image/png, image/jpeg, image/gif or image/webp"
         case "Checkpoint must not be empty": return "Invalid or non-fresh libfx checkpoint"
         case "Checkpoint exceeds the 4194304 byte limit": return "libfx checkpoint is too large"
         case "Prompt image exceeds the size limit": return "image exceeds the per-image libfx limit"
@@ -924,6 +966,21 @@ actor Driver: FxHTTPClient, FxPersistence {
 
     private func finishRetryObservation(_ token: String) { retryObservers.removeValue(forKey: token)?.resume() }
 
+    // Keep an export pending until its receiving JS event loop has observed it.
+    // This preserves call ordering while synchronous Swift admission runs there.
+    private func observeWireDelivery(_ direction: FxWireDirection, _ message: JSONValue, tokenField: String) async {
+        let token = UUID().uuidString
+        await withTaskCancellationHandler {
+            guard !Task.isCancelled else { return }
+            await withCheckedContinuation { continuation in
+                retryObservers[token] = continuation
+                emit(.object(["diagnostic": .object([
+                    "type": .string(direction == .sent ? "acp.send" : "acp.receive"), "message": message,
+                ]), tokenField: .string(token)]))
+            }
+        } onCancel: { Task { await self.finishRetryObservation(token) } }
+    }
+
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         let id = nextFetchID
         nextFetchID += 1
@@ -1071,6 +1128,16 @@ actor Driver: FxHTTPClient, FxPersistence {
 
 @main struct FxSwiftDriver {
     static func main() async {
+        if CommandLine.arguments.dropFirst().first == "check-prompt" {
+            do {
+                let value = try JSONDecoder().decode(JSONValue.self, from: FileHandle.standardInput.readDataToEndOfFile())
+                await Driver().handle(value)
+            } catch {
+                FileHandle.standardError.write(Data("Invalid prompt check request: \(error)\n".utf8))
+                exit(1)
+            }
+            return
+        }
         if CommandLine.arguments.dropFirst().first == "skill-file" {
             struct Input: Decodable { let path: String; let resources: [FxSkill.Resource]? }
             struct Output: Encodable {

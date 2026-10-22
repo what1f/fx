@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import LibFx
+@_spi(Conformance) @testable import LibFx
 
 private actor HookRuntime: EngineTransport {
     nonisolated let output: AsyncThrowingStream<Data, any Error>
@@ -47,6 +47,8 @@ private actor HookRuntime: EngineTransport {
         continuation.yield(bytes)
     }
     func waitForPrompt() async { while promptID == nil { await Task.yield() } }
+    func hasPrompt() -> Bool { promptID != nil }
+    func fail(_ error: any Error) { continuation.finish(throwing: error) }
     func finishPrompt() throws {
         guard let promptID else { throw FxError.noActiveTurn }
         try receive(.object(["id": promptID, "result": .object(["stopReason": .string("end_turn")])]))
@@ -79,6 +81,91 @@ private actor HookRuntime: EngineTransport {
 private actor RuntimeContexts {
     private(set) var values: [FxToolContext] = []
     func record(_ value: FxToolContext) { values.append(value) }
+}
+
+private actor PreparationFailureProbe {
+    private(set) var started = false
+    private(set) var finished = false
+    func prepare(_ image: FxImage) async throws -> FxImage {
+        started = true
+        defer { finished = true }
+        try await Task.sleep(for: .seconds(60))
+        return image
+    }
+    func waitUntilStarted() async { while !started { await Task.yield() } }
+}
+
+@Test(.timeLimit(.minutes(1))) func runtimeFailureCancelsPreparationAndPreservesOriginalFailure() async throws {
+    let runtime = HookRuntime(), probe = PreparationFailureProbe()
+    let failure = FxError.transport("runtime exited during preparation")
+    var configuration = FxConfiguration(apiKey: "fixture")
+    configuration.prepareImage = { try await probe.prepare($0) }
+    let engine = try await FxEngine.openForConformance(configuration: configuration, transport: runtime)
+    let turn = try await engine.prompt([.image(FxImage(data: Data([1]), format: .png))])
+    await probe.waitUntilStarted()
+    await runtime.fail(failure)
+    do { _ = try await turn.result; Issue.record("Runtime failure was lost") }
+    catch { #expect(error as? FxError == failure) }
+    do {
+        for try await _ in turn {}
+        Issue.record("Events completed without the runtime failure")
+    } catch { #expect(error as? FxError == failure) }
+    do { _ = try await engine.prompt("after exit"); Issue.record("Failed runtime accepted a turn") }
+    catch { #expect(error as? FxError == failure) }
+    try await engine.close()
+    #expect(await probe.finished)
+    #expect(await runtime.hasPrompt() == false)
+}
+
+private actor BeforeWriteProbe {
+    private var waiter: CheckedContinuation<Void, Never>?
+    private(set) var started = false
+    func pause() async {
+        started = true
+        await withCheckedContinuation { waiter = $0 }
+    }
+    func waitUntilStarted() async { while !started { await Task.yield() } }
+    func release() { waiter?.resume(); waiter = nil }
+}
+
+@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+func steeringDuringImagePreparationHasCountAndByteBounds(byteBound: Bool) async throws {
+    let runtime = HookRuntime(), probe = PreparationFailureProbe()
+    var configuration = FxConfiguration(apiKey: "fixture")
+    configuration.prepareImage = { try await probe.prepare($0) }
+    let engine = try await FxEngine.openForConformance(configuration: configuration, transport: runtime)
+    let turn = try await engine.prompt([.image(FxImage(data: Data([1]), format: .png))])
+    await probe.waitUntilStarted()
+    let count = byteBound ? 16 : 64
+    let text = byteBound ? String(repeating: "x", count: 65536) : "steer"
+    let receipts = (0..<count).map { index in Task { try await turn.steer(text, id: "steer-\(index)") } }
+    while await engine.pendingSteeringCount < count { await Task.yield() }
+    do { _ = try await turn.steer("overflow", id: "overflow"); Issue.record("Steering queue exceeded its limit") }
+    catch { #expect(error as? FxError == .steeringQueueFull) }
+    await turn.cancel()
+    #expect(try await turn.result.stopReason == .cancelled)
+    for receipt in receipts {
+        do { _ = try await receipt.value; Issue.record("Cancelled preparation accepted steering") }
+        catch { #expect(error as? FxError == .noActiveTurn) }
+    }
+    #expect(await engine.pendingSteeringCount == 0)
+    try await engine.close()
+}
+
+@Test(.timeLimit(.minutes(1))) func cancellationBeforePromptWriteReturnsAndPreventsDispatch() async throws {
+    let runtime = HookRuntime(), probe = BeforeWriteProbe()
+    var configuration = FxConfiguration(apiKey: "fixture")
+    configuration.wireObserver = { direction, message in
+        if direction == .sent, message["method"] == .string("session/prompt") { await probe.pause() }
+    }
+    let engine = try await FxEngine.openForConformance(configuration: configuration, transport: runtime)
+    let turn = try await engine.prompt("cancel before write")
+    await probe.waitUntilStarted()
+    await turn.cancel()
+    await probe.release()
+    #expect(try await turn.result.stopReason == .cancelled)
+    #expect(await runtime.hasPrompt() == false)
+    try await engine.close()
 }
 
 @Test(.timeLimit(.minutes(1))) func nativeDescendantScopesCannotAuthorizeOrInvalidateRootTools() async throws {

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { createFxEngine } from './adapter.mjs';
 
 // This tests the conformance runner's failure detection, not SDK behavior.
@@ -38,6 +39,26 @@ lines.on('close', () => {
   for (const surface of ['engine', 'agent', 'observation', 'inspect', 'models']) {
     for (const mode of ['success', 'exit', 'signal', 'stderr', 'late-stderr']) {
       process.env.LIBFX_FIXTURE_TERMINATION = mode;
+      if (surface === 'engine') {
+        const adapter = new URL('./adapter.mjs', import.meta.url).href;
+        const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+          import { createFxEngine } from ${JSON.stringify(adapter)};
+          const engine = await createFxEngine();
+          await engine.close();
+          console.log('SDK close acknowledged');
+        `], { env: process.env, encoding: 'utf8', timeout: 10_000 });
+        assert.ifError(child.error);
+        assert.match(child.stdout, /SDK close acknowledged/);
+        if (mode === 'success') {
+          assert.equal(child.status, 0);
+          assert.equal(child.stderr, '');
+        } else {
+          assert.notEqual(child.status, 0);
+          assert.match(child.stderr, mode === 'exit' ? /Swift driver exited: 17/
+            : mode === 'signal' ? /Swift driver exited: SIGTERM/ : /fixture diagnostic/);
+        }
+        continue;
+      }
       const exercise = async () => {
         const options = surface === 'agent' ? { __agent: true } : surface === 'inspect' ? { __inspect: true }
           : surface === 'models' ? { __listModels: true } : surface === 'observation'
@@ -52,7 +73,7 @@ lines.on('close', () => {
   }
   process.env.LIBFX_SWIFT_DRIVER = join(directory, 'missing');
   await assert.rejects(createFxEngine(), /ENOENT|closed|EPIPE/);
-  console.log('Conformance driver lifecycle passed: all surfaces reject abnormal exit, signals and drained stderr; failed spawn settles');
+  console.log('Conformance driver lifecycle passed: all surfaces detect abnormal exit, signals and drained stderr; SDK close acknowledges cleanup before driver exit; failed spawn settles');
 } finally {
   for (const [key, value] of [['LIBFX_SWIFT_DRIVER', saved.driver], ['LIBFX_FIXTURE_TERMINATION', saved.mode]]) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;

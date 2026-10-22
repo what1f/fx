@@ -228,6 +228,11 @@ struct SubscriptionHTTP: FxHTTPClient {
         let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jP0cAAAAASUVORK5CYII=")!
         var imageConfig = FxConfiguration(apiKey: "consumer-test-key", model: "swift/consumer",
             httpClient: ImageHTTP(base64: png.base64EncodedString()), checkpointAfterBytes: 0)
+        try imageConfig.validatePrompt([.image(FxImage(data: png, format: .png))])
+        var rejectedImageMismatch = false
+        do { try imageConfig.validatePrompt([.image(FxImage(data: png, format: .jpeg))]) }
+        catch FxError.invalidInput { rejectedImageMismatch = true }
+        guard rejectedImageMismatch else { throw FxError.protocolViolation("Image validation accepted a format mismatch") }
         imageConfig.modelCatalog = try FxModelCatalog(response: Data(#"{"data":[{"id":"swift/consumer","type":"language","tags":["vision","file-input"]}]}"#.utf8))
         imageConfig.imageWindow = try FxImageWindow(maximumImages: 2)
         imageConfig.prepareImage = { image in
@@ -237,6 +242,7 @@ struct SubscriptionHTTP: FxHTTPClient {
             return FxImage(data: png, format: .png)
         }
         let imageStore = try FxSQLitePersistence(url: imageURL)
+        try imageConfig.validatePrompt([.image(FxImage(data: Data(repeating: 0, count: 5 * 1024 * 1024), format: .png))])
         let imagePersistence: any FxImagePersistence = imageStore
         let imageEngine = try await FxEngine.open(configuration: imageConfig, persistence: imagePersistence)
         let picture = try await imageEngine.prompt([.image(FxImage(data: Data(repeating: 0, count: 5 * 1024 * 1024), format: .png))])

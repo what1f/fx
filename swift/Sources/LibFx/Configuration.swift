@@ -1,6 +1,11 @@
 import Foundation
 
 public struct FxConfiguration: Sendable {
+    /// Checks input without opening an engine or running image preparation.
+    public func validatePrompt(_ content: [FxPromptContent]) throws {
+        _ = try PreparedPrompt(content, deferringImageLimits: prepareImage != nil)
+    }
+
     @_spi(Conformance) public var wireObserver: (@Sendable (FxWireDirection, JSONValue) async -> Void)?
     public var provider: FxProvider
     public var model: FxModel

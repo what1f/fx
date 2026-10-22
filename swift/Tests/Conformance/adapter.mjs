@@ -1,8 +1,8 @@
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createMcpAdapter as bridgeMcpAdapter } from './mcp-adapter.mjs';
@@ -108,6 +108,7 @@ export async function createFxEngine(options = {}) {
   const pending = new Map();
   const tools = new Map((options.tools || []).map(tool => [tool.name, tool]));
   const toolControllers = new Map();
+  const toolOwners = new Map();
   const turnStates = new Map(), followUps = new Map(), acceptedSessions = new Map();
   const sessionIntakes = new Set();
   const fetchControllers = new Map();
@@ -115,7 +116,7 @@ export async function createFxEngine(options = {}) {
   const inputEffects = new Map(), toolScopes = new Map();
   let fixtureRuntime;
   const fixtureMethods = new Map();
-  let nextID = 1, turn = null, closed = false, stderr = '', runtimeStarted = false;
+  let nextID = 1, turn = null, closed = false, stderr = '', runtimeStarted = false, runtimeExitDelivered = false;
   let resumable = false, recoveryCalls = [], recoveryTurnID = null;
 
   child.stderr.on('data', data => { stderr += data; });
@@ -192,12 +193,15 @@ export async function createFxEngine(options = {}) {
       },
     };
   }
+  function runtimeExit(code, signal) {
+    if (!runtimeStarted || runtimeExitDelivered) return;
+    runtimeExitDelivered = true;
+    try { options.onEvent?.({ type: 'runtime.exit', code, signal }); } catch {}
+  }
   const exited = new Promise(resolve => child.once('close', (code, signal) => {
     for (const relay of toolScopes.values()) relay.invalidate();
     toolScopes.clear();
-    if (runtimeStarted) {
-      try { options.onEvent?.({ type: 'runtime.exit', code, signal }); } catch {}
-    }
+    runtimeExit(code, signal);
     const error = new Error(`Swift driver exited: ${code ?? signal}${stderr ? `\n${stderr}` : ''}`);
     for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
@@ -212,12 +216,19 @@ export async function createFxEngine(options = {}) {
     lines.close();
     if (status.code !== 0 || stderr) throw new Error(`Swift driver exited: ${status.code ?? status.signal}${stderr ? `\n${stderr}` : ''}`);
   }
+  function reapClosedDriver() {
+    // Swift has acknowledged that its SDK resources are closed. Keep the
+    // child pipes alive until exit and fail the test on any late diagnostics.
+    // Sanitizer process teardown is separate from the SDK close operation.
+    void finish().catch(error => queueMicrotask(() => { throw error; }));
+  }
   child.on('error', error => {
     for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
   });
   const persistenceFailures = new Map();
   const imagePreparationFailures = new Map();
+  const blobLoads = new Map();
   let appendFailure, reportedAppendFailure;
   function persistenceError(value) {
     if (imagePreparationFailures.has(value.imagePreparationFailure)) return { error: imagePreparationFailures.get(value.imagePreparationFailure) };
@@ -270,7 +281,16 @@ export async function createFxEngine(options = {}) {
     if (value.fixtureSend) {
       const message = value.fixtureSend;
       if (message.id !== undefined) fixtureMethods.set(message.id, message.method);
-      fixtureRuntime.write(JSON.stringify(message) + '\n');
+      let error;
+      try { fixtureRuntime.write(JSON.stringify(message) + '\n'); } catch (caught) { error = caught.message ?? String(caught); }
+      queueMicrotask(() => void request('fixtureWriteResult', { token: value.fixtureToken, ...(error ? { error } : {}) }).catch(() => {}));
+    } else if (value.fixtureAttachment) {
+      let error;
+      try { fixtureRuntime.writeAttachment(value.fixtureAttachment.id, new Uint8Array(Buffer.from(value.fixtureAttachment.data, 'base64'))); }
+      catch (caught) { error = caught.message ?? String(caught); }
+      queueMicrotask(() => void request('fixtureWriteResult', { token: value.fixtureToken, ...(error ? { error } : {}) }).catch(() => {}));
+    } else if (value.fixtureDiscard) {
+      fixtureRuntime.discardAttachments?.();
     } else if (value.fixtureClosed) {
       fixtureRuntime.closeStdin();
     } else if (value.inputEffect) {
@@ -310,6 +330,7 @@ export async function createFxEngine(options = {}) {
       }
       try { options.onEvent?.(value.diagnostic); }
       finally {
+        if (value.wireDeliveryToken) void request('diagnosticAck', { token: value.wireDeliveryToken }).catch(() => {});
         if (value.diagnosticToken) {
           void Promise.resolve(turn?.cancellation).then(() => request('diagnosticAck', { token: value.diagnosticToken })).catch(() => {});
         }
@@ -381,7 +402,12 @@ export async function createFxEngine(options = {}) {
       fetchControllers.delete(value.fetchCancelled);
     } else if (value.imagePreparationRequest) {
       const call = value.imagePreparationRequest;
-      void Promise.resolve().then(() => options.resizeImage({ bytes: new Uint8Array(Buffer.from(call.data, 'base64')), mimeType: call.mimeType }))
+      void Promise.resolve().then(async () => {
+        const blob = blobLoads.get(call.data);
+        const bytes = blob ? await blob.promise : new Uint8Array(Buffer.from(call.data, 'base64'));
+        const image = { bytes, mimeType: call.mimeType };
+        return options.resizeImage ? options.resizeImage(image) : image;
+      })
         .then(image => {
           if (!image || !(image.bytes instanceof ArrayBuffer || ArrayBuffer.isView(image.bytes)) || !image.bytes.byteLength || typeof image.mimeType !== 'string') {
             throw new TypeError('resizeImage must return non-empty bytes and a mimeType');
@@ -474,6 +500,7 @@ export async function createFxEngine(options = {}) {
     } else if (value.toolRequest) {
       const call = value.toolRequest, controller = new AbortController();
       toolControllers.set(call.id, controller);
+      toolOwners.set(call.id, call.turnId);
       const owner = [...turnStates.values()].find(state => state.public.id === call.turnId);
       if (owner?.signal?.aborted) return;
       Promise.resolve().then(() => tools.get(call.name).execute(call.input, {
@@ -481,12 +508,15 @@ export async function createFxEngine(options = {}) {
         ...(call.context == null ? {} : { context: call.context }),
         ...(call.observation && options.hooks ? { observation: inputObservation(call) } : {}),
       })).then(result => controller.signal.aborted ? undefined : request('toolResult', { toolID: call.id,
-        ...(result?.type === 'libfx.tool-result' ? { rich: result } : {
+        ...(result?.type === 'libfx.tool-result' ? (
+          Array.isArray(result.images) && result.images.some(image => typeof image?.sourceRef === 'string' && !image.sourceRef.isWellFormed())
+            ? { error: 'Invalid tool image sourceRef' } : { rich: result }
+        ) : {
           content: typeof result === 'string' ? result : JSON.stringify(result) ?? 'null',
         }),
       }), error => controller.signal.aborted ? undefined : request('toolResult', { toolID: call.id,
         error: error instanceof Error ? error.message : String(error) }))
-        .catch(() => {}).finally(() => toolControllers.delete(call.id));
+        .catch(() => {}).finally(() => { toolControllers.delete(call.id); toolOwners.delete(call.id); });
     }
   });
   const { fetch, nativeAddon, backend, onEvent, tools: _tools, checkpoint, persistence, runtimeFactory, ...configuration } = options;
@@ -528,6 +558,11 @@ export async function createFxEngine(options = {}) {
         if (message.id !== undefined) fixtureMethods.delete(message.id);
         await request('fixtureReceive', { message });
       });
+      void fixtureRuntime.exited.then(async code => {
+        if (closed) return;
+        await request('fixtureExit', { code });
+        try { options.onEvent?.({ type: 'runtime.exit', code }); } catch {}
+      }).catch(reportObservationError);
     }
     if (options.__inspect) {
       try { return await request('inspectSession', { path: options.sessionStorePath, sessionID: options.sessionID, agentName: options.name }); }
@@ -539,7 +574,7 @@ export async function createFxEngine(options = {}) {
     }
     const opened = await request(options.__agent ? 'openAgent' : 'open', { options: {
       ...configuration,
-      hasImagePreparation: typeof options.resizeImage === 'function',
+      hasImagePreparation: !options.__agent || typeof options.resizeImage === 'function',
       sessionId: options.sessionId,
       model: swiftModel(options),
       ...(options.hooks ? { hooks: options.hooks } : {}),
@@ -623,9 +658,15 @@ export async function createFxEngine(options = {}) {
       const turnToken = randomUUID();
       const control = (op, args = {}) => request(op, { ...args, turnToken });
       let ready;
+      const abortTools = () => {
+        for (const [id, controller] of toolControllers) {
+          if (toolOwners.get(id) === state.public.id) controller.abort();
+        }
+      };
       const state = createTurn(args => {
         if (args.reason !== undefined && args.reason !== 'handoff') throw new TypeError('reason must be "handoff"');
         if (args.reason === 'handoff' && !options.persistence && !nativeStore) throw new Error('Handoff needs persistence');
+        abortTools();
         return ready.then(() => control('cancel', args)).then(reply => {
           if (args.reason === 'handoff') handedOff = reply?.handedOff === true;
           return reply;
@@ -638,16 +679,35 @@ export async function createFxEngine(options = {}) {
       turn = state;
       const publicID = op === 'prompt' ? promptOptions.turnId === undefined ? randomUUID() : promptOptions.turnId : recoveryTurnID;
       state.public.id = publicID;
-      ready = (op === 'prompt' ? encodePrompt(args.text).then(text => ({ text })) : Promise.resolve(args))
-        .then(args => control(op, {
+      const loads = [];
+      if (op === 'prompt') {
+        args = { ...args, text: args.text.map(block => {
+          if (!(block.data instanceof Blob)) return block;
+          const data = Buffer.from('swift-blob-' + randomUUID()).toString('base64');
+          const deferred = Promise.withResolvers();
+          deferred.promise.catch(() => {});
+          const load = { ...deferred, blob: block.data };
+          blobLoads.set(data, load);
+          loads.push({ data, load });
+          return { ...block, data };
+        }) };
+      }
+      ready = control(op, {
           ...args, ...(op === 'prompt' || publicID != null ? { turnID: publicID } : {}),
           ...(promptOptions.yieldAt === undefined ? {} : { yieldAt: promptOptions.yieldAt }),
-        })).then(reply => { if (reply?.turnID) state.public.id = reply.turnID; });
-      const abort = () => { state.cancellation = ready.then(() => control('cancel')).catch(error => state.fail(error)); };
+        }).then(reply => { if (reply?.turnID) state.public.id = reply.turnID; });
+      const abort = () => { abortTools(); state.cancellation = ready.then(() => control('cancel')).catch(error => state.fail(error)); };
       promptOptions.signal?.addEventListener('abort', abort, { once: true });
-      state.cleanup = () => promptOptions.signal?.removeEventListener('abort', abort);
+      state.cleanup = () => {
+        promptOptions.signal?.removeEventListener('abort', abort);
+        for (const { data } of loads) blobLoads.delete(data);
+      };
       if (promptOptions.signal?.aborted) abort();
       ready.catch(error => { state.cleanup?.(); state.fail(error); turnStates.delete(turnToken); if (turn === state) turn = null; });
+      for (const { load } of loads) {
+        try { Promise.resolve(load.blob.arrayBuffer()).then(data => load.resolve(new Uint8Array(data)), load.reject); }
+        catch (error) { load.reject(error); }
+      }
       return state.public;
     }
     return {
@@ -658,7 +718,7 @@ export async function createFxEngine(options = {}) {
         if (promptOptions.turnId !== undefined && (typeof promptOptions.turnId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(promptOptions.turnId))) {
           throw new TypeError('turnId must be 1 to 128 ASCII letters, digits, periods, underscores or hyphens');
         }
-        return begin('prompt', { text }, promptOptions);
+        return begin('prompt', { text: checkPromptWithSwift(text, typeof options.resizeImage === 'function', defaultDriver) }, promptOptions);
       },
       resume(promptOptions = {}) {
         if (handedOff) throw new Error('This engine handed its session off');
@@ -704,15 +764,88 @@ export async function createFxEngine(options = {}) {
       async close() {
         if (closed) return;
         closed = true;
-        try { await request('close'); }
+        try {
+          if (turn) {
+            const active = turn;
+            await active.public.cancel();
+            await active.public.result.catch(() => {});
+          }
+          await request('close');
+          runtimeExit(0, null);
+        }
         catch (error) {
           // JS reports an append failure once. Swift close keeps throwing its
           // original error; normalize only that same already-exposed instance.
           if (!reportedAppendFailure || error !== reportedAppendFailure) throw error;
-        } finally { await finish(); }
+        } finally { reapClosedDriver(); }
       },
     };
   } catch (error) { child.stdin.end(); await exited; lines.close(); throw error; }
+}
+
+const promptAdmissions = new Map();
+const blobSize = Object.getOwnPropertyDescriptor(Blob.prototype, 'size').get;
+
+// Translate JavaScript-only shapes. Bounds, reference policy and image signatures
+// are checked by the same Swift admission code used by the production engine.
+function checkPromptWithSwift(input, preparing, driver) {
+  const blocks = typeof input === 'string' ? [{ type: 'text', text: input }] : input;
+  if (!Array.isArray(blocks)) throw new TypeError('prompt input must be a string or an array of prompt blocks');
+  const descriptors = [];
+  const normalized = blocks.map((block, index) => {
+    if (!block || typeof block !== 'object') throw new TypeError(`prompt block ${index} must be an object`);
+    if (block.type === 'text') {
+      if (typeof block.text !== 'string') throw new TypeError(`text prompt block ${index} requires text`);
+      const text = { type: 'text', text: block.text };
+      descriptors.push(text);
+      return text;
+    }
+    if (block.type !== 'image') throw new TypeError(`unsupported prompt block type: ${String(block.type)}`);
+    if (block.sourceRef !== undefined && (typeof block.sourceRef !== 'string' || !block.sourceRef.isWellFormed())) {
+      throw new TypeError(`image prompt block ${index} has an invalid sourceRef`);
+    }
+    let mimeType = block.mimeType;
+    let byteCount, bytes, data = block.data;
+    if (data instanceof Blob) {
+      if (mimeType !== undefined && mimeType !== data.type) throw new TypeError(`image prompt block ${index} mimeType disagrees with Blob.type`);
+      mimeType = data.type;
+      byteCount = blobSize.call(data);
+      if (!Number.isSafeInteger(byteCount) || byteCount <= 0) throw new TypeError(`image prompt block ${index} requires a non-empty Blob with a valid size`);
+    } else if (typeof data === 'string' && data.length) {
+      bytes = Buffer.from(data, 'base64');
+      if (bytes.toString('base64') !== data) throw new TypeError(`image prompt block ${index} requires canonical base64 data`);
+      byteCount = bytes.byteLength;
+    } else if (data !== undefined || block.sourceRef === undefined) {
+      bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : null;
+      if (!bytes?.byteLength) throw new TypeError(`image prompt block ${index} requires base64 data, bytes, or a Blob`);
+      byteCount = bytes.byteLength;
+      data = Buffer.from(bytes).toString('base64');
+    }
+    if (typeof mimeType !== 'string' || !mimeType.length || mimeType.length > 128) throw new TypeError(`image prompt block ${index} requires a mimeType`);
+    const reference = block.sourceRef === undefined ? {} : { sourceRef: block.sourceRef };
+    descriptors.push({ type: 'image', mimeType, ...reference, byteCount,
+      ...(bytes ? { prefix: Buffer.from(bytes.subarray(0, 12)).toString('base64') } : {}) });
+    return { type: 'image', mimeType, ...reference, ...(data === undefined ? {} : { data }) };
+  });
+  const request = JSON.stringify({ id: 1, op: 'validatePrompt', blocks: descriptors, preparing });
+  const key = createHash('sha256').update(driver).update(request).digest('hex');
+  let admitted = promptAdmissions.get(key);
+  if (!admitted) {
+    const process = spawnSync(driver, ['check-prompt'], { input: request, encoding: 'utf8', timeout: 30_000, maxBuffer: 16 * 1024 * 1024 });
+    if (process.error) throw process.error;
+    if (process.status !== 0 || process.signal || process.stderr) throw new Error(`Swift prompt admission failed: ${process.stderr || process.signal || process.status}`);
+    const reply = JSON.parse(process.stdout);
+    if (reply.error) {
+      const ErrorType = reply.error.category === 'range' ? RangeError : reply.error.category === 'type' ? TypeError : Error;
+      throw new ErrorType(reply.error.message);
+    }
+    if (!Array.isArray(reply.result)) throw new Error('Swift returned invalid prompt admission');
+    admitted = new Set(reply.result);
+    if (promptAdmissions.size >= 128) promptAdmissions.delete(promptAdmissions.keys().next().value);
+    promptAdmissions.set(key, admitted);
+  }
+  return normalized.map((block, index) => block.type !== 'image' || admitted.has(index) ? block :
+    { type: 'image', mimeType: block.mimeType, sourceRef: block.sourceRef });
 }
 
 async function encodePrompt(input) {
@@ -745,6 +878,7 @@ function createTurn(cancel, steer, withdraw) {
       [Symbol.for('libfx.swift.cancellation')]() { return state.cancellation; },
       steer(input, id = `in_${randomUUID()}`) {
         const receipt = steer(input, id);
+        receipt.catch(() => {});
         receipt.id = id;
         return receipt;
       },

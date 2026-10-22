@@ -3,6 +3,8 @@ actor PromptDispatch {
     private var result: Bool?
     private var waiters: [CheckedContinuation<Bool, Never>] = []
 
+    func currentResult() -> Bool? { result }
+
     func wait() async -> Bool {
         if let result { return result }
         return await withCheckedContinuation { waiters.append($0) }
