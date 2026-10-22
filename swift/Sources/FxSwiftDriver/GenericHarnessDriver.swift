@@ -45,6 +45,9 @@ actor GenericHarnessDriver {
                     onLifecycleEvent: { event in DriverOutput.emit(.object(["genericDiagnostic": encodeLifecycleEvent(event), "agentToken": .string(agentToken)])) })
             } catch { relays.removeValue(forKey: agentToken); throw error }
             return .null
+        case "genericNewSessionId":
+            guard let agent = agents[agentToken] else { throw FxError.closed }
+            return .string(try await agent.session().id)
         case "genericPrompt", "genericResume", "genericSteer":
             let session = try await session(value)
             let turn: FxDurableTurn<JSONValue>

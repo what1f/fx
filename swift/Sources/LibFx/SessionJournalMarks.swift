@@ -6,6 +6,9 @@ public enum FxSessionJournalMark: Sendable, Equatable, Codable {
     case accepted(String)
     case withdrawn(String)
     case placed(String)
+    /// Commit with the terminal record before reporting the turn's result.
+    /// A fresh harness can read the identity from its persistence snapshot.
+    case completed(String)
     /// An opaque token identifying the current execution step for delivery cutoffs.
     case progress(String)
 

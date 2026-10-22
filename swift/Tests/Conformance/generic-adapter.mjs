@@ -116,12 +116,13 @@ export function createDurableAgentFactory({ harness, defaultDurability, name = '
       const entry = sessions.get(call.handle);
       switch (call.method) {
         case 'open': {
-          const state = { session: null, head: undefined, current: null, completed: null };
+          const state = { session: null, head: undefined, current: null, completed: null, completedRuntimeId: null };
           sessions.set(call.handle, state);
           const store = {
             async load() {
               const snapshot = await request('genericPersistence', { handle: call.handle, method: 'load' });
               state.head = snapshot.head ?? undefined;
+              state.completedRuntimeId = snapshot.completedTurnRuntimeId ?? null;
               return { head: state.head, checkpoint: snapshot.checkpoint && {
                 ...snapshot.checkpoint, data: new Uint8Array(Buffer.from(snapshot.checkpoint.data, 'base64')),
               }, journal: snapshot.journal.map(record => ({ ...record, data: new Uint8Array(Buffer.from(record.data, 'base64')) })) };
@@ -148,7 +149,8 @@ export function createDurableAgentFactory({ harness, defaultDurability, name = '
         }
         case 'state': {
           const openTurn = entry.session.openTurn ?? null;
-          return { openTurn, completedTurnId: openTurn ? null : entry.completed };
+          return { openTurn, completedTurnId: openTurn ? null : entry.completed,
+            completedTurnRuntimeId: openTurn || entry.completed ? null : entry.completedRuntimeId };
         }
         case 'prompt': {
           const turn = await entry.session.prompt(call.input, { turnId: call.turnId, yieldAt: call.yieldAt ?? undefined });
@@ -237,7 +239,9 @@ export function createDurableAgentFactory({ harness, defaultDurability, name = '
     let defaultSession;
     const agent = {
       name: options.name ?? 'default',
+      newSessionId: () => ready.then(() => request('genericNewSessionId')),
       session(sessionId = randomUUID(), sessionOptions = {}) {
+        if (typeof sessionId !== 'string' || !sessionId.length) throw new TypeError('session id must be a nonempty string');
         const settings = plugged.settings?.(sessionOptions);
         sessionOptions = { ...sessionOptions, ...(plugged.settings ? { settings } : {}),
           ...(typeof sessionOptions.model === 'string' ? { model: { id: sessionOptions.model } } : {}) };

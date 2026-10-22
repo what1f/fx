@@ -54,12 +54,14 @@ public protocol FxHarnessSession: Sendable {
     func saveCheckpoint() async throws
     func checkpoint() async throws -> Data
     /// Joins pending journal writes before returning. Recovery properties remain readable afterward.
+    /// After a durable terminal result, cleanup may overlap the session's next turn.
     func close() async throws
 }
 
 public protocol FxHarnessTurn: Sendable {
     /// A single-consumer stream. Bound buffering for producers that can outpace storage.
     var events: AsyncThrowingStream<FxEvent, any Error> { get }
+    /// A terminal result acknowledges all journal writes needed to recover that completion.
     var result: FxTurnResult { get async throws }
     func cancel() async
     /// Stop without storing a terminal result, so another delivery can resume.

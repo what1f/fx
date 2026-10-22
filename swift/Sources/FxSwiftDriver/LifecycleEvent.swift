@@ -4,6 +4,10 @@ import LibFx
 func encodeLifecycleEvent(_ event: FxLifecycleEvent) -> JSONValue {
     var fields: [String: JSONValue] = ["timestamp": .number((Date().timeIntervalSince1970 * 1000).rounded())]
     switch event {
+    case .outputBackpressure(let bytes, let events):
+        fields["type"] = .string("output.backpressure")
+        fields["bufferedBytes"] = .number(Double(bytes))
+        fields["bufferedEvents"] = .number(Double(events))
     case .journalOpened(let state):
         fields.merge([
             "type": .string("journal.open"), "sessionId": .string(state.sessionID),

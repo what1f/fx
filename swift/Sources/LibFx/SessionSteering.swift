@@ -51,6 +51,9 @@ extension FxSessionStore {
                 try database.execute("UPDATE fx_inputs SET target=NULL,accepted=0,placed=0 WHERE session=? AND core_id=? AND kind='steer' AND result IS NULL", [.text(session), .text(id)])
             case .placed(let id):
                 try database.execute("UPDATE fx_inputs SET accepted=1,placed=1 WHERE session=? AND core_id=? AND kind='steer'", [.text(session), .text(id)])
+            case .completed(let id):
+                guard validInputID(id) else { throw FxPersistenceError.invalidJournal }
+                try database.execute("UPDATE fx_sessions SET completed_turn=? WHERE id=?", [.text(id), .text(session)])
             case .progress(let token):
                 try database.execute("UPDATE fx_inputs SET step=? WHERE session=? AND target IS NULL AND started=1 AND result IS NULL", [.text(token), .text(session)])
             }

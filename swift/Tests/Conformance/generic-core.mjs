@@ -5,6 +5,11 @@ import { fileURLToPath } from 'node:url';
 
 const cases = [
   'a prompt runs its steps, and the session replays from any cursor',
+  'a prompt sent when the last turn ends starts without waiting for its engine to shut down',
+  "a prompt's signal cancels its own turn, whether it runs or waits, and never another",
+  "an image prompt its first worker could not start runs from the log with the same base64, once",
+  "an image block is read once, so the log holds what was checked",
+  "a new session's id can come before its first prompt, and null is no id",
   "each prompt's turn runs with its own caller's context, resumed or not",
   "each prompt's turn runs with its session object's settings, resumed or not",
   'a turn longer than the time limit continues in the next delivery, each step once',

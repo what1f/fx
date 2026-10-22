@@ -13,6 +13,8 @@ public actor FxAgent {
     private var deliveries: [String: AsyncResult<FxDeliveryOutcome>] = [:]
     private typealias Deadlines = (yield: Date, stop: ContinuousClock.Instant?)
     private var workers: [String: Task<Void, Never>] = [:]
+    private var cleanups: [UUID: Task<Void, Never>] = [:]
+    private var cleanupFailure: (any Error)?
     private var failures: [String: any Error] = [:]
     private struct ControlCheck {
         let inputID: String
@@ -84,7 +86,7 @@ public actor FxAgent {
         }
         try harness.validate(options: options)
         try harness.validate(input: content, options: options)
-        guard try JSONEncoder().encode(options).count <= 1024 * 1024 else { throw FxError.invalidInput("Session settings exceed the size limit") }
+        try SessionInputAdmission.validate(content, options: options)
         if steering, content.allSatisfy({ if case .text = $0 { return true }; return false }) {
             let text = content.compactMap { if case .text(let text) = $0 { return text }; return nil }.joined(separator: "\n")
             guard text.utf8.count <= 64 * 1024 else { throw FxError.invalidInput("Steering text exceeds the size limit") }
@@ -128,6 +130,7 @@ public actor FxAgent {
     private func retainForwardedInput(owner: String, session: String, options: FxSessionOptions,
         content: [FxPromptContent], id: String, steering: Bool) async throws -> FxSessionTurn {
         // Retain accepted work while its executor is offline. No sender seed or harness is used.
+        try SessionInputAdmission.validate(content, options: options)
         _ = try await store.accept(session: session, agent: owner, id: id, content: content, options: options,
             checkpoint: nil, steering: steering, deferringImageLimits: true)
         throw FxAgentRoutingError.unavailableAgent(owner)
@@ -320,6 +323,7 @@ public actor FxAgent {
         }
         if !input.wasStarted, !input.cancelRequested, !recoveringOnly {
             do {
+                try SessionInputAdmission.validate(input.content, options: input.options)
                 try harness.validate(options: input.options)
                 try harness.validate(input: input.content, options: input.options)
             } catch {
@@ -474,7 +478,8 @@ public actor FxAgent {
                 if !(error is FxHarnessError) { await turn.cancel() }
                 throw error
             }
-            try await engine.close()
+            if recoveringOnly { try await engine.close() }
+            else { retire(engine, session: lease.sessionID, inputID: input.id) }
         } catch {
             do { try await engine.close() }
             catch let closeError {
@@ -512,6 +517,19 @@ public actor FxAgent {
         return false
     }
 
+    private func retire(_ engine: any FxHarnessSession, session: String, inputID: String) {
+        let id = UUID()
+        cleanups[id] = Task {
+            do { try await engine.close() }
+            catch {
+                let cause = (error as? SessionStorageFailure)?.cause ?? error
+                if cleanupFailure == nil { cleanupFailure = cause }
+                await onLifecycleEvent?(.harnessFailed(sessionID: session, inputID: inputID, error: cause))
+            }
+            cleanups[id] = nil
+        }
+    }
+
     private func publishEvents(_ turn: any FxHarnessTurn, input: FxSessionInput, lease: FxSessionLease) async throws {
         let store = self.store
         for try await event in turn.events {
@@ -532,12 +550,13 @@ public actor FxAgent {
     /// Stops intake and waits for active work. Queued inputs remain in the store for delivery.
     public func close() async throws {
         closed = true
-        while intakes > 0 || !workers.isEmpty {
-            let pending = Array(workers.values)
+        while intakes > 0 || !workers.isEmpty || !cleanups.isEmpty {
+            let pending = Array(workers.values) + Array(cleanups.values)
             for task in pending { await task.value }
             if intakes > 0 { try await Task.sleep(for: .milliseconds(1)) }
         }
         await router?.remove(self)
         if let error = failures.values.first { throw error }
+        if let cleanupFailure { throw cleanupFailure }
     }
 }

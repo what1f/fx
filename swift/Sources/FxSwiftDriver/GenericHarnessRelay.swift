@@ -7,6 +7,7 @@ actor GenericHarnessRelay {
     init(agentToken: String) { self.agentToken = agentToken }
     private var waiters: [String: CheckedContinuation<JSONValue, any Error>] = [:]
     private var contexts: [String: FxHarnessContext] = [:]
+    private var activeTurnIDs: [String: String] = [:]
 
     func call(_ method: String, _ arguments: [String: JSONValue] = [:]) async throws -> JSONValue {
         let token = UUID().uuidString
@@ -46,20 +47,32 @@ actor GenericHarnessRelay {
             let snapshot = try await store.load()
             return .object(["head": snapshot.head.map(JSONValue.string) ?? .null,
                 "checkpoint": snapshot.checkpoint.map { .object(["through": .string($0.through), "data": .string($0.data.base64EncodedString())]) } ?? .null,
+                "completedTurnRuntimeId": snapshot.completedTurnID.map(JSONValue.string) ?? .null,
                 "journal": .array(snapshot.journal.map { .object(["cursor": .string($0.cursor), "data": .string($0.data.base64EncodedString())]) })])
         case "append":
             guard let key = value["key"]?.string, let encoded = value["data"]?.string, let data = Data(base64Encoded: encoded) else {
                 throw FxError.invalidInput("Invalid harness journal append")
             }
             var marks: [FxSessionJournalMark] = []
+            var active = activeTurnIDs[id] ?? context.inputID.map { FxSessionInput.runtimeID(for: $0) }
             if case .array(let values) = value["marks"] {
                 for mark in values {
-                    if let start = mark["start"]?.string { marks.append(.placed(FxSessionInput.runtimeID(for: start))) }
+                    if let start = mark["start"]?.string {
+                        let runtimeID = FxSessionInput.runtimeID(for: start)
+                        active = runtimeID
+                        marks.append(.placed(runtimeID))
+                    }
+                    if mark["end"] == .bool(true), let runtimeID = active {
+                        marks.append(.completed(runtimeID))
+                        active = nil
+                    }
                     if let progress = mark["progress"]?.string { marks.append(.progress(progress)) }
                 }
             }
-            return .string(try await store.append(expected: value["expected"]?.string, idempotencyKey: key,
-                data: data, marks: marks, barrier: value["barrier"] != .bool(false)))
+            let cursor = try await store.append(expected: value["expected"]?.string, idempotencyKey: key,
+                data: data, marks: marks, barrier: value["barrier"] != .bool(false))
+            activeTurnIDs[id] = active
+            return .string(cursor)
         case "checkpoint":
             guard let through = value["through"]?.string, let encoded = value["data"]?.string,
                   let data = Data(base64Encoded: encoded) else { throw FxError.invalidInput("Invalid harness checkpoint") }
@@ -104,7 +117,11 @@ struct RelayedGenericSession: FxDurableHarnessSession {
         }
     }
     var completedTurnID: String? {
-        get async { await relay.state(handle)["completedTurnId"]?.string.map { FxSessionInput.runtimeID(for: $0) } }
+        get async {
+            let state = await relay.state(handle)
+            return state["completedTurnRuntimeId"]?.string
+                ?? state["completedTurnId"]?.string.map { FxSessionInput.runtimeID(for: $0) }
+        }
     }
     func submit(_ input: JSONValue, id: String, yieldAt: Date?) async throws -> any FxDurableHarnessTurn<JSONValue> {
         let response = try await relay.call("prompt", ["handle": .string(handle), "input": input,

@@ -1,5 +1,6 @@
 /// Host-owned lifecycle notifications. These do not enable runtime hooks or content capture.
 public enum FxLifecycleEvent: Sendable {
+    case outputBackpressure(bufferedBytes: Int, bufferedEvents: Int)
     case sessionForwarded(sessionID: String, agent: String)
     case journalOpened(FxJournalRestoration)
     case checkpointSaved(sessionID: String, cursor: String, byteCount: Int)

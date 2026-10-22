@@ -25,6 +25,7 @@ public protocol FxDurableHarnessSession<Input, Update>: Sendable {
     func saveCheckpoint() async throws
     func checkpoint() async throws -> Data
     /// Join pending writes and leave recovery properties readable afterward.
+    /// After a durable terminal result, cleanup may overlap the session's next turn.
     func close() async throws
 }
 
@@ -32,6 +33,7 @@ public protocol FxDurableHarnessTurn<Update>: Sendable {
     associatedtype Update: Codable & Sendable
     /// Single consumer. Produce updates only as fast as they can be persisted.
     var events: AsyncThrowingStream<Update, any Error> { get }
+    /// A terminal result acknowledges all journal writes needed to recover that completion.
     var result: FxTurnResult { get async throws }
     func cancel() async
     func handoff() async throws

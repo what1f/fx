@@ -109,7 +109,8 @@ public enum FxWithdrawal: String, Sendable {
     case alreadyPlaced = "already_placed"
 }
 
-/// Read events once. Await result to observe completion even when no events are consumed.
+/// Read events once. Small turns can complete without reading events; when output
+/// fills its bounded queue, consume events or cancel the turn to allow completion.
 public struct FxTurn: AsyncSequence, Sendable, Identifiable {
     public typealias Element = FxEvent
     public typealias AsyncIterator = AsyncThrowingStream<FxEvent, any Error>.Iterator

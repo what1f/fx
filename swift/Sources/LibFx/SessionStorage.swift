@@ -38,6 +38,8 @@ public protocol FxSessionStorage: Sendable {
     /// Enforces the expected head and idempotency key, including explicit marks.
     /// Commits marks atomically with the record. Nil decodes the current Zig format;
     /// custom harnesses supply their ordered marks, including an empty array.
+    /// A completed mark updates loadJournal/snapshot.completedTurnID and survives
+    /// saveJournalCheckpoint compaction. A rejected append must change neither.
     func appendJournal(_ lease: FxSessionLease, expected: String?, key: String, data: Data, barrier: Bool, marks: [FxSessionJournalMark]?) async throws -> String
     func saveJournalCheckpoint(_ lease: FxSessionLease, _ checkpoint: FxStoredCheckpoint) async throws
     func storeImage(_ data: Data, named name: String, lease: FxSessionLease) async throws

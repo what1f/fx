@@ -152,6 +152,7 @@ import CSQLite
         }
         try connection.execute("ALTER TABLE fx_sessions DROP COLUMN halted")
         try connection.execute("ALTER TABLE fx_sessions DROP COLUMN recovery_input")
+        try connection.execute("ALTER TABLE fx_sessions DROP COLUMN completed_turn")
         try connection.execute("UPDATE fx_agent_schema SET version=1")
         try connection.close()
         let upgraded = try FxSessionStore(url: url)

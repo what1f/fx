@@ -27,7 +27,7 @@ public actor FxEngine {
     private var pendingSteering: [UUID: (count: Int, bytes: Int)] = [:]
     private var turnID: UUID?
     private var publicTurnID: String?
-    private var output: AsyncThrowingStream<FxEvent, any Error>.Continuation?
+    private var output: TurnOutput?
     private var toolTasks: [String: Task<Void, Never>] = [:]
     private var toolObservations: [String: FxToolObservation] = [:]
     private var toolNames: [String: String] = [:]
@@ -434,22 +434,21 @@ public actor FxEngine {
         let dispatch = PromptDispatch()
         promptDispatch = dispatch
         toolNames.removeAll()
-        let (events, continuation) = AsyncThrowingStream<FxEvent, any Error>.makeStream(bufferingPolicy: .bufferingOldest(4096))
-        output = continuation
-        if resuming {
-            for call in recovery?.runningCalls ?? [] where !rerunning.contains(call.executionID) {
-                continuation.yield(.toolFinished(
-                    id: call.executionID, name: call.name,
-                    content: "fx stopped while this tool was running, so it may have partly run. Check its effects before running it again.",
-                    isError: true
-                ))
-            }
-        }
-        continuation.onTermination = { [weak self] termination in
-            if case .cancelled = termination { Task { await self?.cancel(turn: id) } }
-        }
+        let output = TurnOutput(onCancel: { [weak self] in await self?.cancel(turn: id) },
+            onPressure: { [onLifecycleEvent] state in
+                await onLifecycleEvent?(.outputBackpressure(bufferedBytes: state.bufferedBytes, bufferedEvents: state.bufferedEvents))
+            })
+        self.output = output
+        let events = AsyncThrowingStream<FxEvent, any Error>(unfolding: { try await output.next() })
+        let interruptedCalls = resuming ? (recovery?.runningCalls ?? []).filter { !rerunning.contains($0.executionID) } : []
         let task = Task {
             do {
+                for call in interruptedCalls {
+                    _ = try await output.send(.toolFinished(
+                        id: call.executionID, name: call.name,
+                        content: "fx stopped while this tool was running, so it may have partly run. Check its effects before running it again.",
+                        isError: true))
+                }
                 _ = await precedingCheckpoint?.wait()
                 await transport.beginTurn()
                 guard !closed else { throw FxError.closed }
@@ -476,7 +475,7 @@ public actor FxEngine {
                 if turnCancelled && !resuming {
                     await dispatch.resolve(sent: false)
                     await transport.discardAttachments()
-                    self.finish(turn: id)
+                    await self.finish(turn: id)
                     return FxTurnResult(stopReason: .cancelled, usage: FxUsage(nil))
                 }
                 var params: [String: JSONValue] = [
@@ -497,6 +496,7 @@ public actor FxEngine {
                 })
                 try await journal?.check()
                 try Task.checkCancellation()
+                if let failedPrompt, failedPrompt.id == id { throw failedPrompt.error }
                 let reason = FxTurnResult.StopReason(rawValue: result["stopReason"]?.string ?? "") ?? .unknown
                 if !handedOff {
                     if reason == .yielded {
@@ -507,7 +507,7 @@ public actor FxEngine {
                     }
                 }
                 await maybeSaveCheckpoint(finishing: id)
-                self.finish(turn: id)
+                await self.finish(turn: id)
                 return FxTurnResult(
                     stopReason: reason,
                     usage: FxUsage(result["usage"])
@@ -518,20 +518,20 @@ public actor FxEngine {
                 await dispatch.resolve(sent: false)
                 await transport.discardAttachments()
                 if turnID == id, turnCancelled, !closed, error is CancellationError {
-                    self.finish(turn: id)
+                    await self.finish(turn: id)
                     return FxTurnResult(stopReason: .cancelled, usage: FxUsage(nil))
                 }
                 if turnID == id, turnCancelled, !closed,
                    case FxError.rpc(_, "Cancelled", _) = error {
                     do { try await journal?.check() }
                     catch {
-                        self.finish(turn: id, error: error)
+                        await self.finish(turn: id, error: error)
                         throw error
                     }
-                    self.finish(turn: id)
+                    await self.finish(turn: id)
                     return FxTurnResult(stopReason: .cancelled, usage: FxUsage(nil))
                 }
-                self.finish(turn: id, error: error)
+                await self.finish(turn: id, error: error)
                 throw error
             }
         }
@@ -598,17 +598,14 @@ public actor FxEngine {
                 try await rpc.respond(id: id, result: .object([:]))
             } catch { try? await rpc.respond(id: id, error: .transport(String(describing: error))) }
         } else if message.method == "session/update", message.params["sessionId"]?.string == sessionID {
-            guard !handedOff else { return }
+            guard !handedOff, !turnCancelled else { return }
             do {
                 if let event = try event(for: message.params["update"] ?? .null), let output {
-                    if case .dropped = output.yield(event) {
-                        output.finish(throwing: FxError.outputOverflow)
-                        if let turnID { await cancel(turn: turnID) }
-                    }
+                    _ = try await output.send(event)
                 }
             } catch {
-                output?.finish(throwing: error)
-                if let turnID { await cancel(turn: turnID) }
+                await output?.finish(throwing: error)
+                if let turnID { failedPrompt = (turnID, error); await cancel(turn: turnID) }
             }
         } else if message.method == "libfx/tool_call", let requestID = message.id {
             let params = message.params
@@ -725,9 +722,12 @@ public actor FxEngine {
     private func cancel(turn id: UUID) async {
         guard turnID == id, !closed, !cancelling else { return }
         turnCancelled = true
-        imagePreparation?.cancel()
         cancelling = true
         defer { cancelling = false; startNextFollowUp() }
+        // Release a blocked RPC handler before sending cancellation through RPC.
+        let failure = journalFailure ?? terminalFailure ?? (failedPrompt?.id == id ? failedPrompt?.error : nil)
+        await output?.finish(throwing: failure, discarding: true)
+        imagePreparation?.cancel()
         for task in toolTasks.values { task.cancel() }
         toolTasks.removeAll()
         invalidateToolObservations()
@@ -811,7 +811,7 @@ public actor FxEngine {
         return reply["result"] == .string("withdrawn") ? .withdrawn : .alreadyPlaced
     }
 
-    private func finish(turn id: UUID, error: (any Error)? = nil) {
+    private func finish(turn id: UUID, error: (any Error)? = nil) async {
         guard turnID == id else { return }
         imagePreparation?.cancel()
         imagePreparation = nil
@@ -819,14 +819,15 @@ public actor FxEngine {
         toolTasks.removeAll()
         invalidateToolObservations()
         Task { await permissions.cancel(scope: id) }
-        if let error { output?.finish(throwing: error) } else { output?.finish() }
-        output = nil
+        let output = self.output
+        self.output = nil
         turnID = nil
         publicTurnID = nil
         if let activeFollowUpID, let receipt = followUpAcceptances.removeValue(forKey: activeFollowUpID) {
             Task { await receipt.acceptance.resolve(.failure(error ?? FxError.cancelled)) }
         }
         activeFollowUpID = nil
+        await output?.finish(throwing: error)
         startNextFollowUp()
     }
 
@@ -926,7 +927,11 @@ public actor FxEngine {
         checkpointWaiters.removeAll()
         let preparation = imagePreparation
         failFollowUps(FxError.closed)
-        if let turnID { finish(turn: turnID, error: FxError.closed) }
+        if let turnID {
+            let failure = journalFailure ?? terminalFailure ?? (failedPrompt?.id == turnID ? failedPrompt?.error : nil) ?? FxError.closed
+            await output?.finish(throwing: failure, discarding: true)
+            await finish(turn: turnID, error: failure)
+        }
         let checkpointSave = checkpointSaveTask
         let task = Task {
             let saved = await checkpointSave?.result

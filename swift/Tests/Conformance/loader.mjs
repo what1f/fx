@@ -26,6 +26,19 @@ export async function resolve(specifier, context, nextResolve) {
 
 export async function load(url, context, nextLoad) {
   const result = await nextLoad(url, context);
+  if (url.endsWith('/sdk/tests/test-durable-core.mjs') && process.env.LIBFX_SWIFT_GENERIC_FIXTURE_ONLY === '1') {
+    let source = result.source.toString();
+    const loop = 'for (const [name, fn] of tests) {';
+    const report = 'console.log(`${tests.length - failed}/${tests.length} core tests passed (${durabilityKind})`);';
+    const exit = 'process.exit(failed ? 1 : 0);';
+    if ([loop, report, exit].some(marker => source.split(marker).length !== 2)) {
+      throw new Error('Original generic fixture extraction changed; review upstream ownership');
+    }
+    source = source.replace(loop, 'for (const [name, fn] of []) {')
+      .replace(report, 'console.log("Original generic fixture loaded; no upstream cases executed");')
+      .replace(exit, '');
+    return { ...result, source: source + '\nexport { scriptedHarness, prompted, ran };\n' };
+  }
   if (url.endsWith('/sdk/tests/test-durable-core.mjs') && process.env.LIBFX_SWIFT_GENERIC_CASES) {
     let source = result.source.toString();
     const marker = 'for (const [name, fn] of tests) {';

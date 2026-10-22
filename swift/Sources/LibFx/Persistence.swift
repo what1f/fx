@@ -16,8 +16,13 @@ public struct FxPersistenceSnapshot: Sendable {
     public let checkpoint: FxStoredCheckpoint?
     public let journal: [FxJournalRecord]
     public let head: String?
-    public init(checkpoint: FxStoredCheckpoint? = nil, journal: [FxJournalRecord] = [], head: String? = nil) {
+    /// The latest turn whose terminal record was durably appended by a harness.
+    /// Retained independently of journal compaction. Uses the runtime turn ID.
+    public let completedTurnID: String?
+    public init(checkpoint: FxStoredCheckpoint? = nil, journal: [FxJournalRecord] = [], head: String? = nil,
+                completedTurnID: String? = nil) {
         self.checkpoint = checkpoint; self.journal = journal; self.head = head
+        self.completedTurnID = completedTurnID
     }
 }
 

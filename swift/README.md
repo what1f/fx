@@ -12,6 +12,7 @@ From the repository root, build the macOS arm64 and x86_64 static libraries and 
 swift/scripts/build-xcframework.sh
 swift test --package-path swift --no-parallel
 swift/scripts/test-consumer.sh
+swift/scripts/test-consumer-x86_64.sh # Requires Rosetta on Apple silicon
 ```
 
 Run separate test cases serially because they share a native runtime with 64 slots. Concurrency tests still create parallel operations within each case.
@@ -42,6 +43,8 @@ do {
 ```
 
 Read a turn's events once. Await `result` to observe its completion. Call `cancel()` on the turn to stop model requests and cooperative tool tasks. Call `close()` on the engine to release the core; repeated close calls await the same shutdown and report the same persistence failure, if any.
+
+Unread output pauses its producer when 256 events or 1 MiB of encoded events fill the queue. An empty queue can hold one indivisible event up to the 64 MiB frame bound. Consume events or cancel the turn to release pressure; awaiting only `result` does not drain the queue. The `.outputBackpressure` lifecycle event reports occupancy, and its callback can await cancellation. Cancellation and engine close release blocked output without requiring a reader to resume.
 
 Cancelling a Swift task that awaits `turn.result` cancels the turn and makes that waiter throw `CancellationError`.
 
@@ -401,7 +404,9 @@ Pass an implementation of `FxSessionHarness` to `FxAgent(harness:store:)` to run
 
 The harness validates session settings and input, prepares seed checkpoints, and opens an `FxHarnessSession` from `FxHarnessContext`. A session reports its interrupted or completed turn, starts or resumes a turn, exports checkpoints and joins pending writes on close. Each `FxHarnessTurn` supplies a bounded event stream, its result, and cancellation, handoff and steering operations. Check `context.checkOwnership()` before external effects and after awaiting permission.
 
-Use `context.persistence.append(expected:idempotencyKey:data:marks:barrier:)` for custom records, supplying an empty marks array when the record changes no routing state. Marks and bytes commit atomically; a retry must keep both unchanged. Checkpoint bytes belong to the harness and are not wrapped in the Zig format. The conversation interface uses `FxPromptContent`, `FxSessionOptions` and `FxEvent`.
+A terminal result must acknowledge its durable journal writes. After that result is saved, the next input can start while the previous executor closes. `agent.close()` joins all executor cleanup tasks and reports their errors; cleanup errors do not replace already stored turn results.
+
+Use `context.persistence.append(expected:idempotencyKey:data:marks:barrier:)` for custom records, supplying an empty marks array when the record changes no routing state. Marks and bytes commit atomically; a retry must keep both unchanged. Append `.completed(runtimeTurnID)` with the terminal record before reporting the turn's result. A fresh harness can read `snapshot.completedTurnID` to implement its `completedTurnID` property without decoding its opaque bytes. This identity survives checkpoint compaction. Checkpoint bytes belong to the harness and are not wrapped in the Zig format. The conversation interface uses `FxPromptContent`, `FxSessionOptions` and `FxEvent`.
 
 Throw `FxHarnessError.stopped` from a running turn when its executor exits. The worker closes it, joins pending journal writes and opens a replacement. Three stops end an input that never started, or cancel a recorded open turn. Two further stops during cancellation permanently halt that session; queued inputs receive errors without opening another executor. Stop counts and the halt survive database reopening. An opening failure ends the public input once without consuming this budget. If its old turn still needs cancellation, later work cleans it up with its original settings first. A completion record that lands before close finishes prevents rerunning completed work.
 
@@ -409,7 +414,7 @@ Throw `FxHarnessError.stopped` from a running turn when its executor exits. The 
 
 Use `FxDurableAgent<Input, Update>` with an `FxDurableHarness` when inputs and updates are application data rather than conversation blocks. Both types conform to `Codable` and `Sendable`. The harness opens an `FxDurableHarnessSession`, whose turns provide typed updates and a terminal `FxTurnResult`. It uses the same worker, storage, ownership, queue, cancellation and stopped-executor recovery as conversations.
 
-Call `session.submit(_:id:)` to accept work and iterate the returned `FxDurableTurn<Update>`. `session.events(after:)` replays typed start inputs, updates and terminal results with their stored cursor and epoch. `steer(_:id:)` ends an active turn and queues the supplied input as a separate turn, returning its typed view. Each encoded input or update is limited to 8 MiB; encoded session options have a separate 1 MiB limit. This differs from the JavaScript SDK's combined 8 MiB input, context and settings budget. The adapter pulls updates without adding a producer task or buffer; the harness still controls its own stream buffering. The [calculation fixture](Tests/LibFxTests/CalculationHarness.swift) shows a complete executor with structured inputs, binary data, opaque journal records and checkpoints using public imports.
+Call `session.submit(_:id:)` to accept work and iterate the returned `FxDurableTurn<Update>`. `session.events(after:)` replays typed start inputs, updates and terminal results with their stored cursor and epoch. `steer(_:id:)` ends an active turn and queues the supplied input as a separate turn, returning its typed view. The encoded input, context and settings share an 8 MiB admission limit, including explicit model and instruction overrides. Admission runs before storage or queue publication. Each encoded update also has an 8 MiB limit; native conversation frame, image and instruction limits still apply. The adapter pulls updates without adding a producer task or buffer; the harness still controls its own stream buffering. The [calculation fixture](Tests/LibFxTests/CalculationHarness.swift) shows a complete executor with structured inputs, binary data, opaque journal records and checkpoints using public imports.
 
 Durable results expose `failure`, an `FxSessionFailure` with `message`, `name`, optional upstream `code` and optional numeric `rpcCode`. The `error` convenience returns its message. A custom executor can throw `FxSessionFailure` directly or return it in `FxTurnResult.failure`; both retain its fields in the durable result. Host storage errors retain their original error object and leave work pending instead of becoming terminal execution failures.
 
