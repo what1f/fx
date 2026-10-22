@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const checks = [
+  { name: 'upstream/test-durable-provider-crash', expected: 'Node native durable provider crash passed', args: [
+    '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable-provider-crash.mjs', 'native',
+  ] },
   ...['chatgpt', 'grok'].map(provider => ({ name: `upstream/test-${provider}-sign-in`,
     expected: provider === 'chatgpt' ? 'ChatGPT sign-in passed' : 'Grok sign-in passed',
     args: ['--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', `sdk/tests/test-${provider}-sign-in.mjs`],
@@ -42,6 +45,11 @@ const checks = [
     ['isolation', "each session's stream holds only its own turns"],
     ['dedup', 'a retried prompt with the same messageId runs its turn once'],
     ['ordering', 'two servers prompting one session run its turns one at a time, in one history'],
+    ['context', 'each agent.session() call carries its own context to the tools'],
+    ['options', "a session object's model and instructions reach its model requests, over the agent's"],
+    ['cancel', 'cancel stops the running turn; dropping its view does not'],
+    ['images', "a durable prompt's images reach the model as the base64 it was given"],
+    ['idempotent', 'createFxAgent() refuses a host tool that does not say whether it is idempotent'],
   ].map(([kind, test]) => ({ name: `upstream/test-durable-session-${kind}`, expected: '1/1 durable tests passed', env: { LIBFX_TEST_ONLY: test }, args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable.mjs', 'memory', 'native',
   ] })),

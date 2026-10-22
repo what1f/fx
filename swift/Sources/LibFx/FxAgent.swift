@@ -59,19 +59,19 @@ public actor FxAgent {
         let repeated = try await store.accept(session: session, agent: name, id: id, content: content, options: options, checkpoint: initialCheckpoint, steering: steering, deferringImageLimits: configuration.prepareImage != nil)
         kick(session)
         if steering { await synchronizeControls(session) }
-        return FxSessionTurn(id: id, sessionID: session, isRepeated: repeated, agent: self)
+        return FxSessionTurn(id: id, sessionID: session, isRepeated: repeated, eventCursor: 0, agent: self)
     }
 
     func resume(_ session: String) async throws -> FxSessionTurn? {
         guard !closed else { throw FxError.closed }
         intakes += 1
         defer { intakes -= 1 }
-        let pendingID: String?
-        do { pendingID = try await store.pendingID(session: session, agent: name) }
+        let point: (id: String, cursor: Int64)?
+        do { point = try await store.resumePoint(session: session, agent: name) }
         catch FxSessionError.notFound { return nil }
-        guard let id = pendingID else { return nil }
+        guard let point else { return nil }
         kick(session)
-        return FxSessionTurn(id: id, sessionID: session, isRepeated: false, agent: self)
+        return FxSessionTurn(id: point.id, sessionID: session, isRepeated: false, eventCursor: point.cursor, agent: self)
     }
 
     func checkpoint(_ session: String, options: FxSessionOptions) async throws -> Data {

@@ -2,6 +2,10 @@
 // its assertions and size boundaries remain unchanged.
 const adapter = new URL('./adapter.mjs', import.meta.url).href;
 export async function resolve(specifier, context, nextResolve) {
+  if (specifier === '../durable/local.mjs' && ['/sdk/tests/test-durable.mjs', '/sdk/tests/test-durable-provider-crash.mjs']
+    .some(path => context.parentURL?.endsWith(path))) {
+    return { url: adapter, shortCircuit: true };
+  }
   if (context.parentURL?.endsWith('/sdk/tests/test-chatgpt-sign-in.mjs') && specifier === '../chatgpt-sign-in.js') {
     return { url: new URL('./sign-in-adapter.mjs?provider=codex', import.meta.url).href, shortCircuit: true };
   }

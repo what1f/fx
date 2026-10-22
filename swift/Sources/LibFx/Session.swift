@@ -12,6 +12,7 @@ public struct FxSession: Sendable, Identifiable {
     public func prompt(_ content: [FxPromptContent], id: String = UUID().uuidString) async throws -> FxSessionTurn {
         try await agent.accept(session: self.id, options: options, content: content, id: id)
     }
+    /// Continues pending work and observes new events. Use `events()` to replay stored history.
     @discardableResult public func resume() async throws -> FxSessionTurn? { try await agent.resume(id) }
     public func cancel() async throws { try await agent.cancel(id) }
     public func checkpoint() async throws -> Data { try await agent.checkpoint(id, options: options) }
@@ -61,6 +62,7 @@ public struct FxSessionTurn: Sendable, Identifiable, AsyncSequence {
     public let id: String
     public let sessionID: String
     public let isRepeated: Bool
+    @_spi(Conformance) public let eventCursor: Int64
     let agent: FxAgent
 
     public var result: FxSessionResult {
@@ -95,6 +97,6 @@ public struct FxSessionTurn: Sendable, Identifiable, AsyncSequence {
         }
     }
     public func makeAsyncIterator() -> AsyncIterator {
-        AsyncIterator(id: id, source: FxSessionEvents(sessionID: sessionID, cursor: 0, agent: agent).makeAsyncIterator())
+        AsyncIterator(id: id, source: FxSessionEvents(sessionID: sessionID, cursor: eventCursor, agent: agent).makeAsyncIterator())
     }
 }

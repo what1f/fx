@@ -120,6 +120,16 @@ public actor FxSessionStore {
         }
     }
 
+    func resumePoint(session: String, agent: String) throws -> (id: String, cursor: Int64)? {
+        try database.transaction(mode: "DEFERRED") {
+            guard let id = try pendingID(session: session, agent: agent) else { return nil }
+            return try database.statement("SELECT COALESCE(MAX(cursor),0) FROM fx_session_events WHERE session=?", [.text(session)]) { statement in
+                guard try database.step(statement) else { throw FxPersistenceError.invalidJournal }
+                return (id, sqlite3_column_int64(statement, 0))
+            }
+        }
+    }
+
     func hasWork(session: String, agent: String) throws -> Bool {
         try checkAgent(session, agent: agent)
         return try database.statement("SELECT 1 FROM fx_inputs WHERE session=? AND result IS NULL LIMIT 1", [.text(session)]) { try database.step($0) }

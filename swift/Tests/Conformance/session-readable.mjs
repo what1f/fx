@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict';
 import { createFxAgent } from './adapter.mjs';
 
-let requests = 0;
+let requests = 0, releaseReply;
 const agent = createFxAgent({ apiKey: 'test-key', model: 'swift/readable',
   fetch(_url, init) {
     if (init.method === 'GET') return Response.json({ data: [{ id: 'swift/readable', type: 'language' }] });
     requests++;
+    if (Buffer.from(init.body).toString().includes('resume-stream')) {
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"text-delta","delta":"before"}\n\n'));
+        releaseReply = () => {
+          controller.enqueue(new TextEncoder().encode('data: {"type":"text-delta","delta":"after"}\n\ndata: {"type":"finish","finishReason":{"unified":"stop","raw":"stop"}}\n\ndata: [DONE]\n\n'));
+          controller.close();
+        };
+      } }), { headers: { 'content-type': 'text/event-stream' } });
+    }
     return new Response('data: {"type":"text-delta","delta":"answer"}\n\ndata: {"type":"finish","finishReason":{"unified":"stop","raw":"stop"}}\n\ndata: [DONE]\n\n', {
       headers: { 'content-type': 'text/event-stream' },
     });
@@ -39,5 +48,16 @@ try {
   assert.equal(repeated[0].type, 'turn_end');
   assert.equal(repeated[0].repeated, true);
   assert.equal(requests, 3, 'duplicate intake must not reach the model');
-  console.log('Swift session readable passed: native cursors, turn filtering, detached views and duplicate outcomes');
+  const original = session.prompt('resume-stream', { messageId: 'streaming' });
+  const iterator = original[Symbol.asyncIterator]();
+  assert.equal((await iterator.next()).value.delta, 'before');
+  const resumed = session.resume();
+  const receipt = await resumed.accepted;
+  releaseReply();
+  const continued = await lines(resumed.readable);
+  assert.ok(continued.every(event => event.cursor > receipt.cursor));
+  assert.equal(continued.filter(event => event.type === 'text_delta').map(event => event.delta).join(''), 'after');
+  assert.equal((await resumed.result).stopReason, 'end_turn');
+  assert.equal(requests, 4, 'attaching a resumed view must not duplicate a running model request');
+  console.log('Swift session readable passed: native cursors, resumed output, turn filtering, detached views and duplicate outcomes');
 } finally { await agent.close(); }

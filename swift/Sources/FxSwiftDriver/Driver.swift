@@ -491,7 +491,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             } else { next = try await session.prompt(content, id: value["messageID"]?.string ?? UUID().uuidString) }
             let token = value["turnToken"]?.string ?? next.id
             sessionTurns[token] = next
-            emit(.object(["sessionAccepted": .string(token), "messageID": .string(next.id), "sessionID": .string(next.sessionID), "isRepeated": .bool(next.isRepeated)]))
+            emit(.object(["sessionAccepted": .string(token), "messageID": .string(next.id), "sessionID": .string(next.sessionID), "isRepeated": .bool(next.isRepeated), "cursor": .number(Double(next.eventCursor))]))
             sessionDeliveries[token] = Task {
                 do {
                     for try await event in next { emit(.object(["event": encode(event), "turnToken": .string(token)])) }

@@ -50,6 +50,22 @@ private actor SessionToolCapture {
     func record(_ value: FxToolContext) { values.append(value) }
 }
 
+private actor SessionStreamingHTTP: FxHTTPClient {
+    private var body: AsyncThrowingStream<Data, any Error>.Continuation?
+    func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        if request.httpMethod == "GET" { return try await SessionHTTP().send(request) }
+        let stream = AsyncThrowingStream<Data, any Error>.makeStream()
+        body = stream.continuation
+        body?.yield(Data("data: {\"type\":\"text-delta\",\"delta\":\"before\"}\n\n".utf8))
+        return FxHTTPResponse(statusCode: 200, body: stream.stream)
+    }
+    func finish() {
+        body?.yield(Data("data: {\"type\":\"text-delta\",\"delta\":\"after\"}\n\ndata: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\",\"raw\":\"stop\"}}\n\ndata: [DONE]\n\n".utf8))
+        body?.finish()
+        body = nil
+    }
+}
+
 @Suite(.serialized) struct AgentTests {
     @Test func queueRunsNativeCoreAndResultsReplayWithoutNewCalls() async throws {
         let http = SessionHTTP(), store = try FxSessionStore()
@@ -186,9 +202,40 @@ private actor SessionToolCapture {
         #expect(try await resumed.result.stopReason == .endTurn)
         var text = ""
         for try await event in resumed { if case .text(let delta) = event { text += delta } }
-        #expect(text == "hello")
+        #expect(text.isEmpty, "A resumed turn must not redeliver stored output")
+        let entries = try await store.entries(session: "s", agent: "default", after: 0)
+        let replay = entries.compactMap { entry -> String? in
+            guard case .update("m", .text(let delta)) = entry.event else { return nil }
+            return delta
+        }.joined()
+        #expect(replay == "hello")
         #expect(await http.count == 1)
         #expect(try await session.resume() == nil)
+        try await agent.close()
+        try await store.close()
+    }
+
+    @Test func resumedViewStartsAfterAlreadyObservedOutput() async throws {
+        let http = SessionStreamingHTTP(), store = try FxSessionStore()
+        let configuration = FxConfiguration(apiKey: "test-key", model: "swift/test", httpClient: http)
+        let agent = try FxAgent(configuration: configuration, store: store)
+        let session = try await agent.session(id: "streaming")
+        let original = try await session.prompt("hello", id: "m")
+        var iterator = original.makeAsyncIterator()
+        var before = ""
+        while before.isEmpty, let event = try await iterator.next() {
+            if case .text(let delta) = event { before += delta }
+        }
+        #expect(before == "before")
+        let resumed = try #require(try await session.resume())
+        await http.finish()
+        var after = ""
+        for try await event in resumed { if case .text(let delta) = event { after += delta } }
+        #expect(after == "after")
+        #expect(try await resumed.result.stopReason == .endTurn)
+        var replay = ""
+        for try await event in original { if case .text(let delta) = event { replay += delta } }
+        #expect(replay == "beforeafter", "The original view retains its independent replay cursor")
         try await agent.close()
         try await store.close()
     }

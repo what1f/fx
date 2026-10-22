@@ -63,6 +63,12 @@ function swiftModel(options) {
   return model;
 }
 
+function swiftInstructions(value) {
+  if (Array.isArray(value) && value.every(item => typeof item === 'string')) return value.filter(Boolean).join('\n\n');
+  if (typeof value !== 'string') throw new TypeError('instructions must be a string or an array of strings');
+  return value;
+}
+
 function swiftTools(value) {
   let tools;
   if (value === undefined) tools = [];
@@ -311,7 +317,7 @@ export async function createFxEngine(options = {}) {
         .then(credentials => request('refreshLockResult', { token: call.token, credentials }),
           () => request('refreshLockResult', { token: call.token })).catch(() => {});
     } else if (value.sessionAccepted) {
-      acceptedSessions.get(value.sessionAccepted)?.resolve({ id: value.messageID, messageId: value.messageID, sessionId: value.sessionID, isRepeated: value.isRepeated });
+      acceptedSessions.get(value.sessionAccepted)?.resolve({ id: value.messageID, messageId: value.messageID, sessionId: value.sessionID, isRepeated: value.isRepeated, cursor: value.cursor });
       acceptedSessions.delete(value.sessionAccepted);
     } else if (value.credentialRequest) {
       const call = value.credentialRequest;
@@ -546,10 +552,7 @@ export async function createFxEngine(options = {}) {
       };
     }
     if (configuration.instructions !== undefined) {
-      if (Array.isArray(configuration.instructions) && configuration.instructions.every(value => typeof value === 'string')) {
-        configuration.instructions = configuration.instructions.filter(Boolean).join('\n\n');
-      }
-      if (typeof configuration.instructions !== 'string') throw new TypeError('instructions must be a string or an array of strings');
+      configuration.instructions = swiftInstructions(configuration.instructions);
       await request('validateInstructions', { instructions: configuration.instructions });
     }
     if (runtimeFactory) {
@@ -928,6 +931,15 @@ export function memory({ maxDurationMs, reserveMs } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'libfx-swift-session-'));
   temporaryStores.add(directory);
   const path = join(directory, 'sessions.sqlite');
+  return sessionStorage(path, { maxDurationMs, reserveMs });
+}
+
+export function local({ dir, maxDurationMs, reserveMs } = {}) {
+  if (typeof dir !== 'string' || !dir.length) throw new TypeError('local() dir must be a path');
+  return sessionStorage(join(dir, 'sessions.sqlite'), { maxDurationMs, reserveMs });
+}
+
+function sessionStorage(path, { maxDurationMs, reserveMs }) {
   return { __swiftSessionPath: path, __swiftMaximumDurationMs: maxDurationMs, __swiftReserveMs: reserveMs,
     create() { return {
       async session(sessionID) {
@@ -951,6 +963,13 @@ export function memory({ maxDurationMs, reserveMs } = {}) {
 }
 
 export function createFxAgent(options = {}) {
+  const tools = swiftTools(options.tools);
+  for (const tool of tools) {
+    if (!tool.providerExecuted && typeof tool.idempotent !== 'boolean') {
+      throw new TypeError(`tool ${tool.name} must set idempotent: true if running a call twice is safe, or idempotent: false if it is not`);
+    }
+  }
+  options = { ...options, tools };
   const durability = options.durability ?? memory();
   if (typeof durability.__swiftSessionPath !== 'string') throw new TypeError('Unsupported Swift conformance storage descriptor');
   const ready = createFxEngine({ ...options, __agent: true, sessionStorePath: durability.__swiftSessionPath,
@@ -979,7 +998,7 @@ export function createFxAgent(options = {}) {
             }
             const remote = await ready;
             if (cancelled) return;
-            reader ??= remote.sessionStream(sessionID).getReader();
+            reader ??= remote.sessionStream(sessionID, receipt.cursor).getReader();
             for (;;) {
               const { value, done } = await reader.read();
               if (cancelled) return;
@@ -1002,6 +1021,14 @@ export function createFxAgent(options = {}) {
   const agent = {
     get sessionId() { defaultSession ??= agent.session(); return defaultSession.id; },
     session(sessionID = randomUUID(), sessionOptions = {}) {
+      sessionOptions = { ...sessionOptions };
+      if (sessionOptions.model !== undefined) {
+        if (typeof sessionOptions.model !== 'string' && (!sessionOptions.model || typeof sessionOptions.model !== 'object')) {
+          throw new TypeError('session model must be a model id or a model object');
+        }
+        sessionOptions.model = swiftModel({ model: sessionOptions.model });
+      }
+      if (sessionOptions.instructions !== undefined) sessionOptions.instructions = swiftInstructions(sessionOptions.instructions);
       return {
         id: sessionID,
         prompt(input, promptOptions) { return turnView(sessionID, sessionOptions, input, promptOptions); },

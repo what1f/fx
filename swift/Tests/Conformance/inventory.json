@@ -179,13 +179,13 @@
       "upstream": "sdk/tests/test-durable-provider-crash.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "partial: separate Swift agent SIGKILL checks cover model streaming, ambiguous write skipping and idempotent tool rerun with stable execution identity; unchanged upstream file awaits local-world adapter support"
+      "status": "passed: complete unchanged upstream native file through Swift; six host SIGKILL/restart scenarios cover Codex, Grok and custom providers during reply/tool execution, new credentials on resume, session/account headers, safe lookup rerun and credential-free saved files; local fixture directories map to actual Swift SQLite stores; separate companion checks SIGKILL the Swift process itself"
     },
     {
       "upstream": "sdk/tests/test-durable.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "partial: nine unchanged session selections cover replay/cursors, isolation, completed-message deduplication, two-worker ordering, per-call tool context, model/instruction overrides, cancellation versus dropped views, image bytes and explicit JavaScript idempotency declarations; five checkpoint, seven steering and five delivery selections also pass; generic external durability and remaining scenarios pending"
     },
     {
       "upstream": "sdk/tests/test-grok-sign-in.mjs",
