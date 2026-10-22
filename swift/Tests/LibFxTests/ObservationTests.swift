@@ -120,7 +120,9 @@ private actor PausedCheckpointStore: FxCheckpointPersistence {
     let turn = try await engine.prompt("hello")
     do { _ = try await turn.result; Issue.record("A fenced journal must fail the turn") } catch {}
     do { try await engine.close(); Issue.record("Close must report the journal failure") } catch {}
-    #expect(collected.events.contains { $0.kind == .journalError && $0.data["fenced"] == .bool(true) })
+    let failures = collected.events.filter { $0.kind == .journalError }
+    #expect(failures.count == 1)
+    #expect(failures.first?.data["fenced"] == .bool(true))
     #expect(!collected.events.contains { $0.kind == .journalCommitted })
 }
 

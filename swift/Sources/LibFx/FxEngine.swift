@@ -464,7 +464,7 @@ public actor FxEngine {
                 observation.deliver(event)
             } catch { observation.onError(error) }
         } else if message.method == "libfx/journal_append", message.params["sessionId"]?.string == sessionID, let journal {
-            guard !handedOff else { return }
+            guard !handedOff, journalFailure == nil else { return }
             do {
                 let events = message.params["events"] ?? .null
                 try await journal.append(events, barrier: message.params["barrier"] == .bool(true))
@@ -482,6 +482,7 @@ public actor FxEngine {
                     ])))
                 }
             } catch {
+                guard journalFailure == nil else { return }
                 journalFailure = error
                 failFollowUps(error)
                 observation?.deliver(FxObservation(journal: .journalError, sessionID: sessionID, data: .object([

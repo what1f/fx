@@ -26,6 +26,7 @@ private struct RelayedCheckpointStore: FxCheckpointPersistence {
 
 /// Test-only protocol adapter. Engine behavior stays in LibFx.
 actor Driver: FxHTTPClient, FxPersistence {
+    private let inputObservations = InputObservationRelay(emit: DriverOutput.emit)
     private var mcpAdapter: FxMCPAdapter?
     private var mcpTransport: DriverMCPTransport?
     private var mcpCalls: [String: Task<FxToolResult, Error>] = [:]
@@ -89,6 +90,14 @@ actor Driver: FxHTTPClient, FxPersistence {
         }
     }
 
+    private func emitFailure(_ error: any Error, token: String) {
+        var fields: [String: JSONValue] = ["failed": .string(String(describing: error)), "turnToken": .string(token)]
+        if let persistenceError = error as? FxPersistenceError {
+            fields["persistenceError"] = .string(String(describing: persistenceError))
+        }
+        emit(.object(fields))
+    }
+
     private func deliver(_ next: FxTurn, token: String) {
         guard let engine else { return }
         turns[token] = next
@@ -106,7 +115,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                         }),
                     ]),
                 ]))
-            } catch { emit(.object(["failed": .string(String(describing: error)), "turnToken": .string(token)])) }
+            } catch { emitFailure(error, token: token) }
             turns.removeValue(forKey: token)
         }
     }
@@ -355,7 +364,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                     }
                     if let error = result.error { fields["error"] = .object(["message": .string(javascriptMessage(error))]) }
                     emit(.object(["turnToken": .string(token), "completed": .object(fields)]))
-                } catch { emit(.object(["failed": .string(String(describing: error)), "turnToken": .string(token)])) }
+                } catch { emitFailure(error, token: token) }
                 sessionTurns.removeValue(forKey: token)
                 sessionDeliveries.removeValue(forKey: token)
             }
@@ -473,7 +482,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             }
             Task {
                 do { deliver(try await receipt.turn, token: token) }
-                catch { emit(.object(["failed": .string(String(describing: error)), "turnToken": .string(token)])) }
+                catch { emitFailure(error, token: token) }
             }
             return .object(["inputID": .string(receipt.id)])
         case "diagnosticAck":
@@ -516,6 +525,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             if let sqlite = store as? FxSQLitePersistence { try await sqlite.close() }
             store = nil
             for id in Array(fetchBodies.keys) { cancelFetch(id) }
+            await inputObservations.close()
             for waiter in toolWaiters.values { waiter.resume(throwing: FxError.closed) }
             toolWaiters.removeAll()
             return .null
@@ -560,6 +570,17 @@ actor Driver: FxHTTPClient, FxPersistence {
             }
             if let credentials = value["credentials"] { waiter.resume(returning: credentials) }
             else { waiter.resume(throwing: FxError.invalidInput("Credentials are unavailable")) }
+            return .null
+        case "observeInput":
+            guard let tool = value["toolID"]?.integer, let token = value["token"]?.string else {
+                throw FxError.invalidInput("Invalid input observation")
+            }
+            try await inputObservations.observe(tool: tool, token: token, descriptor: value["request"] ?? .null)
+            return .null
+        case "inputResult":
+            if let token = value["token"]?.string {
+                await inputObservations.resolve(token, value: value["resolution"] ?? .null, errorName: value["errorName"]?.string)
+            }
             return .null
         case "toolResult":
             guard let requestID = value["toolID"]?.integer,
@@ -842,19 +863,23 @@ actor Driver: FxHTTPClient, FxPersistence {
     private func callTool(_ name: String, input: JSONValue, context: FxToolContext) async throws -> FxToolResult {
         let id = nextToolID
         nextToolID += 1
+        let observation = await inputObservations.register(id, scope: context.observation)
         return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { waiter in
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { waiter in
                 toolWaiters[id] = waiter
                 emit(.object(["toolRequest": .object([
                     "id": .number(Double(id)), "name": .string(name), "input": input,
                     "executionId": .string(context.executionID), "sessionId": .string(context.sessionID),
                     "turnId": .string(context.turnID), "context": context.context ?? .null,
+                    "observation": observation ?? .null,
                 ])]))
             }
         } onCancel: { Task { await self.cancelTool(id) } }
     }
 
-    private func cancelTool(_ id: Int) {
+    private func cancelTool(_ id: Int) async {
+        await inputObservations.cancel(tool: id)
         toolWaiters.removeValue(forKey: id)?.resume(throwing: FxError.cancelled)
         emit(.object(["toolCancelled": .number(Double(id))]))
     }

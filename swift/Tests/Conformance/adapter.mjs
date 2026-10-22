@@ -6,6 +6,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createMcpAdapter as bridgeMcpAdapter } from './mcp-adapter.mjs';
+// Host-owned opaque byte storage fixture; the engine and journal protocol remain in Swift.
+export { createMemoryPersistence } from '../../../sdk/fx-sdk.js';
 
 const defaultDriver = process.env.LIBFX_SWIFT_DRIVER || join(execFileSync('swift', [
   'build', '--package-path', fileURLToPath(new URL('../..', import.meta.url)), '--show-bin-path',
@@ -60,6 +62,7 @@ export async function createFxEngine(options = {}) {
   const sessionIntakes = new Set();
   const fetchControllers = new Map();
   const fetchReaders = new Map();
+  const inputEffects = new Map();
   let nextID = 1, turn = null, closed = false, stderr = '', runtimeStarted = false;
   let resumable = false, recoveryCalls = [], recoveryTurnID = null;
 
@@ -81,6 +84,38 @@ export async function createFxEngine(options = {}) {
       });
     });
   }
+  function inputObservation(call) {
+    return {
+      childHooks() { return { ...options.hooks, parent: call.observation.parent }; },
+      async wait(descriptor, run) {
+        if (typeof run !== 'function') throw new TypeError('wait needs an input request and an effect');
+        const token = randomUUID(), completed = Promise.withResolvers();
+        let settled = false, failed = false, original;
+        inputEffects.set(token, async () => {
+          try { original = await run(); }
+          catch (error) { failed = true; original = error; }
+          settled = true;
+          completed.resolve();
+          let resolution;
+          if (!failed) {
+            try { resolution = { outcome: original?.outcome, answers: original?.answers }; }
+            catch (error) {
+              try { Promise.resolve(options.hooks?.onError?.(error)).catch(() => {}); } catch {}
+              resolution = {};
+            }
+          }
+          await request('inputResult', { token, ...(failed ? { errorName: original?.name ?? 'Error' } : { resolution }) });
+        });
+        try {
+          try { await request('observeInput', { toolID: call.id, token, request: descriptor }); }
+          catch (error) { if (!settled || !failed) throw error; }
+          await completed.promise;
+          if (failed) throw original;
+          return original;
+        } finally { inputEffects.delete(token); }
+      },
+    };
+  }
   const exited = new Promise(resolve => child.once('exit', (code, signal) => {
     if (runtimeStarted) {
       try { options.onEvent?.({ type: 'runtime.exit', code, signal }); } catch {}
@@ -100,7 +135,11 @@ export async function createFxEngine(options = {}) {
   const fetchErrorNames = [];
   lines.on('line', line => {
     const value = JSON.parse(line);
-    if (value.permissionRequest) {
+    if (value.inputEffect) {
+      void inputEffects.get(value.inputEffect)?.().catch(error => {
+        try { options.hooks?.onError?.(error); } catch {}
+      });
+    } else if (value.permissionRequest) {
       const { token, ...permission } = value.permissionRequest;
       void Promise.resolve().then(() => options.onPermission?.(permission))
         .then(optionID => request('permissionResult', { token, ...(typeof optionID === 'string' ? { optionID } : {}) }),
@@ -193,7 +232,8 @@ export async function createFxEngine(options = {}) {
       turnStates.delete(value.turnToken);
     } else if (value.failed) {
       const state = turnStates.get(value.turnToken);
-      const error = new Error(value.failed);
+      const error = new Error(value.persistenceError ? `Journal append failed: ${value.persistenceError}` : value.failed);
+      if (value.persistenceError === 'fenced') error.code = 'FX_FENCED';
       state?.cleanup?.(); state?.fail(error);
       const queued = followUps.get(value.turnToken);
       queued?.rejectTurn(error); queued?.rejectAccepted(error);
@@ -225,7 +265,16 @@ export async function createFxEngine(options = {}) {
           }
           await request('persistenceResult', { persistenceID: call.id, value: result });
         } catch (error) {
-          await request('persistenceResult', { persistenceID: call.id, error: String(error), code: error.code }).catch(() => {});
+          // Swift has a typed fencing error. Unwrap the host exception at this
+          // language boundary without changing the Swift persistence contract.
+          const visited = new Set();
+          let cause = error, code;
+          while (cause && !visited.has(cause)) {
+            visited.add(cause);
+            if (cause.code === 'FX_FENCED') { code = cause.code; break; }
+            cause = cause.cause;
+          }
+          await request('persistenceResult', { persistenceID: call.id, error: String(error), code }).catch(() => {});
         }
       })();
     } else if (value.fetchRequest) {
@@ -268,6 +317,7 @@ export async function createFxEngine(options = {}) {
       if (owner?.signal?.aborted) return;
       Promise.resolve().then(() => tools.get(call.name).execute(call.input, {
         signal: controller.signal, executionId: call.executionId, sessionId: call.sessionId, context: call.context,
+        ...(call.observation && options.hooks ? { observation: inputObservation(call) } : {}),
       })).then(result => controller.signal.aborted ? undefined : request('toolResult', { toolID: call.id,
         ...(result?.type === 'libfx.tool-result' ? { rich: result } : {
           content: typeof result === 'string' ? result : JSON.stringify(result) ?? 'null',

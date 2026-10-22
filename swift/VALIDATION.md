@@ -12,7 +12,7 @@ All assertions in the upstream `test-mcp-adapter.mjs` pass for native stdio and 
 
 `FxToolObservation.wait` wraps host-owned input callbacks with typed `FxWaitRequest` and `FxWaitResolution` metadata. Six native tests cover all four request kinds, accepted and denied decisions, host-specific timeout classification, original error identity, observer errors, one shared UTF-8 budget per event, array limits, cancellation before and during an effect, late answers, retained inactive scopes, and mixed MCP/wait invalidation. Tests confirm that full results remain unchanged, private error descriptions are omitted, and cancellation produces only one terminal event.
 
-The durable child-engine test also wraps an input effect and verifies its parent tool scope. The independent Release consumer uses the public wait API inside a tool executed by the real Zig engine, retains the full 128 KiB tool input, and checks start/end identifiers, captured prompt and answers, and the successful decision. This is scripted host-input evidence, not a UI or real-user approval test. The complete upstream hooks owner and cross-process helper forwarding remain pending.
+The durable child-engine test also wraps an input effect and verifies its parent tool scope. The independent Release consumer uses the public wait API inside a tool executed by the real Zig engine, retains the full 128 KiB tool input, and checks start/end identifiers, captured prompt and answers, and the successful decision. This is scripted host-input evidence, not a UI or real-user approval test. The test bridge now forwards input waits to the actual Swift scope. `input-observation.mjs` compares both SDKs across capture settings and failing observers, preserves cyclic host objects and original errors, and checks one cancelled terminal event despite a late answer. The complete upstream hooks owner remains pending: its unchanged run currently stops because diagnostic callbacks incorrectly enable hooks in the bridge. MCP scope forwarding and fixture-runtime descendant assertions also need Swift-backed execution.
 
 ## Tool observation and child scopes
 
@@ -136,7 +136,8 @@ Additional executable checks passed:
 - `journal-interoperability.mjs`: Swift to JS to Swift using one persistence store.
 - `recovery.mjs`: journal truncated at tool intent; ambiguous writes remain stopped by default, while explicit rerun preserves execution ID.
 - `turn-control.mjs`: withdrawal while a tool is running, plus controls from an old turn leaving a new turn unaffected.
-- `observation.mjs`: JavaScript and Swift comparison of event kinds, root and parent scopes, parallel tool causality, tool failure, content opt-in, and committed journal cursors.
+- `observation.mjs`: JavaScript and Swift comparison of event kinds, root and parent scopes, parallel tool causality, tool failure, content opt-in, and committed journal cursors. Direct and wrapped fencing errors stop before model execution and emit one journal error.
+- `input-observation.mjs`: real JavaScript and Swift engines compare input waits, original cyclic results and error identity, decisions, observer failures, child-engine parent identity, and cancellation followed by a late answer.
 - `automatic-checkpoint.mjs`: Swift to JS to Swift using automatic journal snapshots and excluding covered journal prefixes on load.
 - `sqlite-crash.mjs`: actual driver SIGKILL after a saved snapshot and after an external write whose result was not returned; recovery preserves earlier history and skips the ambiguous write.
 - `sqlite-fencing.mjs`: two core processes with one database; the stale writer stops before its model request.
@@ -144,7 +145,7 @@ Additional executable checks passed:
 - `handoff.mjs`: Swift and JavaScript in both source and target roles; the source makes no later journal writes or automatic snapshots, the target receives the pending steer and skips the ambiguous write, and the source's turn-end observation marks the handoff.
 - `follow-up.mjs`: reference JavaScript and Swift automatic queues, durable acceptance and exactly one placement per input, plus recovery in both source and target roles; held inputs wait for explicit resume while current inputs run independently.
 
-`node swift/Tests/Conformance/run.mjs` passed all 56 selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
+`node swift/Tests/Conformance/run.mjs` passed all 57 selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
 
 `swift test --package-path swift --sanitize=thread` passed all 178 Swift tests without a sanitizer warning. The first focused run reported concurrent access to the native handle during shutdown. The transport now waits for the [Dispatch source's cancellation handler](https://developer.apple.com/documentation/dispatch/dispatch_source_set_cancel_handler) and destroys the handle on its actor. This check instruments Swift code; the precompiled Zig archive is not instrumented. The Swift CI workflow repeats the check after conformance testing.
 
@@ -164,3 +165,7 @@ After this decoder change, `zig build test` passed. The original Node checkpoint
 - Runtime proof for x86_64 and final consumer validation against the release artifact.
 - Available-credential real-model integration and exact-commit CI, including macOS arm64.
 - Repository final ship gate before any release-readiness claim.
+
+The `626ba6f7` CI run failed in `catalogTimeoutPreservesAcceptedInputAndReleasesOwnershipForRetry`: the recovery attempt reused the 100 ms preparation budget and timed out under runner load. The test now closes the failed owner, resumes the original persisted input with a new agent and a normal delivery budget, and retains the cancellation, ownership, model-request and event-order assertions. Final-commit CI must qualify this change.
+
+The fencing comparison exposed duplicate journal error observations after the first persistence rejection. The engine now retains the first failure and ignores later append notifications after that failure; the native observer test and JS/Swift comparison require one fenced error, no committed event and no model request.

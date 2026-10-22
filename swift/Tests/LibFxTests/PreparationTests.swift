@@ -81,12 +81,18 @@ private actor PreparationCredentials {
         #expect(try await store.pendingID(session: "s", agent: "default") == "original")
         let lease = try #require(try await store.claim(session: "s", agent: "default"))
         try await store.release(lease)
+        await #expect(throws: FxSessionError.preparationTimedOut) { try await agent.close() }
         await http.unblock()
-        let retry = try #require(try await session.resume())
+        // The short budget above tests the blocked preparation. Recovery uses a
+        // normal delivery budget so runner load does not cause another timeout.
+        let recoveringAgent = try FxAgent(configuration: configuration(http), store: store,
+            deliveryPolicy: FxDeliveryPolicy(maximumDuration: .seconds(10), reserve: .seconds(1)))
+        let recoveringSession = try await recoveringAgent.session(id: "s")
+        let retry = try #require(try await recoveringSession.resume())
         #expect(retry.id == "original")
         #expect(try await retry.result.stopReason == .endTurn)
         #expect(await http.chatRequests == 1)
-        try await agent.close()
+        try await recoveringAgent.close()
         let entries = try await store.entries(session: "s", agent: "default", after: 0)
         #expect(entries.filter { if case .started = $0.event { return true }; return false }.count == 1)
         // A delivery can yield before its model call when sanitizer overhead consumes its budget.

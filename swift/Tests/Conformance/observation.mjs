@@ -73,4 +73,42 @@ for (const capture of [false, true]) {
     assert.deepEqual(await exercise(createSwiftEngine, capture, parent), reference);
   }
 }
-console.log('Observation parity passed: tool causality, parent scopes, content opt-in, errors and committed cursors');
+// Keep the persistence checks runnable even while the complete hooks owner has
+// unrelated gaps. Both implementations use the same failing host store.
+async function fencing(create, wrapped) {
+  const events = [];
+  let modelRequests = 0;
+  const engine = await create({ backend: 'native', nativeAddon, apiKey: 'observation-credential', model: 'fixture/observation',
+    persistence: {
+      load: async () => ({}),
+      append: async () => {
+        const error = Object.assign(new Error('fenced'), { code: 'FX_FENCED' });
+        throw wrapped ? new Error('wrapped', { cause: error }) : error;
+      },
+    },
+    hooks: { onEvent: event => events.push(event) },
+    async fetch(_url, init) {
+      if (init.method === 'GET') return Response.json({ data: [{ id: 'fixture/observation', type: 'language' }] });
+      modelRequests++;
+      throw new Error('Fenced input must not reach the model');
+    },
+  });
+  try {
+    await assert.rejects((async () => {
+      const turn = engine.prompt('never delivered');
+      for await (const _ of turn) {}
+      return turn.result;
+    })(), /journal|append/i);
+    assert.equal(modelRequests, 0);
+    assert.equal(events.filter(event => event.type === 'journal.commit').length, 0);
+    assert.equal(events.filter(event => event.type === 'model.start').length, 0);
+    const failures = events.filter(event => event.type === 'journal.error');
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].data.fenced, true);
+  } finally { await engine.close().catch(() => {}); }
+}
+for (const wrapped of [false, true]) {
+  await fencing(createJSEngine, wrapped);
+  await fencing(createSwiftEngine, wrapped);
+}
+console.log('Observation parity passed: tool causality, parent scopes, content opt-in, errors, committed cursors and fenced writes');
