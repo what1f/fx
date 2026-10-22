@@ -37,7 +37,7 @@ jobs:
       - name: Build C archive and XCFramework
         run: swift/scripts/build-xcframework.sh
       - name: Test Swift SDK
-        run: swift test --package-path swift
+        run: swift test --package-path swift --no-parallel
       - name: Test independent release consumer
         run: swift/scripts/test-consumer.sh
       - name: Build Node comparison backend
@@ -46,7 +46,7 @@ jobs:
         run: node swift/Tests/Conformance/run.mjs
       - name: Check Swift memory with Address Sanitizer
         run: |
-          swift test --package-path swift --sanitize=address
+          swift test --package-path swift --no-parallel --sanitize=address
           swift build --package-path swift --sanitize=address
           export LIBFX_SWIFT_DRIVER="$(swift build --package-path swift --sanitize=address --show-bin-path)/FxSwiftDriver"
           node swift/Tests/Conformance/mcp-observation.mjs
@@ -74,7 +74,7 @@ jobs:
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native
       - name: Check Swift concurrency with Thread Sanitizer
         run: |
-          swift test --package-path swift --sanitize=thread
+          swift test --package-path swift --no-parallel --sanitize=thread
           swift build --package-path swift --sanitize=thread
           export LIBFX_SWIFT_DRIVER="$(swift build --package-path swift --sanitize=thread --show-bin-path)/FxSwiftDriver"
           node swift/Tests/Conformance/mcp-observation.mjs

@@ -10,9 +10,11 @@ From the repository root, build the macOS arm64 and x86_64 static libraries and 
 
 ```sh
 swift/scripts/build-xcframework.sh
-swift test --package-path swift
+swift test --package-path swift --no-parallel
 swift/scripts/test-consumer.sh
 ```
+
+Run separate test cases serially because they share a native runtime with 64 slots. Concurrency tests still create parallel operations within each case.
 
 The generated XCFramework is in `swift/Artifacts/CFx.xcframework` and is excluded from Git. Add the prepared `swift` directory as a local Swift package dependency in Xcode, or use `.package(path: "../fx/swift")` in another package. The package uses a SwiftPM binary target and has no unsafe linker flags. A published remote package and other platform artifacts remain pending.
 
