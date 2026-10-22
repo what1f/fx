@@ -569,7 +569,10 @@ public actor FxAgent {
                         } onCancel: { pause.cancel() }
                         controlChecks[lease.sessionID]?.pause = nil
                     }
-                } catch is CancellationError {} catch { await turn.cancel(); throw error }
+                } catch is CancellationError {
+                } catch let failure as SessionStorageFailure where Task.isCancelled && failure.cause is CancellationError {
+                    // Finishing a turn also cancels its asynchronous storage poll.
+                } catch { await turn.cancel(); throw error }
                 return false
             }
             do {

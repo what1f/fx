@@ -3,6 +3,8 @@
 #include <assert.h>
 #include <poll.h>
 #include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
 
 static NSData *json(id value) {
     NSError *error = nil;
@@ -18,8 +20,8 @@ static id decode(NSData *data) {
     return value;
 }
 
-static FxCore *create(NSString *url, BOOL valid) {
-    NSData *options = json(@{@"apiKey": @"test-only", @"home": @"/tmp", @"workspaceRoot": @"/tmp",
+static FxCore *create(NSString *url, BOOL valid, NSString *home, NSString *workspace) {
+    NSData *options = json(@{@"apiKey": @"test-only", @"home": home, @"workspaceRoot": workspace,
                              @"model": @"native/test-model", @"gatewayChatUrl": url});
     FxBuffer error = {0};
     FxCore *core = fx_core_create(options.bytes, options.length, &error);
@@ -91,11 +93,36 @@ static void finish(FxCore *core, int32_t handle, NSData *data) {
     assert(fx_core_finish_fetch(core, handle) == 1);
 }
 
-int main(void) {
+int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        for (NSString *url in @[@"http://attacker.example/chat", @"https://user:pass@example.com/chat",
-                                @"https://example.com/chat"]) create(url, NO);
-        FxCore *core = create(@"http://127.0.0.1:31337/chat", YES);
+        BOOL environmentGrowth = argc == 4 && strcmp(argv[1], "--environment-growth") == 0;
+        assert(argc == 1 || environmentGrowth);
+        long names = 0;
+        NSString *home = @"/tmp", *workspace = @"/tmp";
+        if (environmentGrowth) {
+            char *end = NULL;
+            names = strtol(argv[2], &end, 10);
+            assert(end && *end == '\0' && (names == 0 || names == 10 || names == 200));
+            // Force libc's environment onto the heap before the first runtime.
+            assert(setenv("LIBFX_ENV_GROWTH_BEFORE", "1", 1) == 0);
+            NSString *root = [NSString stringWithUTF8String:argv[3]];
+            home = [root stringByAppendingPathComponent:@"home"];
+            workspace = [root stringByAppendingPathComponent:@"workspace"];
+            assert([NSFileManager.defaultManager createDirectoryAtPath:home withIntermediateDirectories:YES attributes:nil error:NULL]);
+            assert([NSFileManager.defaultManager createDirectoryAtPath:workspace withIntermediateDirectories:YES attributes:nil error:NULL]);
+        }
+        if (!environmentGrowth) {
+            for (NSString *url in @[@"http://attacker.example/chat", @"https://user:pass@example.com/chat",
+                                    @"https://example.com/chat"]) create(url, NO, home, workspace);
+        }
+        FxCore *core = create(@"http://127.0.0.1:31337/chat", YES, home, workspace);
+        // Grow only after the initial core exists. Subsequent native lookups must
+        // not retain the environment array that libc can relocate here.
+        for (long index = 0; index < names; index++) {
+            NSString *name = [NSString stringWithFormat:@"LIBFX_ENV_GROWTH_%ld", index];
+            assert(getenv(name.UTF8String) == NULL);
+            assert(setenv(name.UTF8String, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", 1) == 0);
+        }
         NSMutableData *pending = [NSMutableData data];
         send(core, @1, @"initialize", @{@"protocolVersion": @1, @"clientCapabilities": @{}});
         assert(response(core, pending, @1)[@"result"]);
@@ -105,7 +132,7 @@ int main(void) {
         NSData *body = nil;
         int32_t previous = 0;
         NSData *wire = [@"data: {\"type\":\"text-delta\",\"delta\":\"ok\"}\n\ndata: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\",\"raw\":\"stop\"}}\n\ndata: [DONE]\n\n" dataUsingEncoding:NSUTF8StringEncoding];
-        for (int index = 0; index < 2; index++) {
+        for (int index = 0; index < (environmentGrowth ? 3 : 2); index++) {
             NSNumber *identifier = @(3 + index);
             send(core, identifier, @"session/prompt", @{@"sessionId": session,
                  @"prompt": @[@{@"type": @"text", @"text": @"test fetch identity"}]});

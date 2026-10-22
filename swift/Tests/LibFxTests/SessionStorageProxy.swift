@@ -12,13 +12,16 @@ actor SessionStorageProxy: FxSessionStorage {
     let beforeLeaseRenewal: (@Sendable () async throws -> Void)?
     private let afterClaim: (@Sendable (FxSessionLease?) async throws -> Void)?
     private let afterLeaseCheck: (@Sendable (FxSessionLease) async throws -> Void)?
+    private let beforeCancellationRead: (@Sendable () async throws -> Void)?
     init(_ base: FxSessionStore, beforeJournalAppend: (@Sendable (Data, Bool) async throws -> Void)? = nil,
          beforeLeaseRenewal: (@Sendable () async throws -> Void)? = nil,
          afterClaim: (@Sendable (FxSessionLease?) async throws -> Void)? = nil,
-         afterLeaseCheck: (@Sendable (FxSessionLease) async throws -> Void)? = nil) {
+         afterLeaseCheck: (@Sendable (FxSessionLease) async throws -> Void)? = nil,
+         beforeCancellationRead: (@Sendable () async throws -> Void)? = nil) {
         self.base = base; self.beforeJournalAppend = beforeJournalAppend
         self.beforeLeaseRenewal = beforeLeaseRenewal
         self.afterClaim = afterClaim; self.afterLeaseCheck = afterLeaseCheck
+        self.beforeCancellationRead = beforeCancellationRead
     }
     func failNext(_ operation: String, with error: any Error, after successfulCalls: Int = 0, count: Int = 1) {
         failure = (operation, error, successfulCalls, count)
@@ -87,6 +90,7 @@ actor SessionStorageProxy: FxSessionStorage {
     }
     func cancelled(_ lease: FxSessionLease, id: String) async throws -> Bool {
         try before("cancelled")
+        try await beforeCancellationRead?()
         return try await base.cancelled(lease, id: id)
     }
     func result(session: String, agent: String, id: String) async throws -> FxSessionResult? {
