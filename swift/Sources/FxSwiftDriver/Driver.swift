@@ -2,7 +2,7 @@ import Foundation
 import LibFxMCP
 @_spi(Conformance) import LibFx
 
-private enum DriverOutput {
+enum DriverOutput {
     private static let lock = NSLock()
     static func emit(_ value: JSONValue) {
         lock.withLock {
@@ -29,6 +29,7 @@ actor Driver: FxHTTPClient, FxPersistence {
     private let inputObservations = InputObservationRelay(emit: DriverOutput.emit)
     private var mcpAdapter: FxMCPAdapter?
     private var mcpTransport: DriverMCPTransport?
+    private var mcpObservations: [String: FxToolObservation] = [:]
     private var mcpCalls: [String: Task<FxToolResult, Error>] = [:]
     private var providerLabel = "gateway"
     private var agent: FxAgent?
@@ -140,7 +141,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                 }
             }
             let adapter = try await FxMCPAdapter.connect(transport: transport, prefix: options["prefix"]?.string ?? "",
-                resources: resources, prompts: prompts, propagateCorrelation: options["propagateCorrelation"] == .bool(true))
+                resources: resources, prompts: prompts, propagateCorrelation: options["propagateCorrelation"] == .bool(true), serverName: options["serverName"]?.string)
             mcpAdapter = adapter
             return .object(["instructions": .string(adapter.instructions), "tools": .array(adapter.tools.map {
                 .object(["name": .string($0.name), "description": .string($0.description), "inputSchema": $0.inputSchema, "idempotent": .bool(false)])
@@ -151,25 +152,34 @@ actor Driver: FxHTTPClient, FxPersistence {
         case "mcpExecute":
             guard let adapter = mcpAdapter, let tool = adapter.tools.first(where: { $0.name == value["name"]?.string }),
                   let token = value["token"]?.string else { throw FxError.closed }
+            let observation = try relayedMCPObservation(value["observation"], token: token)
+            if let observation { mcpObservations[token] = observation }
             let context = FxToolContext(executionID: value["executionId"]?.string ?? "mcp", sessionID: value["sessionId"]?.string ?? "mcp",
-                                        turnID: value["turnId"]?.string ?? "mcp", context: value["context"])
+                                        turnID: value["turnId"]?.string ?? "mcp", context: value["context"], observation: observation)
             let task = Task { try await tool.execute(value["input"] ?? .object([:]), context) }
             mcpCalls[token] = task
-            defer { mcpCalls.removeValue(forKey: token) }
+            defer {
+                mcpCalls.removeValue(forKey: token)
+                mcpObservations.removeValue(forKey: token)?.invalidate()
+            }
             let result = try await task.value
             return .object(["type": .string("libfx.tool-result"), "text": .string(result.text), "isError": .bool(result.isError),
                 "images": .array(result.images.map { image in
                     .object(["type": .string("image"), "mimeType": .string(image.format.rawValue), "data": .string(image.data?.base64EncodedString() ?? "")])
                 })])
+        case "mcpInvalidate":
+            if let token = value["token"]?.string { mcpObservations[token]?.invalidate() }
+            return .null
         case "mcpCancel":
             if let token = value["token"]?.string { mcpCalls[token]?.cancel() }
             return .null
         case "mcpClose":
+            for observation in mcpObservations.values { observation.invalidate() }
             let calls = Array(mcpCalls.values)
             for call in calls { call.cancel() }
             await mcpAdapter?.close()
             for call in calls { _ = await call.result }
-            mcpCalls.removeAll(); mcpAdapter = nil; mcpTransport = nil
+            mcpCalls.removeAll(); mcpObservations.removeAll(); mcpAdapter = nil; mcpTransport = nil
             return .null
         case "open", "openAgent":
             let options = value["options"] ?? .null
@@ -270,17 +280,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                         sessionID: value["sessionId"]?.string ?? "", turnID: value["turnId"]?.string ?? "", callID: value["callId"]?.string ?? "")
                 } else { parent = nil }
                 config.observation = FxObservationOptions(captureContent: options["hooks"]?["captureContent"] == .bool(true), parent: parent) { event in
-                    let encoder = JSONEncoder()
-                    encoder.dateEncodingStrategy = .millisecondsSince1970
-                    var value = try JSONDecoder().decode(JSONValue.self, from: encoder.encode(event))
-                    if case .object(var fields) = value {
-                        fields["timestamp"] = .number((event.timestamp.timeIntervalSince1970 * 1000).rounded())
-                        for key in ["parentSessionId", "parentTurnId", "parentCallId", "sourceSessionId", "workId", "turnId", "executionId"] where fields[key] == nil {
-                            fields[key] = .null
-                        }
-                        value = .object(fields)
-                    }
-                    DriverOutput.emit(.object(["observation": value]))
+                    DriverOutput.emit(.object(["observation": try encodeObservation(event)]))
                 } onError: { error in
                     DriverOutput.emit(.object(["observationError": .string(String(describing: error))]))
                 }
@@ -866,7 +866,7 @@ actor Driver: FxHTTPClient, FxPersistence {
     private func callTool(_ name: String, input: JSONValue, context: FxToolContext) async throws -> FxToolResult {
         let id = nextToolID
         nextToolID += 1
-        let observation = await inputObservations.register(id, scope: context.observation)
+        let observation = try await inputObservations.register(id, scope: context.observation)
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { waiter in

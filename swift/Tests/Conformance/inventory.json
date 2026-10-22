@@ -196,8 +196,8 @@
     {
       "upstream": "sdk/tests/test-hooks.mjs",
       "classification": "adapted",
-      "reason": "Runtime and journal observations, parent identity projection, content opt-in, observer error isolation, and hooks-enabled steering have Swift proof. Native tests cover tool-local MCP spans, a real child engine from a durable tool, cancellation, late settlement and observer reentrancy. Typed input waits now have native tests and Release-consumer proof for bounds, cancellation, mixed span invalidation and unchanged effect results. Full upstream hooks assertions still await cross-process tool observation forwarding and runtime-factory fixture support.",
-      "status": "partial"
+      "reason": "Engine, journal, durable resume, input-wait and MCP assertions run through the real Swift SDK. An explicit selection retains all assertions outside the injected JavaScript-runtime descendant/authority block and standalone JavaScript helper cancellation block. Those two blocks remain pending Swift-backed execution. Native tests and differential checks separately cover parent projection, effect identity, bounds, invalidation and cancellation. The bridge forwards scope identity and invalidation; Swift owns MCP spans, server/tool names and correlation IDs.",
+      "status": "partial: engine/MCP selection passed; injected-runtime and standalone-helper upstream blocks pending"
     },
     {
       "upstream": "sdk/tests/test-host-tool-cancel.mjs",

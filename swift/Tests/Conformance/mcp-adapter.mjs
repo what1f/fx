@@ -1,13 +1,14 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
+import { swiftObservationScope } from './observation-scope.mjs';
 
 // Forward the fixture client's transport operations. Catalog processing, naming,
 // context composition, result conversion, and cancellation run in Swift.
 export async function createMcpAdapter(client, options, driver) {
   const child = spawn(driver, [], { stdio: ['pipe', 'pipe', 'pipe'] });
   const lines = createInterface({ input: child.stdout });
-  const pending = new Map(), remoteCalls = new Map();
+  const pending = new Map(), remoteCalls = new Map(), observations = new Map(), cancelledRequests = new Set();
   let nextID = 1, stderr = '', closePromise;
   child.stderr.on('data', data => { stderr += data; });
   const exited = new Promise(resolve => child.once('exit', resolve));
@@ -28,11 +29,36 @@ export async function createMcpAdapter(client, options, driver) {
     for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
   });
+  async function finish() {
+    child.stdin.end();
+    const code = await exited;
+    lines.close();
+    // The official client warns when this fixture deliberately sends a late
+    // response after cancellation. Allow only that warning for a request whose
+    // cancellation crossed this transport; sanitizer and other output still fail.
+    const unexpected = stderr.split('\n').filter(line => {
+      if (!line) return false;
+      const late = /^\S+ warning libfx\.conformance\.mcp: id=([A-Za-z0-9-]+) \[MCP\] Attempted to handle response for already removed request$/.exec(line);
+      return !late || !cancelledRequests.has(late[1]);
+    });
+    if (code !== 0 || unexpected.length) throw new Error(`MCP driver exited (${code}): ${stderr}`);
+  }
   lines.on('line', line => {
     const value = JSON.parse(line);
+    if (value.mcpObservation) {
+      const { token, event } = value.mcpObservation;
+      observations.get(token)?.notify(event);
+      return;
+    }
+    if (value.mcpObservationError) {
+      const { token, error } = value.mcpObservationError;
+      observations.get(token)?.reportError(new Error(error));
+      return;
+    }
     if (value.mcpSend) {
       const message = value.mcpSend;
       if (message.method === 'notifications/cancelled') {
+        cancelledRequests.add(String(message.params.requestId));
         remoteCalls.get(message.params.requestId)?.abort();
         return;
       }
@@ -41,7 +67,12 @@ export async function createMcpAdapter(client, options, driver) {
       remoteCalls.set(message.id, controller);
       Promise.resolve().then(() => {
         switch (message.method) {
-          case 'initialize': return client.initialize();
+          case 'initialize':
+            if (typeof client.initialize === 'function') return client.initialize();
+            // Some upstream fixtures model an already-initialized client. Supply
+            // only its protocol envelope; tool behavior still belongs to Swift.
+            return { protocolVersion: message.params.protocolVersion, capabilities: { tools: {} },
+              serverInfo: { name: options.serverName ?? 'fixture-client', version: 'fixture' } };
           case 'tools/list': return client.listTools(message.params);
           case 'tools/call': return client.callTool(message.params, undefined, { signal: controller.signal });
           case 'resources/read': return client.readResource(message.params);
@@ -71,26 +102,26 @@ export async function createMcpAdapter(client, options, driver) {
       tools: opened.tools.map(tool => ({ ...tool, async execute(input, context = {}) {
         const token = randomUUID();
         if (context.signal?.aborted) throw context.signal.reason;
+        const observation = context.observation?.[swiftObservationScope];
+        if (observation) observations.set(token, observation);
+        const stopObserving = observation?.onInvalidate(() => { void request('mcpInvalidate', { token }).catch(() => {}); });
         const cancel = () => { void request('mcpCancel', { token }).catch(() => {}); };
         context.signal?.addEventListener('abort', cancel, { once: true });
         try { return await request('mcpExecute', { token, name: tool.name, input,
-          executionId: context.executionId, sessionId: context.sessionId, turnId: context.turnId, context: context.context }); }
-        finally { context.signal?.removeEventListener('abort', cancel); }
+          executionId: context.executionId, sessionId: context.sessionId, turnId: context.turnId, context: context.context,
+          ...(observation ? { observation: { ...observation.metadata, active: observation.active } } : {}) }); }
+        finally { context.signal?.removeEventListener('abort', cancel); stopObserving?.(); observations.delete(token); }
       } })),
       close() {
         return closePromise ??= (async () => {
-          await request('mcpClose');
-          await client.close?.();
-          child.stdin.end();
-          await exited;
+          try { await request('mcpClose'); }
+          finally { try { await client.close?.(); } finally { await finish(); } }
         })();
       },
     };
   } catch (error) {
-    await request('mcpClose').catch(() => {});
-    await client.close?.();
-    child.stdin.end();
-    await exited;
+    try { await request('mcpClose').catch(() => {}); }
+    finally { try { await client.close?.(); } finally { await finish(); } }
     throw error;
   }
 }

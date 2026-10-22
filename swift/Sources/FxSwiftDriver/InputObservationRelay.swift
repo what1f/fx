@@ -16,10 +16,11 @@ actor InputObservationRelay {
 
     init(emit: @escaping @Sendable (JSONValue) -> Void) { self.emit = emit }
 
-    func register(_ id: Int, scope: FxToolObservation?) -> JSONValue? {
+    func register(_ id: Int, scope: FxToolObservation?) throws -> JSONValue? {
         guard !closed, let scope, let parent = scope.childOptions().parent else { return nil }
         scopes[id] = scope
-        return .object(["parent": .object([
+        return .object(["scope": try encodeObservation(scope.scope),
+                        "captureContent": .bool(scope.childOptions().captureContent), "parent": .object([
             "rootSessionId": .string(parent.rootSessionID), "sessionId": .string(parent.sessionID),
             "turnId": .string(parent.turnID), "callId": .string(parent.callID),
         ])])

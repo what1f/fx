@@ -11,6 +11,16 @@ export async function resolve(specifier, context, nextResolve) {
 
 export async function load(url, context, nextLoad) {
   const result = await nextLoad(url, context);
+  if (url.endsWith('/sdk/tests/test-hooks.mjs') && process.env.LIBFX_SWIFT_HOOKS_ENGINE_ONLY === '1') {
+    const source = result.source.toString();
+    const start = '// A host-created child adds its outer parent only to its own root session.';
+    const end = 'for (const hooks of [';
+    if (source.split(start).length !== 2 || source.split(end).length !== 2) throw new Error('Upstream hooks selection changed; review test ownership');
+    // These blocks use an injected JavaScript runtime and the standalone JS
+    // helper. Keep them pending rather than counting their JS execution as Swift.
+    const selected = source.slice(0, source.indexOf(start)) + source.slice(source.indexOf(end));
+    return { ...result, source: selected + "\nconsole.log('Swift engine/MCP selection; injected-runtime and standalone-helper blocks excluded');\n" };
+  }
   if (!url.endsWith('/sdk/tests/test-agent-tool-start.mjs')) return result;
   const source = result.source.toString();
   const oracle = 'const full = JSON.stringify({ path: "/tmp/big.txt", content: huge });';

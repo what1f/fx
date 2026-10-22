@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createMcpAdapter as bridgeMcpAdapter } from './mcp-adapter.mjs';
+import { swiftObservationScope } from './observation-scope.mjs';
 // Host-owned opaque byte storage fixture; the engine and journal protocol remain in Swift.
 export { createMemoryPersistence } from '../../../sdk/fx-sdk.js';
 
@@ -53,6 +54,13 @@ function swiftModel(options) {
 }
 
 export async function createFxEngine(options = {}) {
+  // These invalid callback shapes cannot be constructed by a typed Swift caller.
+  if (options.hooks !== undefined) {
+    const hooks = options.hooks;
+    if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks) || typeof hooks.onEvent !== 'function' ||
+        hooks.captureContent !== undefined && typeof hooks.captureContent !== 'boolean' ||
+        hooks.onError !== undefined && typeof hooks.onError !== 'function') throw new TypeError('Invalid hooks options');
+  }
   const child = spawn(process.env.LIBFX_SWIFT_DRIVER || defaultDriver, [], { stdio: ['pipe', 'pipe', 'pipe'] });
   const lines = createInterface({ input: child.stdout });
   const pending = new Map();
@@ -62,7 +70,7 @@ export async function createFxEngine(options = {}) {
   const sessionIntakes = new Set();
   const fetchControllers = new Map();
   const fetchReaders = new Map();
-  const inputEffects = new Map();
+  const inputEffects = new Map(), toolScopes = new Map();
   let nextID = 1, turn = null, closed = false, stderr = '', runtimeStarted = false;
   let resumable = false, recoveryCalls = [], recoveryTurnID = null;
 
@@ -84,8 +92,30 @@ export async function createFxEngine(options = {}) {
       });
     });
   }
+  function deliverObservation(event) {
+    for (const [id, relay] of toolScopes) {
+      const scope = relay.metadata.scope;
+      if (scope.sessionId === event.sessionId && scope.executionId === event.executionId &&
+          (event.type === 'turn.end' || event.type === 'tool.end' && scope.data.call.callId === event.data.call.callId)) {
+        relay.invalidate(); toolScopes.delete(id);
+      }
+    }
+    try { Promise.resolve(options.hooks?.onEvent(event)).catch(reportObservationError); }
+    catch (error) { reportObservationError(error); }
+  }
+  function reportObservationError(error) {
+    try { Promise.resolve(options.hooks?.onError?.(error)).catch(() => {}); } catch {}
+  }
   function inputObservation(call) {
+    const listeners = new Set();
+    const relay = {
+      metadata: call.observation, active: true, notify: deliverObservation, reportError: reportObservationError,
+      invalidate() { if (relay.active) { relay.active = false; for (const notify of listeners) notify(); listeners.clear(); } },
+      onInvalidate(notify) { if (relay.active) listeners.add(notify); else notify(); return () => listeners.delete(notify); },
+    };
+    toolScopes.set(call.id, relay);
     return {
+      [swiftObservationScope]: relay,
       childHooks() { return { ...options.hooks, parent: call.observation.parent }; },
       async wait(descriptor, run) {
         if (typeof run !== 'function') throw new TypeError('wait needs an input request and an effect');
@@ -117,6 +147,8 @@ export async function createFxEngine(options = {}) {
     };
   }
   const exited = new Promise(resolve => child.once('exit', (code, signal) => {
+    for (const relay of toolScopes.values()) relay.invalidate();
+    toolScopes.clear();
     if (runtimeStarted) {
       try { options.onEvent?.({ type: 'runtime.exit', code, signal }); } catch {}
     }
@@ -162,11 +194,7 @@ export async function createFxEngine(options = {}) {
       }).then(value => request('credentialResult', { token: call.token, credentials: value }),
           () => request('credentialResult', { token: call.token })).catch(() => {});
     } else if (value.observation) {
-      try { Promise.resolve(options.hooks?.onEvent(value.observation)).catch(error => {
-        try { Promise.resolve(options.hooks?.onError?.(error)).catch(() => {}); } catch {}
-      }); } catch (error) {
-        try { Promise.resolve(options.hooks?.onError?.(error)).catch(() => {}); } catch {}
-      }
+      deliverObservation(value.observation);
     } else if (value.observationError) {
       try { Promise.resolve(options.hooks?.onError?.(new Error(value.observationError))).catch(() => {}); } catch {}
     } else if (value.diagnostic) {
@@ -303,6 +331,8 @@ export async function createFxEngine(options = {}) {
         } finally { fetchControllers.delete(call.id); }
       })();
     } else if (value.toolCancelled) {
+      toolScopes.get(value.toolCancelled)?.invalidate();
+      toolScopes.delete(value.toolCancelled);
       toolControllers.get(value.toolCancelled)?.abort();
       toolControllers.delete(value.toolCancelled);
     } else if (value.toolRequest) {

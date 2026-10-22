@@ -8,7 +8,7 @@ public struct FxToolObservation: Sendable {
     private let parent: FxObservationParent
     private let state: ToolObservationState
 
-    init(scope: FxObservation, callID: String, options: FxObservationOptions) throws {
+    package init(scope: FxObservation, callID: String, options: FxObservationOptions) throws {
         guard let turnID = scope.turnID else { throw FxError.protocolViolation("Tool observation has no turn") }
         self.scope = scope
         self.callID = callID
@@ -68,7 +68,7 @@ public struct FxToolObservation: Sendable {
         }
     }
 
-    func invalidate() { state.invalidate() }
+    package func invalidate() { state.invalidate() }
 }
 
 // State changes and event enqueueing are atomic. Callbacks drain outside the lock so they can
