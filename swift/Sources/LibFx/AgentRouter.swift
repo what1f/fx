@@ -17,23 +17,23 @@ public actor FxAgentRouter {
 
     public func makeAgent<Harness: FxDurableHarness>(harness: Harness, name: String = "default",
         checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024,
-        deliveryPolicy: FxDeliveryPolicy? = nil, queue: (any FxSessionQueue)? = nil,
+        deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil,
         onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil
     ) async throws -> FxDurableAgent<Harness.Input, Harness.Update> {
         let agent = try await makeAgent(harness: DurableHarnessAdapter(harness: harness), name: name,
-            checkpoint: checkpoint, checkpointAfterBytes: checkpointAfterBytes, deliveryPolicy: deliveryPolicy,
+            checkpoint: checkpoint, checkpointAfterBytes: checkpointAfterBytes, deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy,
             queue: queue, onLifecycleEvent: onLifecycleEvent)
         return FxDurableAgent(agent: agent)
     }
 
     public func makeAgent(harness: any FxSessionHarness, name: String = "default",
         checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024,
-        deliveryPolicy: FxDeliveryPolicy? = nil, queue: (any FxSessionQueue)? = nil,
+        deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil,
         onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil
     ) async throws -> FxAgent {
         guard agents[name]?.agent == nil else { throw FxAgentRoutingError.duplicateName(name) }
         let agent = try FxAgent(harness: harness, name: name, store: store, checkpoint: checkpoint,
-            checkpointAfterBytes: checkpointAfterBytes, deliveryPolicy: deliveryPolicy,
+            checkpointAfterBytes: checkpointAfterBytes, deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy,
             queue: queue, onLifecycleEvent: onLifecycleEvent)
         agents[name] = Registration(agent: agent)
         await agent.attachRouter(self)
@@ -42,11 +42,11 @@ public actor FxAgentRouter {
 
     public func makeAgent(configuration: FxConfiguration, name: String = "default",
         checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024,
-        deliveryPolicy: FxDeliveryPolicy? = nil, queue: (any FxSessionQueue)? = nil
+        deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil
     ) async throws -> FxAgent {
         guard agents[name]?.agent == nil else { throw FxAgentRoutingError.duplicateName(name) }
         let agent = try FxAgent(configuration: configuration, name: name, store: store, checkpoint: checkpoint,
-            checkpointAfterBytes: checkpointAfterBytes, deliveryPolicy: deliveryPolicy, queue: queue)
+            checkpointAfterBytes: checkpointAfterBytes, deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy, queue: queue)
         agents[name] = Registration(agent: agent)
         await agent.attachRouter(self)
         return agent

@@ -25,14 +25,16 @@ public struct FxHarnessContext: Sendable {
     public let options: FxSessionOptions
     public let persistence: any FxHarnessPersistence
     public let checkpointAfterBytes: Int?
+    let leaseGuard: SessionLeaseGuard?
     private let ownership: @Sendable () async throws -> Void
 
     init(sessionID: String, inputID: String?, options: FxSessionOptions,
          persistence: any FxHarnessPersistence, checkpointAfterBytes: Int?,
-         ownership: @escaping @Sendable () async throws -> Void) {
+         leaseGuard: SessionLeaseGuard? = nil, ownership: @escaping @Sendable () async throws -> Void) {
         self.sessionID = sessionID; self.inputID = inputID; self.options = options
         self.persistence = persistence; self.checkpointAfterBytes = checkpointAfterBytes
         self.ownership = ownership
+        self.leaseGuard = leaseGuard
     }
 
     /// Check before starting an external effect, and after awaiting permission.

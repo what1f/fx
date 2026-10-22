@@ -22,6 +22,7 @@ enum SessionInputAdmission {
                 switch block {
                 case .payload: throw FxError.invalidInput("A data input must contain exactly one payload")
                 case .text(let text): return .object(["type": .string("text"), "text": .string(text)])
+                case .resource(let uri, let text): return resourcePromptBlock(uri: uri, text: text)
                 case .image(let image):
                     var fields = image.fields
                     if let data = image.data {

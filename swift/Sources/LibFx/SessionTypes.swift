@@ -117,17 +117,30 @@ public struct FxSessionLease: Sendable, Equatable, Codable {
 struct SessionPersistence: FxHarnessPersistence {
     let store: any FxSessionStorage
     let lease: FxSessionLease
-    func load() async throws -> FxPersistenceSnapshot { try await sessionStorageOperation { try await store.loadJournal(lease) } }
+    let leaseGuard: SessionLeaseGuard?
+
+    init(store: any FxSessionStorage, lease: FxSessionLease, leaseGuard: SessionLeaseGuard? = nil) {
+        self.store = store; self.lease = lease; self.leaseGuard = leaseGuard
+    }
+
+    private func access<Value: Sendable>(_ operation: @Sendable () async throws -> Value) async throws -> Value {
+        try await leaseGuard?.check()
+        let value = try await sessionStorageOperation(operation)
+        try await leaseGuard?.check()
+        return value
+    }
+
+    func load() async throws -> FxPersistenceSnapshot { try await access { try await store.loadJournal(lease) } }
     func append(expected: String?, idempotencyKey: String, data: Data, barrier: Bool) async throws -> String {
-        try await sessionStorageOperation { try await store.appendJournal(lease, expected: expected, key: idempotencyKey, data: data, barrier: barrier, marks: nil) }
+        try await access { try await store.appendJournal(lease, expected: expected, key: idempotencyKey, data: data, barrier: barrier, marks: nil) }
     }
     func append(expected: String?, idempotencyKey: String, data: Data, marks: [FxSessionJournalMark], barrier: Bool) async throws -> String {
-        try await sessionStorageOperation { try await store.appendJournal(lease, expected: expected, key: idempotencyKey, data: data, barrier: barrier, marks: marks) }
+        try await access { try await store.appendJournal(lease, expected: expected, key: idempotencyKey, data: data, barrier: barrier, marks: marks) }
     }
-    func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) async throws { try await sessionStorageOperation { try await store.saveJournalCheckpoint(lease, checkpoint) } }
-    func storeImage(_ data: Data, named name: String) async throws { try await sessionStorageOperation { try await store.storeImage(data, named: name, lease: lease) } }
+    func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) async throws { try await access { try await store.saveJournalCheckpoint(lease, checkpoint) } }
+    func storeImage(_ data: Data, named name: String) async throws { try await access { try await store.storeImage(data, named: name, lease: lease) } }
     func loadImage(named name: String) async throws -> Data? {
-        try await sessionStorageOperation { try await store.loadImage(named: name, lease: lease) }
+        try await access { try await store.loadImage(named: name, lease: lease) }
     }
 }
 

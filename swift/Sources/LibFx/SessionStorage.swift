@@ -12,6 +12,11 @@ public protocol FxSessionStorage: Sendable {
     /// Checkpoint bytes, when supplied, are already in the harness snapshot format.
     /// Accepts an input once in session order. Returns true for an existing ID.
     /// Prompt and steering IDs share a namespace. A retry must not modify stored input.
+    /// If cancellation is observed before commit, throw `CancellationError` without
+    /// accepting the input or reserving its ID. Asynchronous preparation must not
+    /// commit later after reporting cancellation. Once commit succeeds, return its
+    /// acceptance result even if the caller is cancelled; cancellation cannot undo it.
+    /// A failed acknowledgement with an uncertain commit is resolved by retrying its ID.
     func accept(session: String, agent: String, id: String, content: [FxPromptContent], options: FxSessionOptions,
                 checkpoint: Data?, steering: Bool, deferringImageLimits: Bool) async throws -> Bool
     /// Atomically reads the pending input ID and the last published event cursor.

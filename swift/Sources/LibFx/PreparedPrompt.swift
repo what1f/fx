@@ -30,6 +30,7 @@ struct PreparedPrompt: Sendable {
             switch block {
             case .payload: throw FxError.invalidInput("Use a custom durable harness for data inputs")
             case .text(let text): blocks.append(.object(["type": .string("text"), "text": .string(text)]))
+            case .resource(let uri, let text): blocks.append(resourcePromptBlock(uri: uri, text: text))
             case .image(let image):
                 var fields = image.fields
                 if admission.retainedImages.contains(index), let data = image.data {

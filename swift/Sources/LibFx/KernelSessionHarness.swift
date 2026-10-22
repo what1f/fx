@@ -25,6 +25,9 @@ struct KernelSessionHarness: FxSessionHarness {
     func open(_ context: FxHarnessContext) async throws -> any FxHarnessSession {
         var config = configured(for: context.options)
         config.checkpointAfterBytes = context.checkpointAfterBytes
+        if context.leaseGuard != nil {
+            config.httpClient = OwnedSessionHTTPClient(base: config.httpClient, context: context)
+        }
         config.validatePermission = { try await context.checkOwnership() }
         if let onLifecycleEvent = configuration.onLifecycleEvent {
             let publicTurnID = context.inputID
@@ -61,6 +64,19 @@ struct KernelSessionHarness: FxSessionHarness {
         }
         let engine = try await FxEngine.open(configuration: config, sessionID: context.sessionID, persistence: context.persistence)
         return KernelHarnessSession(engine: engine, idempotent: Set(config.tools.filter(\.isIdempotent).map(\.name)))
+    }
+}
+
+private struct OwnedSessionHTTPClient: FxHTTPClient {
+    let base: any FxHTTPClient
+    let context: FxHarnessContext
+
+    func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        try await context.checkOwnership()
+        let response = try await base.send(request)
+        do { try await context.checkOwnership() }
+        catch { response.cancel(); throw error }
+        return response
     }
 }
 

@@ -8,13 +8,22 @@ import Glibc
 #endif
 
 /// Durable intake, event history, and core journals. A nil URL keeps all data in memory.
-public actor FxSessionStore: FxSessionStorage {
+public actor FxSessionStore: FxRenewableSessionStorage {
     let database: SQLiteDatabase
+    public nonisolated let leasePolicy: FxSessionLeasePolicy?
+    private let leaseNow: @Sendable () -> Date
     private let lockDirectory: URL?
     private struct HeldLease { let lease: FxSessionLease; let descriptor: Int32? }
     private var held: [String: HeldLease] = [:]
 
-    public init(url: URL? = nil) throws {
+    /// Timed ownership is opt-in and fixed when a database is created.
+    /// Its backend clock is the shared host's wall clock; the agent uses a
+    /// separate monotonic clock to stop local authority conservatively.
+    public init(url: URL? = nil, leasePolicy: FxSessionLeasePolicy? = nil) throws {
+        try self.init(url: url, leasePolicy: leasePolicy, leaseNow: { Date() })
+    }
+
+    init(url: URL? = nil, leasePolicy: FxSessionLeasePolicy?, leaseNow: @escaping @Sendable () -> Date) throws {
         if let url {
             guard url.isFileURL, !url.path.isEmpty, !url.path.utf8.contains(0) else { throw FxSQLiteError.invalidURL }
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -28,6 +37,7 @@ public actor FxSessionStore: FxSessionStorage {
         }
         try database.execute("PRAGMA synchronous=FULL")
         try database.transaction {
+            let existingSchema = try database.statement("SELECT 1 FROM sqlite_master WHERE name='fx_agent_schema'") { try database.step($0) }
             let legacy = try database.statement("SELECT 1 FROM sqlite_master WHERE name='fx_state'") { try database.step($0) }
             guard !legacy else { throw FxPersistenceError.invalidJournal }
             try database.execute("CREATE TABLE IF NOT EXISTS fx_agent_schema (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL)")
@@ -36,7 +46,7 @@ public actor FxSessionStore: FxSessionStorage {
                 guard try database.step(statement) else { throw FxPersistenceError.invalidJournal }
                 return Int(sqlite3_column_int(statement, 0))
             }
-            guard (1...5).contains(version) else { throw FxSQLiteError.unsupportedVersion(version) }
+            guard (1...6).contains(version) else { throw FxSQLiteError.unsupportedVersion(version) }
             try database.execute("CREATE TABLE IF NOT EXISTS fx_sessions (id TEXT PRIMARY KEY, agent TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0, owner TEXT, head INTEGER NOT NULL DEFAULT 0, checkpoint_cursor INTEGER, checkpoint BLOB)")
             try database.execute("CREATE TABLE IF NOT EXISTS fx_inputs (sequence INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, id TEXT NOT NULL, content BLOB NOT NULL, options BLOB NOT NULL, started INTEGER NOT NULL DEFAULT 0, cancelled INTEGER NOT NULL DEFAULT 0, result BLOB, UNIQUE(session,id))")
             try database.execute("CREATE TABLE IF NOT EXISTS fx_session_events (cursor INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, epoch INTEGER NOT NULL, data BLOB NOT NULL)")
@@ -71,9 +81,25 @@ public actor FxSessionStore: FxSessionStorage {
                 try database.execute("ALTER TABLE fx_sessions ADD COLUMN completed_turn TEXT")
                 try database.execute("UPDATE fx_agent_schema SET version=5 WHERE id=1")
             }
+            if version < 6 {
+                try database.execute("ALTER TABLE fx_sessions ADD COLUMN lease_until INTEGER")
+                try database.execute("UPDATE fx_agent_schema SET version=6 WHERE id=1")
+            }
+            try database.execute("CREATE TABLE IF NOT EXISTS fx_agent_ownership (id INTEGER PRIMARY KEY CHECK(id=1), mode TEXT NOT NULL)")
+            let requestedMode = leasePolicy == nil ? "process" : "timed"
+            // Do not silently convert a database that existing processes may own.
+            let initialMode = existingSchema && version < 6 ? "process" : requestedMode
+            try database.execute("INSERT OR IGNORE INTO fx_agent_ownership VALUES (1,?)", [.text(initialMode)])
+            let mode = try database.statement("SELECT mode FROM fx_agent_ownership WHERE id=1") { statement -> String in
+                guard try database.step(statement) else { throw FxPersistenceError.invalidJournal }
+                return database.text(statement, column: 0)
+            }
+            guard mode == requestedMode else { throw FxError.invalidInput("Session store ownership mode does not match") }
         }
         self.database = database
-        self.lockDirectory = canonicalURL.map { URL(fileURLWithPath: $0.path + ".locks", isDirectory: true) }
+        self.leasePolicy = leasePolicy
+        self.leaseNow = leaseNow
+        self.lockDirectory = leasePolicy == nil ? canonicalURL.map { URL(fileURLWithPath: $0.path + ".locks", isDirectory: true) } : nil
         if let lockDirectory { try FileManager.default.createDirectory(at: lockDirectory, withIntermediateDirectories: true) }
     }
 
@@ -148,7 +174,7 @@ public actor FxSessionStore: FxSessionStorage {
 
     public func claim(session: String, agent: String) throws -> FxSessionLease? {
         try checkAgent(session, agent: agent)
-        guard held[session] == nil else { return nil }
+        if leasePolicy == nil, held[session] != nil { return nil }
         var descriptor: Int32?
         if let lockDirectory {
             let name = SHA256.hash(data: Data(session.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -163,17 +189,24 @@ public actor FxSessionStore: FxSessionStorage {
             descriptor = fd
         }
         do {
-            let lease = try database.transaction {
+            let lease = try database.transaction { () -> FxSessionLease? in
                 try checkAgent(session, agent: agent)
+                let now = try leaseMilliseconds()
+                if leasePolicy != nil {
+                    let occupied = try database.statement("SELECT 1 FROM fx_sessions WHERE id=? AND owner IS NOT NULL AND lease_until>?", [.text(session), .integer(now)]) { try database.step($0) }
+                    if occupied { return nil }
+                }
                 let epoch = try database.statement("SELECT epoch FROM fx_sessions WHERE id=?", [.text(session)]) { statement in
                     guard try database.step(statement) else { throw FxSessionError.notFound }
                     return sqlite3_column_int64(statement, 0)
                 }
                 guard epoch < Int64.max else { throw FxPersistenceError.sizeLimit }
                 let lease = FxSessionLease(sessionID: session, owner: UUID().uuidString, epoch: epoch + 1)
-                try database.execute("UPDATE fx_sessions SET epoch=?, owner=? WHERE id=?", [.integer(lease.epoch), .text(lease.owner), .text(session)])
+                let expiry: SQLiteDatabase.Value = try leasePolicy.map { .integer(try leaseExpiry(now, policy: $0)) } ?? .null
+                try database.execute("UPDATE fx_sessions SET epoch=?, owner=?, lease_until=? WHERE id=?", [.integer(lease.epoch), .text(lease.owner), expiry, .text(session)])
                 return lease
             }
+            guard let lease else { if let descriptor { closeDescriptor(descriptor) }; return nil }
             held[session] = HeldLease(lease: lease, descriptor: descriptor)
             return lease
         } catch {
@@ -185,12 +218,44 @@ public actor FxSessionStore: FxSessionStorage {
     public func release(_ lease: FxSessionLease) throws {
         guard held[lease.sessionID]?.lease == lease else { return }
         defer { if let descriptor = held.removeValue(forKey: lease.sessionID)?.descriptor { closeDescriptor(descriptor) } }
-        try database.execute("UPDATE fx_sessions SET owner=NULL WHERE id=? AND owner=? AND epoch=?", [.text(lease.sessionID), .text(lease.owner), .integer(lease.epoch)])
+        try database.execute("UPDATE fx_sessions SET owner=NULL,lease_until=NULL WHERE id=? AND owner=? AND epoch=?", [.text(lease.sessionID), .text(lease.owner), .integer(lease.epoch)])
     }
 
     public func checkLease(_ lease: FxSessionLease) throws {
-        let valid = try database.statement("SELECT 1 FROM fx_sessions WHERE id=? AND owner=? AND epoch=?", [.text(lease.sessionID), .text(lease.owner), .integer(lease.epoch)]) { try database.step($0) }
+        let sql = "SELECT 1 FROM fx_sessions WHERE id=? AND owner=? AND epoch=?" + (leasePolicy == nil ? "" : " AND lease_until>?")
+        var values: [SQLiteDatabase.Value] = [.text(lease.sessionID), .text(lease.owner), .integer(lease.epoch)]
+        if leasePolicy != nil { values.append(.integer(try leaseMilliseconds())) }
+        let valid = try database.statement(sql, values) { try database.step($0) }
         guard valid else { throw FxPersistenceError.fenced }
+    }
+
+    public func renew(_ lease: FxSessionLease) throws {
+        guard let leasePolicy else { throw FxError.invalidInput("Session store does not use timed ownership") }
+        try Task.checkCancellation()
+        try database.transaction {
+            let now = try leaseMilliseconds()
+            let expiry = try leaseExpiry(now, policy: leasePolicy)
+            try database.execute("UPDATE fx_sessions SET lease_until=? WHERE id=? AND owner=? AND epoch=? AND lease_until>?", [.integer(expiry), .text(lease.sessionID), .text(lease.owner), .integer(lease.epoch), .integer(now)])
+            let changed = try database.statement("SELECT changes()") { statement in
+                guard try database.step(statement) else { return false }
+                return sqlite3_column_int(statement, 0) == 1
+            }
+            guard changed else { throw FxPersistenceError.fenced }
+        }
+    }
+
+    private func leaseMilliseconds() throws -> Int64 {
+        let value = leaseNow().timeIntervalSince1970 * 1_000
+        guard value.isFinite, value >= Double(Int64.min), value < Double(Int64.max) else { throw FxPersistenceError.sizeLimit }
+        return Int64(value.rounded(.down))
+    }
+
+    private func leaseExpiry(_ now: Int64, policy: FxSessionLeasePolicy) throws -> Int64 {
+        // Round the sampled backend time up, never shortening the grant by a
+        // fractional millisecond. The agent starts its budget before the request.
+        let (expiry, overflow) = now.addingReportingOverflow(policy.milliseconds + 1)
+        guard !overflow else { throw FxPersistenceError.sizeLimit }
+        return expiry
     }
 
     func checkAgent(_ session: String, agent: String) throws {

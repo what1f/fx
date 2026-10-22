@@ -4,12 +4,14 @@ import Foundation
 package enum PromptInputDescriptor: Sendable {
     case text(String)
     case payload
+    case resource(uri: String, text: String?)
     case image(format: FxImageFormat, reference: String?, byteCount: Int?, prefix: Data?)
 
-    init(_ content: FxPromptContent) {
+    package init(_ content: FxPromptContent) {
         switch content {
         case .payload: self = .payload
         case .text(let text): self = .text(text)
+        case .resource(let uri, let text): self = .resource(uri: uri, text: text)
         case .image(let image):
             self = .image(format: image.format, reference: image.sourceReference,
                           byteCount: image.data?.count, prefix: image.data.map { Data($0.prefix(12)) })
@@ -30,6 +32,7 @@ package struct PromptAdmission {
             switch block {
             case .payload: throw FxError.invalidInput("Use a custom durable harness for data inputs")
             case .text(let text): hasContent = hasContent || !text.isEmpty
+            case .resource: break
             case .image(let format, let reference, let byteCount, _):
                 hasContent = true
                 images += 1
@@ -76,6 +79,7 @@ package struct PromptAdmission {
             switch block {
             case .payload: return .null // Rejected during admission, before frame sizing.
             case .text(let text): return .object(["type": .string("text"), "text": .string(text)])
+            case .resource(let uri, let text): return resourcePromptBlock(uri: uri, text: text)
             case .image(let format, let reference, let byteCount, _):
                 var fields: [String: JSONValue] = ["type": .string("image"), "mimeType": .string(format.rawValue)]
                 if let reference { fields["sourceRef"] = .string(reference) }

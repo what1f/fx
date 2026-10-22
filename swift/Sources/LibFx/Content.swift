@@ -43,6 +43,9 @@ public struct FxImage: Sendable, Equatable, Codable {
 public enum FxPromptContent: Sendable, Equatable, Codable {
     case text(String)
     case image(FxImage)
+    /// A resource URI and optional embedded text, supplied alongside text or an image.
+    /// The core decides which file targets are safe.
+    case resource(uri: String, text: String? = nil)
     /// Encoded input for a custom durable harness. The Zig conversation engine rejects it.
     case payload(Data)
 }
@@ -106,4 +109,10 @@ public struct FxToolResult: Sendable, Equatable, ExpressibleByStringLiteral {
         if !images.isEmpty { fields["contentType"] = .string("rich") }
         return .object(fields)
     }
+}
+
+func resourcePromptBlock(uri: String, text: String?) -> JSONValue {
+    var resource: [String: JSONValue] = ["uri": .string(uri)]
+    if let text { resource["text"] = .string(text) }
+    return .object(["type": .string("resource"), "resource": .object(resource)])
 }

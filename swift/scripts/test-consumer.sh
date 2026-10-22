@@ -165,6 +165,17 @@ struct MockHTTP: FxHTTPClient {
         })
     }
 }
+struct ResourceConsumerHTTP: FxHTTPClient {
+    func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        if request.httpMethod == "POST" {
+            let body = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+            guard body.contains("memory://consumer-resource"), body.contains("EMBEDDED_RESOURCE_INPUT") else {
+                throw FxError.protocolViolation("Resource input was lost")
+            }
+        }
+        return try await MockHTTP().send(request)
+    }
+}
 struct ImageHTTP: FxHTTPClient {
     let base64: String
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
@@ -684,6 +695,19 @@ struct SubscriptionHTTP: FxHTTPClient {
         try await sender.close()
         try await routedStore.close()
         print("Swift routing consumer passed: canonical executor, typed updates and replay after owner close")
+        let leasePolicy = try FxSessionLeasePolicy(duration: .seconds(30), renewalInterval: .seconds(10))
+        let timedStore = try FxSessionStore(url: directory.appendingPathComponent("timed.sqlite"), leasePolicy: leasePolicy)
+        let openingRetry = try FxOpeningRetryPolicy { ($0 as? URLError)?.code == .networkConnectionLost }
+        let timedAgent = try FxAgent(configuration: FxConfiguration(apiKey: "consumer-test-key",
+            model: "swift/consumer", httpClient: ResourceConsumerHTTP()), store: timedStore,
+            openingRetryPolicy: openingRetry)
+        let resourceTurn = try await timedAgent.session(id: "timed-resource").prompt([
+            .text("Read"), .resource(uri: "memory://consumer-resource", text: "EMBEDDED_RESOURCE_INPUT")
+        ], id: "resource")
+        guard try await resourceTurn.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
+        try await timedAgent.close()
+        try await timedStore.close()
+        print("Swift timed ownership, opening retry policy and resource consumer passed")
         print("Swift package consumer passed")
     }
 }

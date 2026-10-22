@@ -476,11 +476,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             let session = try await agent.session(id: sessionID, options: sessionOptions(value["options"] ?? .null))
             let content: [FxPromptContent]
             if case .array(let blocks) = value["text"] {
-                content = try blocks.map { block in
-                    if block["type"] == .string("image") { return .image(try image(block)) }
-                    guard let text = block["text"]?.string else { throw FxError.invalidInput("Unsupported prompt content") }
-                    return .text(text)
-                }
+                content = try blocks.map(promptContent)
             } else { content = [.text(value["text"]?.string ?? "")] }
             if value["op"] == .string("sessionSteer") {
                 let receipt = try await session.steer(content, id: value["messageID"]?.string ?? UUID().uuidString)
@@ -547,6 +543,10 @@ actor Driver: FxHTTPClient, FxPersistence {
                             switch block {
                             case .payload(let data): return .object(["type": .string("payload"), "data": .string(data.base64EncodedString())])
                             case .text(let text): return .object(["type": .string("text"), "text": .string(text)])
+                            case .resource(let uri, let text):
+                                var resource: [String: JSONValue] = ["uri": .string(uri)]
+                                if let text { resource["text"] = .string(text) }
+                                return .object(["type": .string("resource"), "resource": .object(resource)])
                             case .image(let image):
                                 var fields: [String: JSONValue] = ["type": .string("image"), "mimeType": .string(image.format.rawValue)]
                                 if let data = image.data { fields["data"] = .string(data.base64EncodedString()) }
@@ -628,13 +628,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                 guard let resumed = try await engine.resume(replayingOutput: value["replayOutput"] != .bool(false), rerunning: ids, yieldAt: deadline) else { return .null }
                 next = resumed
             } else if case .array(let blocks) = value["text"] {
-                let content = try blocks.map { block -> FxPromptContent in
-                    if block["type"] == .string("image") { return .image(try image(block)) }
-                    guard block["type"] == .string("text"), let text = block["text"]?.string else {
-                        throw FxError.invalidInput("Unsupported prompt content")
-                    }
-                    return .text(text)
-                }
+                let content = try blocks.map(promptContent)
                 next = try await engine.prompt(content, id: publicID, yieldAt: deadline)
             } else { next = try await engine.prompt(value["text"]?.string ?? "", id: publicID, yieldAt: deadline) }
             deliver(next, token: value["turnToken"]?.string ?? next.id)
@@ -706,6 +700,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             guard case .array(let blocks) = value["blocks"] else { throw FxError.invalidInput("Invalid prompt descriptors") }
             let descriptors = try blocks.map { block -> PromptInputDescriptor in
                 if let text = block["text"]?.string, block["type"] == .string("text") { return .text(text) }
+                if block["type"] == .string("resource") { return PromptInputDescriptor(try promptContent(block)) }
                 guard block["type"] == .string("image"), let mime = block["mimeType"]?.string,
                       let format = FxImageFormat(rawValue: mime) else { throw FxError.invalidInput("Unsupported image format") }
                 return .image(format: format, reference: block["sourceRef"]?.string, byteCount: block["byteCount"]?.integer,
@@ -995,6 +990,20 @@ actor Driver: FxHTTPClient, FxPersistence {
     private func bool(_ value: JSONValue?) -> Bool? {
         guard case .bool(let flag) = value else { return nil }
         return flag
+    }
+
+    private func promptContent(_ block: JSONValue) throws -> FxPromptContent {
+        if block["type"] == .string("image") { return .image(try image(block)) }
+        if block["type"] == .string("resource") {
+            let resource = block["resource"] ?? block
+            guard let uri = resource["uri"]?.string else { throw FxError.invalidInput("Resource URI is required") }
+            if let text = resource["text"], text.string == nil { throw FxError.invalidInput("Resource text must be a string") }
+            return .resource(uri: uri, text: resource["text"]?.string)
+        }
+        guard block["type"] == .string("text"), let text = block["text"]?.string else {
+            throw FxError.invalidInput("Unsupported prompt content")
+        }
+        return .text(text)
     }
 
     private func image(_ value: JSONValue) throws -> FxImage {

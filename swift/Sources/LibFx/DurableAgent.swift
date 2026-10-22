@@ -8,11 +8,11 @@ public struct FxDurableAgent<Input: Codable & Sendable, Update: Codable & Sendab
 
     public init<Harness: FxDurableHarness>(harness: Harness, name: String = "default", store: any FxSessionStorage,
         checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024,
-        deliveryPolicy: FxDeliveryPolicy? = nil, queue: (any FxSessionQueue)? = nil,
+        deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil,
         onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil
     ) throws where Harness.Input == Input, Harness.Update == Update {
         agent = try FxAgent(harness: DurableHarnessAdapter(harness: harness), name: name, store: store,
-            checkpoint: checkpoint, checkpointAfterBytes: checkpointAfterBytes, deliveryPolicy: deliveryPolicy,
+            checkpoint: checkpoint, checkpointAfterBytes: checkpointAfterBytes, deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy,
             queue: queue, onLifecycleEvent: onLifecycleEvent)
     }
 

@@ -357,7 +357,20 @@ A session view does not create stored data. `prompt` returns after durable accep
 
 To share named agents, create `FxAgentRouter(store:)` and call `try await router.makeAgent(configuration:name:)`, `makeAgent(harness:name:)` with a conversation executor, or the typed overload with an `FxDurableHarness`. The router uses that store and keeps weak registrations; retain each agent until you close it. A live duplicate name throws `FxAgentRoutingError.duplicateName`. The first accepted input fixes the session's owner. Views from other registered agents route prompts, steering, resume, cancellation, checkpoints and persisted replay to that owner, including concurrent first intake and duplicate IDs. If the owner is unavailable, newly accepted work stays pending and the call throws `FxAgentRoutingError.unavailableAgent`. Register a replacement with the same name and resume. The owner validates saved inputs before opening an executor; rejection ends that input once while later valid work continues. `router.deliver(_:)` selects the wakeup's named agent; retain the wakeup for retry if the target is unavailable. Routers do not discover agents in another store or process.
 
+Separate hosts can register the same named harness in their own routers and share a SQLite database. Ownership serializes their deliveries and message IDs deduplicate accepted work. Each host must provide compatible harness behavior; the router does not compare closures or discover remote registrations.
+
 When this agent owns the active turn, steering and cancellation also wait until its worker has checked the stored update. Updates owned by another process are discovered asynchronously. A steering receipt confirms acceptance; the user-message event confirms that the model received the guidance.
+
+SQLite uses process locks by default. To allow takeover from a worker that remains alive but stops renewing, create a new database with a lease policy:
+
+```swift
+let policy = try FxSessionLeasePolicy(duration: .seconds(30), renewalInterval: .seconds(10))
+let store = try FxSessionStore(url: sessionsURL, leasePolicy: policy)
+```
+
+Ownership mode is fixed when the database is created. Timed stores use the shared host's wall clock for expiry, and the agent uses a separate monotonic deadline to stop local work conservatively. Renewal failure or expiry fences the worker, cancels its active turn and leaves unfinished input available for another owner. A custom `FxRenewableSessionStorage` must atomically validate owner, epoch and expiry on every leased write. Already dispatched external effects still need service-side idempotency or fencing.
+
+To recover from transient host storage errors while opening a session, pass an `openingRetryPolicy` when creating the agent. For example, `try FxOpeningRetryPolicy { ($0 as? URLError)?.code == .networkConnectionLost }` retries a host storage connection loss. Retries are disabled by default. The policy releases ownership before retrying the same accepted input, has a bounded retry count and delay, and preserves the final host error when exhausted. Missing images, corrupt journals, ownership failures, cancellation and errors after opening do not enter the classifier.
 
 Set `FxSessionOptions` on a session view to capture the model, instructions, tool context and custom executor `settings` for subsequent inputs. `settings: JSONValue?` is separate from `context` and defaults to nil. Custom executors receive both during validation and opening; saved inputs retain both across resume and database reopening. Tools receive the logical session ID, public message ID, and captured context. `session.events(after:)` reads persisted entries by cursor and waits for later entries. Cancel its consuming task to stop reading.
 

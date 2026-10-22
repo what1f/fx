@@ -6,14 +6,17 @@ final class SessionStorageTestFailure: Error {}
 // Public imports only: the independent consumer compiles this same host implementation.
 actor SessionStorageProxy: FxSessionStorage {
     let base: FxSessionStore
-    private var failure: (String, SessionStorageTestFailure, remaining: Int)?
+    private var failure: (String, any Error, remaining: Int, count: Int)?
     private(set) var calls: [String] = []
     private let beforeJournalAppend: (@Sendable (Data, Bool) async throws -> Void)?
-    init(_ base: FxSessionStore, beforeJournalAppend: (@Sendable (Data, Bool) async throws -> Void)? = nil) {
+    let beforeLeaseRenewal: (@Sendable () async throws -> Void)?
+    init(_ base: FxSessionStore, beforeJournalAppend: (@Sendable (Data, Bool) async throws -> Void)? = nil,
+         beforeLeaseRenewal: (@Sendable () async throws -> Void)? = nil) {
         self.base = base; self.beforeJournalAppend = beforeJournalAppend
+        self.beforeLeaseRenewal = beforeLeaseRenewal
     }
-    func failNext(_ operation: String, with error: SessionStorageTestFailure, after successfulCalls: Int = 0) {
-        failure = (operation, error, successfulCalls)
+    func failNext(_ operation: String, with error: any Error, after successfulCalls: Int = 0, count: Int = 1) {
+        failure = (operation, error, successfulCalls, count)
     }
     private func before(_ operation: String) throws {
         calls.append(operation)
@@ -22,7 +25,7 @@ actor SessionStorageProxy: FxSessionStorage {
                 self.failure?.remaining -= 1
                 return
             }
-            self.failure = nil
+            if failure.count > 1 { self.failure?.count -= 1 } else { self.failure = nil }
             throw failure.1
         }
     }
