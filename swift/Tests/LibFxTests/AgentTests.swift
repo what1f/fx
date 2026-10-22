@@ -155,6 +155,44 @@ private actor SessionToolCapture {
         try await store.close()
     }
 
+    @Test func recoveryKeepsPreviouslyDeliveredReplyOnceInSessionReplay() async throws {
+        let source = FxMemoryPersistence(), http = SessionHTTP()
+        let id = "turn_" + SHA256.hash(data: Data("m".utf8)).map { String(format: "%02x", $0) }.joined()
+        let engine = try await FxEngine.open(configuration: config(http), sessionID: "s", persistence: source)
+        let original = try await engine.prompt("accepted", id: id)
+        #expect(try await original.result.stopReason == .endTurn)
+        try await engine.close()
+        let events = try await source.load().journal.flatMap { record -> [JSONValue] in
+            guard case .array(let batch) = try JSONDecoder().decode(JSONValue.self, from: record.data)["events"] else {
+                throw FxPersistenceError.invalidJournal
+            }
+            return batch
+        }
+        let boundary = try #require(events.lastIndex { $0["type"] == .string("turn_progress") && $0["data"]?["action"] == .string("delivering_response") })
+        let store = try FxSessionStore()
+        _ = try await store.accept(session: "s", agent: "default", id: "m", content: [.text("accepted")], options: .init())
+        let lease = try #require(try await store.claim(session: "s", agent: "default"))
+        try await store.start(lease, input: #require(try await store.next(lease)))
+        let data = try JSONEncoder().encode(JSONValue.object([
+            "format": .string("libfx-journal-v1"), "events": .array(Array(events[...boundary])),
+        ]))
+        _ = try await store.appendJournal(lease, expected: nil, key: "cut", data: data)
+        try await store.appendEvent(lease, .update(id: "m", .text("hello")))
+        try await store.release(lease)
+        // Simulate stopping after delivery, before the final core and host commits.
+        let agent = try FxAgent(configuration: config(http), store: store)
+        let session = try await agent.session(id: "s")
+        let resumed = try #require(try await session.resume())
+        #expect(try await resumed.result.stopReason == .endTurn)
+        var text = ""
+        for try await event in resumed { if case .text(let delta) = event { text += delta } }
+        #expect(text == "hello")
+        #expect(await http.count == 1)
+        #expect(try await session.resume() == nil)
+        try await agent.close()
+        try await store.close()
+    }
+
     @Test func missingHostCompletionReportsUnknownWithoutRepeatingCoreWork() async throws {
         let store = try FxSessionStore(), http = SessionHTTP()
         _ = try await store.accept(session: "s", agent: "default", id: "m", content: [.text("accepted")], options: .init())

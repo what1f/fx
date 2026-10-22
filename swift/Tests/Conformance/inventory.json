@@ -221,7 +221,7 @@
       "upstream": "sdk/tests/test-journal.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "partial: eleven named upstream native/native cases pass through actual Swift, covering ordered progress, tool-intent durability, read-only admission ahead of non-barrier writes, coalescing and crash recovery; complete file still fails when a recovery host requests suppression of a previously saved reply; remaining errors, images and journal cases pending"
+      "status": "partial: fourteen named upstream native/native cases pass through actual Swift, covering ordered progress, tool-intent durability, read-only admission ahead of non-barrier writes, coalescing, crash recovery, saved-reply replay/suppression and turn-end durability; complete file still fails failed-append JavaScript error-code/cause identity, with remaining recovery, errors and images pending"
     },
     {
       "upstream": "sdk/tests/test-libfx-benchmark.mjs",

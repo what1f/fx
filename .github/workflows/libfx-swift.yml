@@ -53,6 +53,7 @@ jobs:
           node swift/Tests/Conformance/input-observation.mjs
           node swift/Tests/Conformance/tool-observation.mjs
           node swift/Tests/Conformance/journal-admission.mjs
+          node swift/Tests/Conformance/journal-admission.mjs recovery
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-tool-contract.mjs native
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native
       - name: Check Swift concurrency with Thread Sanitizer
@@ -64,5 +65,6 @@ jobs:
           node swift/Tests/Conformance/input-observation.mjs
           node swift/Tests/Conformance/tool-observation.mjs
           node swift/Tests/Conformance/journal-admission.mjs
+          node swift/Tests/Conformance/journal-admission.mjs recovery
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-tool-contract.mjs native
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native

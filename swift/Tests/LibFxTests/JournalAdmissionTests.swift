@@ -136,7 +136,11 @@ private actor CommitLatch {
         let store = AdmissionStore(failIntent: true), http = AdmissionHTTP()
         let tool = FxTool(name: "probe", description: "Admission probe", inputSchema: .object(["type": .string("object")]), isIdempotent: true) { _, _ in
             await store.waitForIntent()
-            return await store.execute(reader: true)
+            _ = await store.execute(reader: true)
+            // Stay in flight until the append failure cancels cooperative work.
+            // Returning immediately would race an error not yet observed by the host.
+            try await Task.sleep(for: .seconds(30))
+            return FxToolResult(text: "Unexpected uncancelled tool completion")
         }
         let engine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "fixture", model: "swift/journal-admission", tools: [tool], httpClient: http), persistence: store)
         let turn = try await engine.prompt("run probe")

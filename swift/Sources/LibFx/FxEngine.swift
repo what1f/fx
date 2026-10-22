@@ -306,7 +306,8 @@ public actor FxEngine {
     @_spi(Conformance) public var hasResumableWork: Bool { recovery != nil || followUps.contains { $0.held } }
 
     /// Continues an interrupted turn. Unlisted ambiguous calls are not repeated.
-    public func resume(rerunning executionIDs: Set<String> = [], yieldAt: Date? = nil) throws -> FxTurn? {
+    /// Disable replay when the host already retains the turn’s streamed output.
+    public func resume(replayingOutput: Bool = true, rerunning executionIDs: Set<String> = [], yieldAt: Date? = nil) throws -> FxTurn? {
         guard !closed else { throw FxError.closed }
         guard !handedOff else { throw FxError.handedOff }
         if let journalFailure { throw journalFailure }
@@ -315,7 +316,7 @@ public actor FxEngine {
         guard executionIDs.isSubset(of: Set(recovery.runningCalls.map(\.executionID))) else {
             throw FxError.invalidInput("Unknown recovery execution identifier")
         }
-        return try startTurn([], publicID: recovery.turnID ?? UUID().uuidString, yieldAt: yieldAt, resuming: true, rerunning: executionIDs)
+        return try startTurn([], publicID: recovery.turnID ?? UUID().uuidString, yieldAt: yieldAt, resuming: true, replayingOutput: replayingOutput, rerunning: executionIDs)
     }
 
     private func setRecovery(_ opened: JSONValue) {
@@ -339,7 +340,7 @@ public actor FxEngine {
         recovery = FxRecoveryState(turnID: opened["openTurnId"]?.string, runningCalls: calls)
     }
 
-    private func startTurn(_ content: [FxPromptContent], publicID: String, yieldAt: Date? = nil, resuming: Bool = false, rerunning: Set<String> = [], followUp: QueuedFollowUp? = nil) throws -> FxTurn {
+    private func startTurn(_ content: [FxPromptContent], publicID: String, yieldAt: Date? = nil, resuming: Bool = false, replayingOutput: Bool = true, rerunning: Set<String> = [], followUp: QueuedFollowUp? = nil) throws -> FxTurn {
         guard !closed else { throw FxError.closed }
         guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
         var metadata: [String: JSONValue] = [:]
@@ -400,7 +401,7 @@ public actor FxEngine {
                 ]
                 if resuming {
                     metadata["continueRecovery"] = .bool(true)
-                    metadata["freshOutput"] = .bool(true)
+                    if replayingOutput { metadata["freshOutput"] = .bool(true) }
                     metadata["rerun"] = .array(rerunning.sorted().map(JSONValue.string))
                 }
                 params["_meta"] = .object(["fx": .object(metadata)])

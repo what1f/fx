@@ -187,7 +187,7 @@ public actor FxAgent {
                 guard input.wasStarted, recovery.turnID == turnID else { throw FxPersistenceError.invalidJournal }
                 let idempotent = Set(config.tools.filter(\.isIdempotent).map(\.name))
                 let rerun = Set(recovery.runningCalls.filter { !spent && !input.cancelRequested && idempotent.contains($0.name) }.map(\.executionID))
-                guard let resumed = try await engine.resume(rerunning: rerun, yieldAt: deadlines?.yield) else { throw FxPersistenceError.invalidJournal }
+                guard let resumed = try await engine.resume(replayingOutput: false, rerunning: rerun, yieldAt: deadlines?.yield) else { throw FxPersistenceError.invalidJournal }
                 turn = resumed
             } else if await engine.completedTurnID == turnID {
                 // The core committed completion, but the host result was not committed.

@@ -202,3 +202,45 @@ private actor RetryingCheckpointStore: FxCheckpointPersistence {
     #expect(requests.count == 2)
     #expect(requests.last?.contains("interrupted prompt") == true)
 }
+
+@Suite(.serialized) struct RecoveryOutputTests {
+    @Test(arguments: [false, true], [false, true])
+    func recoveryOutputPolicyPreservesNewTextAndStoredHistory(replaying: Bool, savedReply: Bool) async throws {
+        let sourceHTTP = JournalGateway(), source = FxMemoryPersistence()
+        let configuration = FxConfiguration(apiKey: "fixture", model: "swift/journal", httpClient: sourceHTTP)
+        let original = try await FxEngine.open(configuration: configuration, persistence: source)
+        let first = try await original.prompt("saved reply")
+        _ = try await first.result
+        try await original.close()
+        let events = try await source.load().journal.flatMap { record -> [JSONValue] in
+            guard case .array(let batch) = try JSONDecoder().decode(JSONValue.self, from: record.data)["events"] else {
+                throw FxPersistenceError.invalidJournal
+            }
+            return batch
+        }
+        let boundary = try #require(savedReply
+            ? events.lastIndex { $0["type"] == .string("turn_progress") && $0["data"]?["action"] == .string("delivering_response") }
+            : events.firstIndex { $0["type"] == .string("turn_progress") })
+        let interrupted = FxMemoryPersistence()
+        let data = try JSONEncoder().encode(JSONValue.object([
+            "format": .string("libfx-journal-v1"), "events": .array(Array(events[...boundary])),
+        ]))
+        _ = try await interrupted.append(expected: nil, idempotencyKey: "cut", data: data, barrier: true)
+        let http = JournalGateway()
+        var restoredConfiguration = configuration
+        restoredConfiguration.httpClient = http
+        let restored = try await FxEngine.open(configuration: restoredConfiguration, persistence: interrupted)
+        let resumed = try #require(try await restored.resume(replayingOutput: replaying))
+        var output = ""
+        for try await event in resumed { if case .text(let delta) = event { output += delta } }
+        #expect(try await resumed.result.stopReason == .endTurn)
+        #expect(output == (replaying || !savedReply ? "remembered answer" : ""))
+        #expect(await http.bodies.count == (savedReply ? 0 : 1))
+        #expect(try await restored.resume() == nil)
+        let next = try await restored.prompt("next")
+        _ = try await next.result
+        let body = try #require(await http.bodies.last)
+        #expect(body.components(separatedBy: "remembered answer").count - 1 == 1)
+        try await restored.close()
+    }
+}

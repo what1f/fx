@@ -549,7 +549,7 @@ export async function createFxEngine(options = {}) {
       resume(promptOptions = {}) {
         if (!resumable) return null;
         const rerun = recoveryCalls.filter(call => promptOptions.onAmbiguous?.(call) === 'rerun').map(call => call.executionId);
-        return begin('resume', { rerun }, promptOptions);
+        return begin('resume', { rerun, replayOutput: promptOptions[Symbol.for('libfx.resumeOutputShown')] !== true }, promptOptions);
       },
       followUp(input) {
         const token = randomUUID();

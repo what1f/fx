@@ -489,7 +489,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             if value["op"] == .string("resume") {
                 var ids: Set<String> = []
                 if case .array(let values) = value["rerun"] { ids = Set(values.compactMap(\.string)) }
-                guard let resumed = try await engine.resume(rerunning: ids, yieldAt: deadline) else { return .null }
+                guard let resumed = try await engine.resume(replayingOutput: value["replayOutput"] != .bool(false), rerunning: ids, yieldAt: deadline) else { return .null }
                 next = resumed
             } else if case .array(let blocks) = value["text"] {
                 let content = try blocks.map { block -> FxPromptContent in
