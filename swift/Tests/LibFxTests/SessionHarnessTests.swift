@@ -130,6 +130,7 @@ private struct ValidatingHarness: FxSessionHarness {
         _ = try await sourceSession.prompt("source", id: "input").result
         let checkpoint = try await sourceSession.checkpoint()
         #expect(checkpoint.starts(with: Data("SCRIPT1\n".utf8)))
+        try await source.close()
         let queue = HarnessQueue()
         let target = try FxAgent(harness: ScriptedSessionHarness(), store: store, checkpoint: checkpoint, queue: queue)
         let unused = try await target.session(id: "unused")
@@ -147,7 +148,7 @@ private struct ValidatingHarness: FxSessionHarness {
         #expect(exported.starts(with: Data("SCRIPT1\n".utf8)))
         #expect(exported != checkpoint)
         #expect(try await store.snapshot(session: session.id, agent: "default").head == before.head)
-        try await source.close(); try await target.close(); try await store.close()
+        try await target.close(); try await store.close()
     }
 
     @Test func cancellingRunningCustomWorkLeavesQueuedWorkRunnable() async throws {

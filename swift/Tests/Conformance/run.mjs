@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const checks = [
+  { name: 'native-queue-redelivery', expected: 'Native equal-attempt SIGKILL queue redelivery passed', args: ['swift/Tests/Conformance/native-queue-redelivery.mjs'] },
   { name: 'upstream/test-native-core', expected: 'native core passed: minimal agent initialization, checkpoint, and graceful close', args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-native-core.mjs',
   ] },

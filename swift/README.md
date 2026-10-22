@@ -415,6 +415,8 @@ Here, `queue` is your `FxSessionQueue` implementation, and `wakeup` is the decod
 
 A delivery policy covers the entire external delivery, including queued inputs. A busy owner returns `.retry`; duplicate messages for finished work return `.complete`. Retain and redeliver messages when `deliver` throws. Cancelling its awaiting task leaves durable execution running. In queue mode, `close()` waits for active deliveries and leaves other accepted inputs in storage for a later worker. The SDK does not implement a cloud queue client.
 
+For authenticated redelivery before lease expiry, create a queue-aware store with `leasePolicy:` and `queueSource:`, configure the agent's `queueAuthority:`, and pass a fresh `FxQueueDeliveryContext` from your authenticated callback to `deliver(_:context:)`. The authority verifies callback metadata and binds it to the wakeup. Its source must identify the account, tenant, and store. Equal-attempt replacement is disabled unless the provider guarantees that the new callback replaces the old execution. Plain decoded messages retain ordinary lease rules. The HTTP handler accepts the same host-created context through `handle(_:body:context:)`.
+
 ### Receive HTTP wakeups
 
 Add the optional `LibFxHTTP` product and Apple `HTTPTypes` product to your server target. `FxHTTPWakeHandler` accepts an `HTTPRequest` and body bytes from your existing server. Register each store's `FxAgentRouter` under an explicit route key. Your queue publisher can encode its received wakeup directly:
