@@ -113,9 +113,7 @@ public actor FxSessionStore: FxRenewableSessionStorage {
     }
 
     public func accept(session: String, agent: String, id: String, content: [FxPromptContent], options: FxSessionOptions, checkpoint: Data? = nil, steering: Bool = false, deferringImageLimits: Bool = false) throws -> Bool {
-        guard validSessionIdentifier(session), validSessionIdentifier(id) else { throw FxError.invalidInput("Invalid session or message ID") }
-        try validateSessionInput(content, deferringImageLimits: deferringImageLimits)
-        try SessionInputAdmission.validate(content, options: options)
+        try FxSessionStorageValidation.validateInput(sessionID: session, inputID: id, content: content, options: options, deferringImageLimits: deferringImageLimits)
         let data = try JSONEncoder().encode(content), settings = try JSONEncoder().encode(options)
         return try database.transaction {
             try Task.checkCancellation()

@@ -413,6 +413,30 @@ When the active cutoff expires while the engine is opening, the worker cancels p
 
 Call `try await session.checkpoint()` to export the conversation, including stored images, without changing the session or taking ownership from its worker. Export reads a consistent stored snapshot and sends no model request. While a worker runs, the export includes only progress already stored. Pass the bytes as `checkpoint:` to a new `FxAgent` to seed new sessions. Existing stored sessions retain their own history. Exporting an unused session creates no stored data.
 
+### Store sessions in PostgreSQL
+
+Add the optional `LibFxPostgres` product for a network database and durable wakeup queue. Your application owns a running [PostgresNIO](https://github.com/vapor/postgres-nio) `PostgresClient`. Use the same database and namespace for the store and queue:
+
+```swift
+import LibFx
+import LibFxPostgres
+import PostgresNIO
+
+let ownership = try FxSessionLeasePolicy(duration: .seconds(30), renewalInterval: .seconds(10))
+let store = try FxPostgresStore(client: client, namespace: "assistant", leasePolicy: ownership)
+try await store.migrate()
+let queue = try FxPostgresQueue(client: client, namespace: "assistant")
+let router = FxAgentRouter(store: store)
+let agent = try await router.makeAgent(configuration: configuration, name: "assistant", queue: queue)
+try await queue.run(router: router)
+```
+
+This fragment assumes `client.run()` is already running and `configuration` contains your model settings. Retain the agent while consuming deliveries. Cancel and join the queue consumer before closing agents or stopping the client pool. Consumer cancellation stops acquisition and keeps renewing active receipts until their actual deliveries settle. Pass `deliveryPolicy:` to bound deliveries during graceful shutdown.
+
+The store uses PostgreSQL time for ownership and fences mutations by owner, epoch and expiry. Input acceptance and its wakeup intent commit together, so a producer can stop before explicit queue publication without losing the stored wakeup. Queue receipts preserve newer work accepted during delivery and reject acknowledgement by an expired owner. Migrations require schema permissions. This provider uses its own relational schema; Vercel Workflow and Queue service integration remains pending.
+
+Run `bash swift/scripts/test-postgres.sh` from the repository root to test an isolated PostgreSQL 17 cluster. Set `LIBFX_POSTGRES_BIN_DIR` if its binaries are outside the script's default location. The script removes its temporary database and retains a report directory.
+
 ### Supply a session executor
 
 Pass an implementation of `FxSessionHarness` to `FxAgent(harness:store:)` to run conversation turns without the Zig engine. The default `configuration:` initializer uses the same worker with the Zig executor. Both use the same session views, queue deliveries, ownership checks, cancellation and persisted output.
