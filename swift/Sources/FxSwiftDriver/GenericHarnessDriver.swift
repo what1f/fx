@@ -2,34 +2,57 @@ import Foundation
 import LibFx
 
 actor GenericHarnessDriver {
-    private let relay = GenericHarnessRelay()
-    private var agent: FxDurableAgent<JSONValue, JSONValue>?
+    private var relays: [String: GenericHarnessRelay] = [:]
+    private var agents: [String: FxDurableAgent<JSONValue, JSONValue>] = [:]
+    private var router: FxAgentRouter?
     private var store: FxSessionStore?
+    private var storePath: String?
     private var turns: [String: FxDurableTurn<JSONValue>] = [:]
     private var deliveries: [String: Task<Void, Never>] = [:]
     private var readers: [String: Task<JSONValue, any Error>] = [:]
+    private var readerAgents: [String: String] = [:]
+    private var deliveryAgents: [String: String] = [:]
 
     func run(_ value: JSONValue) async throws -> JSONValue {
+        let agentToken = value["agentToken"]?.string ?? "default"
         switch value["op"]?.string {
-        case "genericCallbackResult": await relay.respond(value); return .null
-        case "genericPersistence": return try await relay.persistence(value)
+        case "genericCallbackResult":
+            guard let relay = relays[agentToken] else { throw FxError.closed }
+            await relay.respond(value); return .null
+        case "genericPersistence":
+            guard let relay = relays[agentToken] else { throw FxError.closed }
+            return try await relay.persistence(value)
         case "genericOpen":
             let options = value["options"] ?? .null
-            let storage = try FxSessionStore(url: options["sessionStorePath"]?.string.map { URL(fileURLWithPath: $0) })
-            store = storage
+            guard agents[agentToken] == nil else { throw FxError.invalidInput("Duplicate agent token") }
+            let requestedPath = options["sessionStorePath"]?.string
+            guard store == nil || storePath == requestedPath else { throw FxError.invalidInput("Driver connection belongs to another store") }
+            if store == nil {
+                let storage = try FxSessionStore(url: requestedPath.map { URL(fileURLWithPath: $0) })
+                store = storage
+                storePath = requestedPath
+                router = FxAgentRouter(store: storage)
+            }
+            guard let router else { throw FxError.closed }
+            let relay = GenericHarnessRelay(agentToken: agentToken)
+            relays[agentToken] = relay
             let policy = try options["maximumDurationMs"]?.integer.map {
                 try FxDeliveryPolicy(maximumDuration: .milliseconds($0), reserve: .milliseconds(options["reserveMs"]?.integer ?? 0))
             }
-            agent = try FxDurableAgent(harness: RelayedGenericHarness(relay: relay), name: options["name"]?.string ?? "default",
-                store: storage, checkpointAfterBytes: nil, deliveryPolicy: policy,
-                onLifecycleEvent: { event in DriverOutput.emit(.object(["genericDiagnostic": encodeLifecycleEvent(event)])) })
+            do {
+                agents[agentToken] = try await router.makeAgent(harness: RelayedGenericHarness(relay: relay), name: options["name"]?.string ?? "default",
+                    checkpointAfterBytes: nil, deliveryPolicy: policy,
+                    onLifecycleEvent: { event in DriverOutput.emit(.object(["genericDiagnostic": encodeLifecycleEvent(event), "agentToken": .string(agentToken)])) })
+            } catch { relays.removeValue(forKey: agentToken); throw error }
             return .null
-        case "genericPrompt", "genericResume":
+        case "genericPrompt", "genericResume", "genericSteer":
             let session = try await session(value)
             let turn: FxDurableTurn<JSONValue>
             if value["op"] == .string("genericResume") {
                 guard let resumed = try await session.resume() else { throw FxError.noActiveTurn }
                 turn = resumed
+            } else if value["op"] == .string("genericSteer") {
+                turn = try await session.steer(value["input"] ?? .null, id: value["messageId"]?.string ?? UUID().uuidString)
             } else {
                 turn = try await session.submit(value["input"] ?? .null, id: value["messageId"]?.string ?? UUID().uuidString)
             }
@@ -37,6 +60,7 @@ actor GenericHarnessDriver {
             turns[token] = turn
             DriverOutput.emit(.object(["genericAccepted": .object(["token": .string(token), "id": .string(turn.id),
                 "sessionId": .string(turn.sessionID), "isRepeated": .bool(turn.isRepeated)])]))
+            deliveryAgents[token] = agentToken
             deliveries[token] = Task {
                 do {
                     for try await event in turn {
@@ -49,6 +73,7 @@ actor GenericHarnessDriver {
                 }
                 turns.removeValue(forKey: token)
                 deliveries.removeValue(forKey: token)
+                deliveryAgents.removeValue(forKey: token)
             }
             return .null
         case "genericCancel": try await session(value).cancel(); return .null
@@ -80,24 +105,28 @@ actor GenericHarnessDriver {
                 return JSONValue.object(fields)
             }
             readers[token] = read
-            defer { readers.removeValue(forKey: token) }
+            readerAgents[token] = agentToken
+            defer { readers.removeValue(forKey: token); readerAgents.removeValue(forKey: token) }
             return try await read.value
         case "genericReadCancel":
             if let token = value["readToken"]?.string { readers[token]?.cancel() }
             return .null
         case "genericClose":
-            for read in readers.values { read.cancel() }
-            for read in Array(readers.values) { _ = await read.result }
-            try await agent?.close(); agent = nil
-            for delivery in Array(deliveries.values) { await delivery.value }
-            try await store?.close(); store = nil
+            let ownedReaders = readers.filter { readerAgents[$0.key] == agentToken }.map(\.value)
+            for read in ownedReaders { read.cancel() }
+            for read in ownedReaders { _ = await read.result }
+            try await agents[agentToken]?.close()
+            for delivery in deliveries.filter({ deliveryAgents[$0.key] == agentToken }).map(\.value) { await delivery.value }
+            agents.removeValue(forKey: agentToken)
+            relays.removeValue(forKey: agentToken)
+            if agents.isEmpty { try await store?.close(); store = nil; storePath = nil; router = nil }
             return .null
         default: throw FxError.invalidInput("Unknown generic fixture operation")
         }
     }
 
     private func session(_ value: JSONValue) async throws -> FxDurableSession<JSONValue, JSONValue> {
-        guard let agent, let id = value["sessionId"]?.string else { throw FxError.closed }
+        guard let agent = agents[value["agentToken"]?.string ?? "default"], let id = value["sessionId"]?.string else { throw FxError.closed }
         let options = try value["options"].map { try JSONDecoder().decode(FxSessionOptions.self, from: JSONEncoder().encode($0)) } ?? .init()
         return try await agent.session(id: id, options: options)
     }

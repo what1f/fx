@@ -3,6 +3,8 @@ import LibFx
 
 /// Test-only callback transport. Scheduling and storage remain in LibFx.
 actor GenericHarnessRelay {
+    let agentToken: String
+    init(agentToken: String) { self.agentToken = agentToken }
     private var waiters: [String: CheckedContinuation<JSONValue, any Error>] = [:]
     private var contexts: [String: FxHarnessContext] = [:]
 
@@ -11,7 +13,7 @@ actor GenericHarnessRelay {
         return try await withCheckedThrowingContinuation { waiter in
             waiters[token] = waiter
             DriverOutput.emit(.object(["genericCallback": .object(arguments.merging([
-                "token": .string(token), "method": .string(method),
+                "token": .string(token), "method": .string(method), "agentToken": .string(agentToken),
             ]) { _, new in new })]))
         }
     }

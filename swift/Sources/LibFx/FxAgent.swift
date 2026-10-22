@@ -22,6 +22,16 @@ public actor FxAgent {
     private var controlChecks: [String: ControlCheck] = [:]
     private var intakes = 0
     private var closed = false
+    private var router: FxAgentRouter?
+
+    func attachRouter(_ router: FxAgentRouter) { self.router = router }
+    var isClosed: Bool { closed }
+
+    private func routedOwner(_ session: String) async throws -> FxAgent? {
+        guard let router else { return nil }
+        guard let owner = try await store.owner(session: session), owner != name else { return nil }
+        return try await router.agent(named: owner)
+    }
 
     public init(configuration: FxConfiguration, name: String = "default", store: any FxSessionStorage, checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024, deliveryPolicy: FxDeliveryPolicy? = nil, queue: (any FxSessionQueue)? = nil) throws {
         try configuration.validateInstructions()
@@ -54,16 +64,24 @@ public actor FxAgent {
     }
 
     /// Creates a view. Data is stored when the first input is accepted.
-    public func session(id: String = UUID().uuidString, options: FxSessionOptions = .init()) throws -> FxSession {
+    public func session(id: String = UUID().uuidString, options: FxSessionOptions = .init()) async throws -> FxSession {
         guard !closed else { throw FxError.closed }
-        try harness.validate(options: options)
         guard validSessionIdentifier(id) else { throw FxError.invalidInput("Invalid session ID") }
+        if router != nil, let owner = try await store.owner(session: id), owner != name {
+            return FxSession(id: id, options: options, agent: self)
+        }
+        try harness.validate(options: options)
         return FxSession(id: id, options: options, agent: self)
     }
 
     func accept(session: String, options: FxSessionOptions, content: [FxPromptContent], id: String, steering: Bool = false) async throws -> FxSessionTurn {
         guard !closed else { throw FxError.closed }
+        intakes += 1
+        defer { intakes -= 1 }
         guard validSessionIdentifier(id) else { throw FxError.invalidInput("Invalid session or message ID") }
+        if router != nil, let owner = try await store.owner(session: session), owner != name {
+            return try await forwardAcceptance(to: owner, session: session, options: options, content: content, id: id, steering: steering)
+        }
         try harness.validate(options: options)
         try harness.validate(input: content, options: options)
         guard try JSONEncoder().encode(options).count <= 1024 * 1024 else { throw FxError.invalidInput("Session settings exceed the size limit") }
@@ -71,28 +89,62 @@ public actor FxAgent {
             let text = content.compactMap { if case .text(let text) = $0 { return text }; return nil }.joined(separator: "\n")
             guard text.utf8.count <= 64 * 1024 else { throw FxError.invalidInput("Steering text exceeds the size limit") }
         }
-        intakes += 1
-        defer { intakes -= 1 }
         try Task.checkCancellation()
-        var seed: Data?
-        if let checkpoint = initialCheckpoint {
-            do { _ = try await store.snapshot(session: session, agent: name) }
-            catch FxSessionError.notFound { seed = try await harness.prepareCheckpoint(checkpoint, options: options) }
+        do {
+            var seed: Data?
+            if let checkpoint = initialCheckpoint {
+                do { _ = try await store.snapshot(session: session, agent: name) }
+                catch FxSessionError.notFound { seed = try await harness.prepareCheckpoint(checkpoint, options: options) }
+            }
+            try Task.checkCancellation()
+            let repeated = try await store.accept(session: session, agent: name, id: id, content: content, options: options, checkpoint: seed, steering: steering, deferringImageLimits: harness.defersImageLimits)
+            try await schedule(session)
+            if steering { await synchronizeControls(session) }
+            return FxSessionTurn(id: id, sessionID: session, isRepeated: repeated, eventCursor: 0, agent: self)
+        } catch FxSessionError.wrongAgent {
+            guard let owner = try await store.owner(session: session), owner != name else { throw FxSessionError.wrongAgent }
+            return try await forwardAcceptance(to: owner, session: session, options: options, content: content, id: id, steering: steering)
         }
-        try Task.checkCancellation()
-        let repeated = try await store.accept(session: session, agent: name, id: id, content: content, options: options, checkpoint: seed, steering: steering, deferringImageLimits: harness.defersImageLimits)
-        try await schedule(session)
-        if steering { await synchronizeControls(session) }
-        return FxSessionTurn(id: id, sessionID: session, isRepeated: repeated, eventCursor: 0, agent: self)
+    }
+
+    private func forwardAcceptance(to owner: String, session: String, options: FxSessionOptions,
+        content: [FxPromptContent], id: String, steering: Bool) async throws -> FxSessionTurn {
+        guard let router else { throw FxSessionError.wrongAgent }
+        let target: FxAgent
+        do { target = try await router.agent(named: owner) }
+        catch FxAgentRoutingError.unavailableAgent {
+            return try await retainForwardedInput(owner: owner, session: session, options: options, content: content, id: id, steering: steering)
+        }
+        let turn: FxSessionTurn
+        do { turn = try await target.accept(session: session, options: options, content: content, id: id, steering: steering) }
+        catch FxError.closed {
+            guard await target.isClosed else { throw FxError.closed }
+            return try await retainForwardedInput(owner: owner, session: session, options: options, content: content, id: id, steering: steering)
+        }
+        await onLifecycleEvent?(.sessionForwarded(sessionID: session, agent: owner))
+        return turn
+    }
+
+    private func retainForwardedInput(owner: String, session: String, options: FxSessionOptions,
+        content: [FxPromptContent], id: String, steering: Bool) async throws -> FxSessionTurn {
+        // Retain accepted work while its executor is offline. No sender seed or harness is used.
+        _ = try await store.accept(session: session, agent: owner, id: id, content: content, options: options,
+            checkpoint: nil, steering: steering, deferringImageLimits: true)
+        throw FxAgentRoutingError.unavailableAgent(owner)
     }
 
     func resume(_ session: String) async throws -> FxSessionTurn? {
         guard !closed else { throw FxError.closed }
         intakes += 1
         defer { intakes -= 1 }
+        if let owner = try await routedOwner(session) { return try await owner.resume(session) }
         let point: (id: String, cursor: Int64)?
         do { point = try await store.resumePoint(session: session, agent: name) }
         catch FxSessionError.notFound { return nil }
+        catch FxSessionError.wrongAgent {
+            guard let owner = try await routedOwner(session) else { throw FxSessionError.wrongAgent }
+            return try await owner.resume(session)
+        }
         guard let point else { return nil }
         try await schedule(session)
         return FxSessionTurn(id: point.id, sessionID: session, isRepeated: false, eventCursor: point.cursor, agent: self)
@@ -102,6 +154,7 @@ public actor FxAgent {
         guard !closed else { throw FxError.closed }
         intakes += 1
         defer { intakes -= 1 }
+        if let owner = try await routedOwner(session) { return try await owner.checkpoint(session, options: options) }
         let snapshot: FxPersistenceSnapshot
         do { snapshot = try await store.snapshot(session: session, agent: name) }
         catch FxSessionError.notFound {
@@ -109,6 +162,9 @@ public actor FxAgent {
                 let seed = try await harness.prepareCheckpoint(initialCheckpoint, options: options)
                 snapshot = FxPersistenceSnapshot(checkpoint: FxStoredCheckpoint(through: "1", data: seed), head: "1")
             } else { snapshot = FxPersistenceSnapshot() }
+        } catch FxSessionError.wrongAgent {
+            guard let owner = try await routedOwner(session) else { throw FxSessionError.wrongAgent }
+            return try await owner.checkpoint(session, options: options)
         }
         let context = FxHarnessContext(sessionID: session, inputID: nil, options: options,
             persistence: ReadOnlySessionPersistence(snapshot: snapshot, store: store, session: session, agent: name),
@@ -121,16 +177,43 @@ public actor FxAgent {
         } catch { try? await engine.close(); throw error }
     }
 
-    func failure(_ session: String) throws {
+    func failure(_ session: String) async throws {
+        if let owner = try await routedOwner(session) { return try await owner.failure(session) }
         if let failure = failures[session] { throw failure }
     }
 
     func cancel(_ session: String, id: String? = nil) async throws {
-        try await store.cancel(session: session, agent: name, id: id)
+        guard !closed else { throw FxError.closed }
+        intakes += 1
+        defer { intakes -= 1 }
+        if let owner = try await routedOwner(session) { return try await owner.cancel(session, id: id) }
+        do { try await store.cancel(session: session, agent: name, id: id) }
+        catch FxSessionError.wrongAgent {
+            guard let owner = try await routedOwner(session) else { throw FxSessionError.wrongAgent }
+            return try await owner.cancel(session, id: id)
+        }
         if let queue, try await store.hasWork(session: session, agent: name) {
             try await queue.enqueue(FxSessionWakeup(agent: name, sessionID: session))
         }
         if id == nil || controlChecks[session]?.inputID == id { await synchronizeControls(session) }
+    }
+
+    func entries(_ session: String, after cursor: Int64) async throws -> [FxSessionEntry] {
+        let owner = router == nil ? name : try await store.owner(session: session) ?? name
+        do { return try await store.entries(session: session, agent: owner, after: cursor) }
+        catch FxSessionError.wrongAgent {
+            guard router != nil, let canonical = try await store.owner(session: session), canonical != owner else { throw FxSessionError.wrongAgent }
+            return try await store.entries(session: session, agent: canonical, after: cursor)
+        }
+    }
+
+    func result(_ session: String, id: String) async throws -> FxSessionResult? {
+        let owner = router == nil ? name : try await store.owner(session: session) ?? name
+        do { return try await store.result(session: session, agent: owner, id: id) }
+        catch FxSessionError.wrongAgent {
+            guard router != nil, let canonical = try await store.owner(session: session), canonical != owner else { throw FxSessionError.wrongAgent }
+            return try await store.result(session: session, agent: canonical, id: id)
+        }
     }
 
     private func synchronizeControls(_ session: String) async {
@@ -234,6 +317,16 @@ public actor FxAgent {
         let store = self.store
         func settle(_ reason: FxTurnResult.StopReason, usage: FxUsage? = nil, error: FxSessionFailure? = nil) async throws {
             if !recoveringOnly { try await finish(input, lease: lease, reason: reason, usage: usage, error: error) }
+        }
+        if !input.wasStarted, !input.cancelRequested, !recoveringOnly {
+            do {
+                try harness.validate(options: input.options)
+                try harness.validate(input: input.content, options: input.options)
+            } catch {
+                try await settle(.error, error: FxSessionFailure(error))
+                await onLifecycleEvent?(.harnessFailed(sessionID: lease.sessionID, inputID: input.id, error: error))
+                return false
+            }
         }
         var failureState = try await sessionStorageOperation { try await store.harnessFailureState(lease, id: input.id) }
         if !failureState.halted, !recoveringOnly,
@@ -444,6 +537,7 @@ public actor FxAgent {
             for task in pending { await task.value }
             if intakes > 0 { try await Task.sleep(for: .milliseconds(1)) }
         }
+        await router?.remove(self)
         if let error = failures.values.first { throw error }
     }
 }

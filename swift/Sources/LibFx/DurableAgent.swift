@@ -4,6 +4,7 @@ import Foundation
 public struct FxDurableAgent<Input: Codable & Sendable, Update: Codable & Sendable>: Sendable {
     private let agent: FxAgent
     public var name: String { agent.name }
+    init(agent: FxAgent) { self.agent = agent }
 
     public init<Harness: FxDurableHarness>(harness: Harness, name: String = "default", store: any FxSessionStorage,
         checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024,

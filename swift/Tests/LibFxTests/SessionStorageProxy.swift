@@ -23,6 +23,10 @@ actor SessionStorageProxy: FxSessionStorage {
             throw failure.1
         }
     }
+    func owner(session: String) async throws -> String? {
+        try before("owner")
+        return try await base.owner(session: session)
+    }
     func accept(session: String, agent: String, id: String, content: [FxPromptContent], options: FxSessionOptions, checkpoint: Data?, steering: Bool, deferringImageLimits: Bool) async throws -> Bool {
         try before("accept")
         return try await base.accept(session: session, agent: agent, id: id, content: content, options: options, checkpoint: checkpoint, steering: steering, deferringImageLimits: deferringImageLimits)

@@ -7,6 +7,8 @@ import Foundation
 /// to one agent; accessing it with another name must throw `FxSessionError.wrongAgent`.
 /// Implementations must cooperate with task cancellation.
 public protocol FxSessionStorage: Sendable {
+    /// The immutable first-input owner, or nil before the session exists.
+    func owner(session: String) async throws -> String?
     /// Checkpoint bytes, when supplied, are already in the harness snapshot format.
     /// Accepts an input once in session order. Returns true for an existing ID.
     /// Prompt and steering IDs share a namespace. A retry must not modify stored input.

@@ -29,6 +29,10 @@ func encodeLifecycleEvent(_ event: FxLifecycleEvent) -> JSONValue {
         fields["changed"] = .array(changed.map { .string($0.rawValue) })
         fields["saved"] = checkpointIdentity(saved)
         fields["current"] = checkpointIdentity(current)
+    case .sessionForwarded(let sessionID, let agent):
+        fields["type"] = .string("session.forwarded")
+        fields["sessionId"] = .string(sessionID)
+        fields["agent"] = .string(agent)
     case .harnessFailed(let sessionID, let inputID, let error):
         fields["type"] = .string("session.error")
         fields["sessionId"] = .string(sessionID)

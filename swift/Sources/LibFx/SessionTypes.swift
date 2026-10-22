@@ -23,9 +23,12 @@ public struct FxSessionOptions: Sendable, Codable, Equatable {
     public var model: FxModel?
     public var instructions: String?
     public var context: JSONValue?
+    /// Configuration supplied to a custom durable harness for this input.
+    public var settings: JSONValue?
 
-    public init(model: FxModel? = nil, instructions: String? = nil, context: JSONValue? = nil) {
+    public init(model: FxModel? = nil, instructions: String? = nil, context: JSONValue? = nil, settings: JSONValue? = nil) {
         self.model = model; self.instructions = instructions; self.context = context
+        self.settings = settings
     }
 }
 

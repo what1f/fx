@@ -193,6 +193,11 @@ public actor FxSessionStore: FxSessionStorage {
         guard try agentName(session) == agent else { throw FxSessionError.wrongAgent }
     }
 
+    public func owner(session: String) throws -> String? {
+        do { return try agentName(session) }
+        catch FxSessionError.notFound { return nil }
+    }
+
     func agentName(_ session: String) throws -> String {
         try database.statement("SELECT agent FROM fx_sessions WHERE id=?", [.text(session)]) { statement in
             guard try database.step(statement) else { throw FxSessionError.notFound }

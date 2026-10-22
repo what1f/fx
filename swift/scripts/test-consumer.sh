@@ -659,6 +659,31 @@ struct SubscriptionHTTP: FxHTTPClient {
         try await seededCalculator.close()
         try await calculationReopened.close()
         print("Typed Swift consumer passed: updates, binary data, duplicate ID, SQLite reopen, queue delivery, checkpoint seed")
+        let routedStore = try FxSessionStore()
+        let router = FxAgentRouter(store: routedStore)
+        let owner = try await router.makeAgent(harness: CalculationHarness(), name: "calculator")
+        let sender = try await router.makeAgent(harness: CalculationHarness(
+            terminalFailure: FxSessionFailure(message: "Wrong executor")), name: "sender")
+        let owned = try await owner.session(id: "routed-consumer")
+        guard try await owned.submit(CalculationInput(values: [1]), id: "first").result.stopReason == .endTurn else {
+            throw FxPersistenceError.invalidJournal
+        }
+        let foreign = try await sender.session(id: owned.id)
+        let forwarded = try await foreign.submit(CalculationInput(values: [4, 5]), id: "forwarded")
+        var routedUpdates: [CalculationUpdate] = []
+        for try await update in forwarded { routedUpdates.append(update) }
+        guard routedUpdates.last?.total == 9,
+              try await forwarded.result.stopReason == .endTurn else {
+            throw FxError.protocolViolation("Routed input used the wrong executor")
+        }
+        try await owner.close()
+        var routedReplay = foreign.events().makeAsyncIterator()
+        guard let replay = try await routedReplay.next(), case .started = replay.event else {
+            throw FxPersistenceError.invalidJournal
+        }
+        try await sender.close()
+        try await routedStore.close()
+        print("Swift routing consumer passed: canonical executor, typed updates and replay after owner close")
         print("Swift package consumer passed")
     }
 }

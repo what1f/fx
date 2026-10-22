@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 
 const cases = [
   'a prompt runs its steps, and the session replays from any cursor',
+  "each prompt's turn runs with its own caller's context, resumed or not",
+  "each prompt's turn runs with its session object's settings, resumed or not",
   'a turn longer than the time limit continues in the next delivery, each step once',
   'two agents prompting one session run its turns one at a time, in one history',
   "agents with different names each run only their own sessions' turns",

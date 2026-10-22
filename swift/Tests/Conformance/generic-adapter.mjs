@@ -18,31 +18,34 @@ function deferred() {
   return value;
 }
 
-export function createDurableAgentFactory({ harness, defaultDurability, name = 'createAgent' }) {
-  return (options = {}) => {
-    const plugged = harness(options);
-    const child = spawn(process.env.LIBFX_SWIFT_DRIVER || driver, [], { stdio: ['pipe', 'pipe', 'pipe'] });
+// Connections share transport only. Native agents own session routing and scheduling.
+const connections = new Set();
+function connect(path, name, client) {
+  const executable = process.env.LIBFX_SWIFT_DRIVER || driver;
+  let connection = [...connections].find(value => value.path === path && value.executable === executable
+    && !value.names.has(name) && !value.ending);
+  if (!connection) {
+    const child = spawn(executable, [], { stdio: ['pipe', 'pipe', 'pipe'] });
     const lines = createInterface({ input: child.stdout });
-    const pending = new Map(), sessions = new Map(), turns = new Map(), views = new Map();
-    const intakes = new Set();
-    let serial = 0, stderr = '', closed = false;
+    const pending = new Map(), clients = new Map(), names = new Set();
+    let serial = 0, stderr = '', failure, spawnError;
+    function failPending(error) {
+      failure ??= error;
+      for (const waiter of pending.values()) waiter.reject(error);
+      pending.clear();
+      for (const client of clients.values()) client.fail(error);
+    }
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', value => { stderr += value; });
     const exited = new Promise(resolve => child.once('close', (code, signal) => {
-      const error = new Error(`Generic Swift driver exited: ${code ?? signal}${stderr ? `\n${stderr}` : ''}`);
-      for (const waiter of pending.values()) waiter.reject(error);
-      pending.clear();
-      for (const view of views.values()) view.fail(error);
+      connections.delete(connection);
+      failPending(new Error(`Generic Swift driver exited: ${code ?? signal}${stderr ? `\n${stderr}` : ''}`));
       resolve({ code, signal });
     }));
-    function failPending(error) {
-      for (const waiter of pending.values()) waiter.reject(error);
-      pending.clear();
-      for (const view of views.values()) view.fail(error);
-    }
-    child.on('error', failPending);
+    child.on('error', error => { spawnError = error; failPending(error); });
     child.stdin.on('error', failPending);
     function request(op, args = {}) {
+      if (failure) return Promise.reject(failure);
       const id = ++serial, waiter = deferred();
       pending.set(id, waiter);
       child.stdin.write(JSON.stringify({ id, op, ...args }) + '\n', error => {
@@ -50,6 +53,65 @@ export function createDurableAgentFactory({ harness, defaultDurability, name = '
       });
       return waiter.promise;
     }
+    lines.on('line', line => {
+      const message = JSON.parse(line);
+      if (message.genericCallback) {
+        const call = message.genericCallback;
+        const target = clients.get(call.agentToken);
+        void Promise.resolve().then(() => {
+          if (!target) throw new Error(`Unknown generic harness agent: ${call.agentToken}`);
+          return target.callback(call);
+        }).then(value => request('genericCallbackResult', { agentToken: call.agentToken, token: call.token, value }),
+          error => request('genericCallbackResult', { agentToken: call.agentToken, token: call.token,
+            error: { message: error?.message ?? String(error), name: error?.name ?? 'Error', code: error?.code } })).catch(failPending);
+      } else if ('id' in message) {
+        const waiter = pending.get(message.id);
+        pending.delete(message.id);
+        if (message.error) waiter?.reject(Object.assign(new Error(message.error.message), message.error.data));
+        else waiter?.resolve(message.result);
+      } else if (message.genericDiagnostic) {
+        const token = message.agentToken ?? message.genericDiagnostic.agentToken;
+        clients.get(token)?.diagnostic(message.genericDiagnostic);
+      } else if (message.genericFatal) {
+        const error = new Error(typeof message.genericFatal === 'string' ? message.genericFatal : message.genericFatal.message);
+        failPending(error);
+        throw error;
+      } else {
+        const token = message.genericAccepted?.token ?? message.turnToken;
+        for (const client of clients.values()) {
+          if (client.message(token, message)) break;
+        }
+      }
+    });
+    connection = { path, executable, names, clients, request, ending: false,
+      async release(agentToken) {
+        const client = clients.get(agentToken);
+        clients.delete(agentToken);
+        if (client) names.delete(client.name);
+        if (clients.size) return;
+        connection.ending = true;
+        connections.delete(connection);
+        child.stdin.end();
+        const { code, signal } = await exited;
+        lines.close();
+        if (spawnError) throw spawnError;
+        if (code !== 0 || signal || stderr) throw new Error(`Generic Swift driver exited: ${code ?? signal}${stderr ? `\n${stderr}` : ''}`);
+      },
+    };
+    connections.add(connection);
+  }
+  connection.names.add(name);
+  connection.clients.set(client.agentToken, client);
+  return connection;
+}
+
+export function createDurableAgentFactory({ harness, defaultDurability, name = 'createAgent' }) {
+  return (options = {}) => {
+    const plugged = harness(options), agentToken = randomUUID();
+    const sessions = new Map(), turns = new Map(), views = new Map();
+    const intakes = new Set();
+    let connection, closed = false;
+    const request = (op, args = {}) => connection.request(op, { ...args, agentToken });
     async function callback(call) {
       const entry = sessions.get(call.handle);
       switch (call.method) {
@@ -79,8 +141,8 @@ export function createDurableAgentFactory({ harness, defaultDurability, name = '
                 data: Buffer.from(data).toString('base64') });
             },
           };
-          state.session = await plugged.open({ sessionId: call.sessionId, store, context: call.options?.context,
-            model: call.options?.model, instructions: call.options?.instructions });
+          state.session = await plugged.open({ sessionId: call.sessionId, store, context: call.options?.context ?? null,
+            model: call.options?.model, instructions: call.options?.instructions, settings: call.options?.settings });
           state.current = state.session.openTurn?.id ?? null;
           return null;
         }
@@ -111,35 +173,30 @@ export function createDurableAgentFactory({ harness, defaultDurability, name = '
       turns.set(id, { turn, iterator: turn[Symbol.asyncIterator]() });
       return { turn: id };
     }
-    lines.on('line', line => {
-      const message = JSON.parse(line);
-      if (message.genericCallback) {
-        const call = message.genericCallback;
-        void callback(call).then(value => request('genericCallbackResult', { token: call.token, value }),
-          error => request('genericCallbackResult', { token: call.token,
-            error: { message: error?.message ?? String(error), name: error?.name ?? 'Error', code: error?.code } })).catch(failPending);
-      } else if ('id' in message) {
-        const waiter = pending.get(message.id);
-        pending.delete(message.id);
-        if (message.error) waiter?.reject(Object.assign(new Error(message.error.message), message.error.data));
-        else waiter?.resolve(message.result);
-      } else if (message.genericAccepted) {
-        const { token, id, sessionId, isRepeated } = message.genericAccepted;
-        views.get(token)?.accepted.resolve({ id, messageId: id, sessionId, isRepeated });
-      } else if (message.genericEvent) views.get(message.turnToken)?.push(message.genericEvent);
-      else if (message.genericCompleted) views.get(message.turnToken)?.finish(message.genericCompleted);
-      else if (message.genericFailed) views.get(message.turnToken)?.fail(new Error(message.genericFailed.message));
-      else if (message.genericDiagnostic) options.onEvent?.(message.genericDiagnostic);
-      else if (message.genericFatal) throw new Error(message.genericFatal);
-    });
     const ready = Promise.resolve(options.durability ?? defaultDurability()).then(durability => {
       if (typeof durability.__swiftSessionPath !== 'string') throw new TypeError(`${name} needs a Swift fixture store`);
+      connection = connect(durability.__swiftSessionPath, options.name ?? 'default', {
+        agentToken, name: options.name ?? 'default', callback,
+        diagnostic: event => options.onEvent?.(event),
+        fail(error) { for (const view of views.values()) view.fail(error); },
+        message(token, message) {
+          const view = views.get(token);
+          if (!view) return false;
+          if (message.genericAccepted) {
+            const { id, sessionId, isRepeated } = message.genericAccepted;
+            view.accepted.resolve({ id, messageId: id, sessionId, isRepeated });
+          } else if (message.genericEvent) view.push(message.genericEvent);
+          else if (message.genericCompleted) view.finish(message.genericCompleted);
+          else if (message.genericFailed) view.fail(new Error(message.genericFailed.message));
+          return true;
+        },
+      });
       return request('genericOpen', { options: { name: options.name ?? 'default', sessionStorePath: durability.__swiftSessionPath,
         maximumDurationMs: durability.__swiftMaximumDurationMs, reserveMs: durability.__swiftReserveMs } });
     });
     ready.catch(() => {});
 
-    function view(sessionId, sessionOptions, input, promptOptions = {}, resume = false) {
+    function view(sessionId, sessionOptions, input, promptOptions = {}, operation = 'genericPrompt') {
       const id = promptOptions.messageId ?? `msg_${randomUUID()}`, token = randomUUID();
       const accepted = deferred(), outcome = deferred(), queue = [], readers = [];
       let done = false, failure;
@@ -158,7 +215,7 @@ export function createDurableAgentFactory({ harness, defaultDurability, name = '
         },
       };
       views.set(token, state);
-      const started = ready.then(() => request(resume ? 'genericResume' : 'genericPrompt', {
+      const started = ready.then(() => request(operation, {
         sessionId, input, messageId: id, options: sessionOptions, turnToken: token,
       })).catch(error => state.fail(error)).finally(() => intakes.delete(started));
       intakes.add(started);
@@ -181,9 +238,13 @@ export function createDurableAgentFactory({ harness, defaultDurability, name = '
     const agent = {
       name: options.name ?? 'default',
       session(sessionId = randomUUID(), sessionOptions = {}) {
+        const settings = plugged.settings?.(sessionOptions);
+        sessionOptions = { ...sessionOptions, ...(plugged.settings ? { settings } : {}),
+          ...(typeof sessionOptions.model === 'string' ? { model: { id: sessionOptions.model } } : {}) };
         return { id: sessionId,
           prompt: (input, promptOptions) => view(sessionId, sessionOptions, input, promptOptions),
-          resume: () => view(sessionId, sessionOptions, null, {}, true),
+          steer: (input, promptOptions) => view(sessionId, sessionOptions, input, promptOptions, 'genericSteer').accepted,
+          resume: () => view(sessionId, sessionOptions, null, {}, 'genericResume'),
           checkpoint: async () => new Uint8Array(Buffer.from(await ready.then(() => request('genericCheckpoint', { sessionId, options: sessionOptions })), 'base64')),
           cancel: async () => ready.then(() => request('genericCancel', { sessionId })),
           stream(cursor = 0) {
@@ -207,14 +268,12 @@ export function createDurableAgentFactory({ harness, defaultDurability, name = '
       async close() {
         if (closed) return;
         closed = true;
-        await ready;
-        await Promise.allSettled([...intakes]);
-        try { await request('genericClose'); }
-        finally {
-          child.stdin.end();
-          const { code, signal } = await exited;
-          lines.close();
-          if (code !== 0 || signal || stderr) throw new Error(`Generic Swift driver exited: ${code ?? signal}${stderr ? `\n${stderr}` : ''}`);
+        try {
+          await ready;
+          await Promise.allSettled([...intakes]);
+          await request('genericClose');
+        } finally {
+          if (connection) await connection.release(agentToken);
         }
       },
     };

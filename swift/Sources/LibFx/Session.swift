@@ -46,7 +46,7 @@ public struct FxSessionEvents: AsyncSequence, Sendable {
             while true {
                 try Task.checkCancellation()
                 if let entry = buffered.popFirst() { cursor = entry.cursor; return entry }
-                do { buffered = ArraySlice(try await agent.store.entries(session: sessionID, agent: agent.name, after: cursor)) }
+                do { buffered = ArraySlice(try await agent.entries(sessionID, after: cursor)) }
                 catch FxSessionError.notFound { buffered = [] }
                 if buffered.isEmpty {
                     try await agent.failure(sessionID)
@@ -70,7 +70,7 @@ public struct FxSessionTurn: Sendable, Identifiable, AsyncSequence {
         get async throws {
             while true {
                 try Task.checkCancellation()
-                if let result = try await agent.store.result(session: sessionID, agent: agent.name, id: id) {
+                if let result = try await agent.result(sessionID, id: id) {
                     try Task.checkCancellation()
                     return FxSessionResult(id: result.id, stopReason: result.stopReason, usage: result.usage,
                                            failure: result.failure, epoch: result.epoch, isRepeated: isRepeated)
