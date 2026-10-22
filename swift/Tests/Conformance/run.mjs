@@ -4,6 +4,11 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const checks = [
+  ...[
+    ['stdio', undefined], ['http', undefined], ['http', 'images'], ['http', 'images-error'], ['http', 'image-only'],
+  ].map(([transport, mode]) => ({ name: `upstream/test-mcp-adapter-${transport}-${mode ?? 'text'}`, args: [
+    '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-mcp-adapter.mjs', transport, 'native', ...(mode ? [mode] : []),
+  ] })),
   { name: 'upstream/test-skills-adapter-records', args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-skills-adapter.mjs', 'records', 'native',
   ] },

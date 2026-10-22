@@ -4,7 +4,7 @@ A Swift 6 package for running the fx agent core in process through a C ABI. The 
 
 ## Build and use a local package
 
-Requirements: macOS 14 or later, Xcode, Swift 6, and Zig 0.17.0.
+Requirements: macOS 14 or later, Xcode, Swift 6.2 or later, and Zig 0.17.0.
 
 From the repository root, build the macOS arm64 and x86_64 static libraries and package them as an XCFramework:
 
@@ -46,6 +46,29 @@ Cancelling a Swift task that awaits `turn.result` cancels the turn and makes tha
 Omit `model` in a Gateway configuration to use the core's default model. To set options on that choice, pass `FxModel(ultrafast: false)` or another option combination with a nil `id`. Checkpoints and snapshots record the model selected by the core. An empty ID is invalid. Custom providers and subscriptions require an explicit model.
 
 Reasoning effort names must fit in 64 UTF-8 bytes. An oversized name throws `FxError.invalidInput` before loading saved history or creating the runtime. The core validates effort names and model support.
+
+## Connect MCP tools
+
+Add the `LibFxMCP` product when you need MCP. It uses the [official Swift MCP SDK](https://github.com/modelcontextprotocol/swift-sdk) for connection and protocol handling. Configure a fresh official transport with your server URL and authentication:
+
+```swift
+import LibFx
+import LibFxMCP
+import MCP
+
+// key and serverURL come from your app's configuration.
+let transport = HTTPClientTransport(endpoint: serverURL)
+let mcp = try await FxMCPAdapter.connect(transport: transport, prefix: "mcp_")
+let configuration = FxConfiguration(apiKey: key, instructions: mcp.instructions, tools: mcp.tools)
+// Close your engine before disconnecting its MCP tools.
+await mcp.close()
+```
+
+The adapter connects and owns one client. You may pass a fresh `MCP.Client` through `client:` to use your app's identity, capabilities, and handlers; do not connect it first. Pass resource URIs with `resources:` and named prompts with `prompts: [.init(name: "review", arguments: ["topic": "changes"])]` to include text context. Binary context receives an omission marker. Set `propagateCorrelation: true` to send a fresh `libfx/correlationId` with each tool request; this does not request progress notifications.
+
+The catalog accepts up to 64 tools across at most 64 pages. Names are mapped to unique ASCII names of at most 64 characters, while calls use the original server names. Text instructions, including framing, are limited to 64 KiB. Remote idempotency hints do not enable automatic replay. Tool results retain text, structured JSON, supported images, and the server's error flag. Audio is not included in tool results. Cancelling a tool task sends an advisory MCP cancellation; the server may already have performed the effect. Closing disconnects the client, stops pending requests, and prevents later calls. Repeated close calls await the same shutdown.
+
+MCP-specific observation spans and broader parent/tool observation scopes remain pending.
 
 ## Compose skills
 

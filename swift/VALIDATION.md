@@ -2,6 +2,12 @@
 
 This is an implementation milestone, not full libfx parity or a release qualification.
 
+## MCP integration
+
+The optional `LibFxMCP` product uses the official Swift MCP SDK 0.12.1. Ten tests cover a host-configured client, catalog validation and name collisions, resource and prompt composition, UTF-8 instruction bounds, structured results and image/error conversion, cancellation and late replies, cancellation before client registration, setup cancellation, pending-call shutdown, and cancellation from a real Zig-backed `FxEngine` reaching the MCP server. Protocol tests use the actual official client and a scripted transport. The native engine test sends one model request and a held MCP tool call, cancels the turn, and observes a remote cancellation notification without another model request.
+
+All assertions in the upstream `test-mcp-adapter.mjs` pass for native stdio and HTTP text, images, image-only, and image-error modes. Swift owns catalog processing, context composition, result conversion, and request cancellation. JavaScript forwards the fixture client's operations and retains its transport. One explicit shape normalization expands the stdio fixture's nonstandard prompt content array into single-block messages, preserving every block and role. The independent Release consumer imports `LibFxMCP`, uses the official HTTP transport against a local MCP server, reads tools/resources/prompts, calls a tool, and closes the adapter. This is local fixture evidence, not a production MCP service or authentication qualification. MCP-specific observation spans remain pending.
+
 ## Skill composition and files
 
 `FxSkill` and `FxSkills` compose host-supplied records into instructions and tools. Four Swift tests cover ordered sections, attribute escaping, duplicate names, the 64-record limit, exact 64 KiB UTF-8 boundaries including resources and framing, and preservation of original tool descriptors and executable closures. The complete upstream `test-skills-adapter.mjs` records/native and disk/native modes pass with unchanged assertions: the adapter invokes the Swift driver for file loading and instruction composition, and the conversation runs through the actual Swift SDK and Zig runtime. JavaScript retains test closure references for the existing tool bridge. Seven additional Swift tests cover YAML quotes and multiline values, unknown metadata, line endings and a closing delimiter at EOF, plain Markdown, filename fallback, malformed and duplicate metadata without source leakage, local UTF-8 files, host resources and original tools, invalid URLs and bytes, missing files, and cancellation. The independent Release consumer loads a real Markdown file using the public API, passes its instructions and resources into actual core requests, and executes a skill-provided tool. YAML decoding uses Yams 6.2.2, pinned in `Package.resolved`. The loader reads name and description; it does not validate the full Agent Skills schema, traverse references, or execute scripts.
@@ -10,9 +16,11 @@ This is an implementation milestone, not full libfx parity or a release qualific
 
 Local checks ran on macOS arm64 with Swift 6.4, Zig 0.17.0, and Node.js 25.9.0. Upstream SDK CI requires Node.js 24; the local Node runs do not replace that gate. The C library targets macOS 14. Runtime qualification for x86_64 remains pending.
 
+The Swift package requires Swift 6.2 or later. CI selects Xcode 26.3 on macOS 15. `Package.resolved` records Collections 1.3.0 because the newer 1.7.3 release requires Swift 6.4; it enters resolution through the MCP package's server-side NIO dependency. This lockfile choice does not impose an upper Collections version on consuming applications. Local manifest inspection found no resolved package requiring a tool version above 6.2. An actual Swift 6.2 compiler run still requires CI evidence.
+
 ## Implemented proof
 
-`swift test --package-path swift` passed 154 tests against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
+`swift test --package-path swift` passed 164 tests across the core and MCP test targets against the generated XCFramework. `swift/scripts/test-consumer.sh` also built and ran an independent Release consumer with no unsafe linker flags. The tests cover:
 
 - Fragmented UTF-8 frames, host requests, cancellation, oversized frames, and pending requests during close.
 - HTTP response status, Unicode, bounded chunks, invalid responses, and cancellation before headers.
@@ -122,9 +130,9 @@ Additional executable checks passed:
 - `handoff.mjs`: Swift and JavaScript in both source and target roles; the source makes no later journal writes or automatic snapshots, the target receives the pending steer and skips the ambiguous write, and the source's turn-end observation marks the handoff.
 - `follow-up.mjs`: reference JavaScript and Swift automatic queues, durable acceptance and exactly one placement per input, plus recovery in both source and target roles; held inputs wait for explicit resume while current inputs run independently.
 
-`node swift/Tests/Conformance/run.mjs` passed all 51 selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
+`node swift/Tests/Conformance/run.mjs` passed all 56 selected upstream and interoperability checks and records results under `.build/conformance-results.json`. It does not run every inventory entry.
 
-`swift test --package-path swift --sanitize=thread` passed all 154 Swift tests without a sanitizer warning. The first focused run reported concurrent access to the native handle during shutdown. The transport now waits for the [Dispatch source's cancellation handler](https://developer.apple.com/documentation/dispatch/dispatch_source_set_cancel_handler) and destroys the handle on its actor. This check instruments Swift code; the precompiled Zig archive is not instrumented. The Swift CI workflow repeats the check after conformance testing.
+`swift test --package-path swift --sanitize=thread` passed all 164 Swift tests without a sanitizer warning. The first focused run reported concurrent access to the native handle during shutdown. The transport now waits for the [Dispatch source's cancellation handler](https://developer.apple.com/documentation/dispatch/dispatch_source_set_cancel_handler) and destroys the handle on its actor. This check instruments Swift code; the precompiled Zig archive is not instrumented. The Swift CI workflow repeats the check after conformance testing.
 
 `swift test --package-path swift --sanitize=address` also passed all 154 tests. Its first run crashed when ASan tried to unmap a 256 KiB alternate signal stack during native thread teardown. A pure Swift validation test passed, while one real-core streaming test reproduced the crash alone. Zig's default thread setup had replaced the sanitizer's stack with a thread-local buffer. The C entry point now sets `std_options.signal_stack_size` to `null`, preserving host-installed signal stacks. Both archive targets were rebuilt; arm64 passed the original failing test and the full Swift suite under ASan. The x86_64 archive has build evidence only. The Swift workflow now runs ASan before Thread Sanitizer. This checks instrumented Swift and intercepted allocations; it does not instrument every instruction in the precompiled Zig core.
 

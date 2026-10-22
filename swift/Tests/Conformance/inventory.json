@@ -251,7 +251,7 @@
       "upstream": "sdk/tests/test-mcp-adapter.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: native stdio and HTTP text, images, image-only and image-error modes retain all upstream assertions through the actual Swift MCP adapter and core; the bridge expands the stdio fixture prompt content array into standard single-block messages without dropping content or roles; MCP-specific observation spans remain pending"
     },
     {
       "upstream": "sdk/tests/test-minimal-api.mjs",

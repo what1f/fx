@@ -1,4 +1,5 @@
 import Foundation
+import LibFxMCP
 @_spi(Conformance) import LibFx
 
 private enum DriverOutput {
@@ -25,6 +26,9 @@ private struct RelayedCheckpointStore: FxCheckpointPersistence {
 
 /// Test-only protocol adapter. Engine behavior stays in LibFx.
 actor Driver: FxHTTPClient, FxPersistence {
+    private var mcpAdapter: FxMCPAdapter?
+    private var mcpTransport: DriverMCPTransport?
+    private var mcpCalls: [String: Task<FxToolResult, Error>] = [:]
     private var providerLabel = "gateway"
     private var agent: FxAgent?
     private var sessionStore: FxSessionStore?
@@ -109,6 +113,55 @@ actor Driver: FxHTTPClient, FxPersistence {
 
     private func run(_ value: JSONValue) async throws -> JSONValue {
         switch value["op"]?.string {
+        case "mcpOpen":
+            let transport = DriverMCPTransport { [weak self] data in
+                guard let message = try? JSONDecoder().decode(JSONValue.self, from: data) else { return }
+                await self?.emit(.object(["mcpSend": message]))
+            }
+            mcpTransport = transport
+            let options = value["options"] ?? .null
+            var resources: [String] = []
+            var prompts: [FxMCPAdapter.Prompt] = []
+            if case .array(let values) = options["resources"] { resources = values.compactMap(\.string) }
+            if case .array(let values) = options["prompts"] {
+                prompts = values.map { entry in
+                    var arguments: [String: String]?
+                    if case .object(let fields) = entry["arguments"] { arguments = fields.compactMapValues(\.string) }
+                    return .init(name: entry.string ?? entry["name"]?.string ?? "", arguments: arguments)
+                }
+            }
+            let adapter = try await FxMCPAdapter.connect(transport: transport, prefix: options["prefix"]?.string ?? "",
+                resources: resources, prompts: prompts, propagateCorrelation: options["propagateCorrelation"] == .bool(true))
+            mcpAdapter = adapter
+            return .object(["instructions": .string(adapter.instructions), "tools": .array(adapter.tools.map {
+                .object(["name": .string($0.name), "description": .string($0.description), "inputSchema": $0.inputSchema, "idempotent": .bool(false)])
+            })])
+        case "mcpReceive":
+            await mcpTransport?.receive(try JSONEncoder().encode(value["message"] ?? .null))
+            return .null
+        case "mcpExecute":
+            guard let adapter = mcpAdapter, let tool = adapter.tools.first(where: { $0.name == value["name"]?.string }),
+                  let token = value["token"]?.string else { throw FxError.closed }
+            let context = FxToolContext(executionID: value["executionId"]?.string ?? "mcp", sessionID: value["sessionId"]?.string ?? "mcp",
+                                        turnID: value["turnId"]?.string ?? "mcp", context: value["context"])
+            let task = Task { try await tool.execute(value["input"] ?? .object([:]), context) }
+            mcpCalls[token] = task
+            defer { mcpCalls.removeValue(forKey: token) }
+            let result = try await task.value
+            return .object(["type": .string("libfx.tool-result"), "text": .string(result.text), "isError": .bool(result.isError),
+                "images": .array(result.images.map { image in
+                    .object(["type": .string("image"), "mimeType": .string(image.format.rawValue), "data": .string(image.data?.base64EncodedString() ?? "")])
+                })])
+        case "mcpCancel":
+            if let token = value["token"]?.string { mcpCalls[token]?.cancel() }
+            return .null
+        case "mcpClose":
+            let calls = Array(mcpCalls.values)
+            for call in calls { call.cancel() }
+            await mcpAdapter?.close()
+            for call in calls { _ = await call.result }
+            mcpCalls.removeAll(); mcpAdapter = nil; mcpTransport = nil
+            return .null
         case "open", "openAgent":
             let options = value["options"] ?? .null
             providerLabel = options["provider"]?.string ?? options["provider"]?["name"]?.string ?? "gateway"

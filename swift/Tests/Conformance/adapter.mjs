@@ -5,10 +5,13 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createMcpAdapter as bridgeMcpAdapter } from './mcp-adapter.mjs';
 
 const defaultDriver = process.env.LIBFX_SWIFT_DRIVER || join(execFileSync('swift', [
   'build', '--package-path', fileURLToPath(new URL('../..', import.meta.url)), '--show-bin-path',
 ], { encoding: 'utf8' }).trim(), 'FxSwiftDriver');
+
+export function createMcpAdapter(client, options = {}) { return bridgeMcpAdapter(client, options, defaultDriver); }
 
 export function createSkillsAdapter(records) {
   const encoded = execFileSync(defaultDriver, ['skills'], {

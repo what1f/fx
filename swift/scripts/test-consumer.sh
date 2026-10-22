@@ -16,6 +16,26 @@ const http = require('node:http');
 const fs = require('node:fs');
 const directory = process.argv[2];
 const server = http.createServer((request, response) => {
+    if (request.url === '/mcp') {
+        let body = '';
+        request.setEncoding('utf8');
+        request.on('data', chunk => { body += chunk; });
+        request.on('end', () => {
+            const message = JSON.parse(body);
+            if (message.id === undefined) { response.writeHead(202); response.end(); return; }
+            let result;
+            if (message.method === 'initialize') result = {protocolVersion: message.params.protocolVersion,
+                capabilities: {tools: {}, resources: {}, prompts: {}}, serverInfo: {name: 'consumer', version: '1'}};
+            else if (message.method === 'tools/list') result = {tools: [{name: 'echo', description: 'Echo', inputSchema: {type: 'object'}}]};
+            else if (message.method === 'tools/call') result = {content: [{type: 'text', text: `MCP_CONSUMER:${message.params.arguments.value}`}]};
+            else if (message.method === 'resources/read') result = {contents: [{uri: message.params.uri, text: 'MCP_RESOURCE'}]};
+            else if (message.method === 'prompts/get') result = {messages: [{role: 'user', content: {type: 'text', text: 'MCP_PROMPT'}}]};
+            else throw new Error(`Unexpected MCP method: ${message.method}`);
+            response.writeHead(200, {'content-type': 'application/json'});
+            response.end(JSON.stringify({jsonrpc: '2.0', id: message.id, result}));
+        });
+        return;
+    }
     fs.appendFileSync(`${directory}/requests.jsonl`, JSON.stringify({url: request.url, auth: request.headers.authorization}) + '\n');
     request.resume();
     if (request.url === '/redirect/chat/completions' || request.url === '/token') {
@@ -36,18 +56,22 @@ done
 provider_port="$(cat "$task_tmp/port")"
 mkdir -p "$task_tmp/Sources/Consumer"
 cat > "$task_tmp/Package.swift" <<'SWIFT'
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 import PackageDescription
 import Foundation
 let package = Package(
     name: "Consumer", platforms: [.macOS(.v14)],
-    dependencies: [.package(name: "LibFx", path: ProcessInfo.processInfo.environment["LIBFX_SWIFT_PACKAGE"]!)],
-    targets: [.executableTarget(name: "Consumer", dependencies: [.product(name: "LibFx", package: "LibFx")])]
+    dependencies: [.package(name: "LibFx", path: ProcessInfo.processInfo.environment["LIBFX_SWIFT_PACKAGE"]!),
+                   .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.1")],
+    targets: [.executableTarget(name: "Consumer", dependencies: [.product(name: "LibFx", package: "LibFx"),
+                   .product(name: "LibFxMCP", package: "LibFx"), .product(name: "MCP", package: "swift-sdk")])]
 )
 SWIFT
 cat > "$task_tmp/Sources/Consumer/Consumer.swift" <<'SWIFT'
 import Foundation
 import LibFx
+import LibFxMCP
+import MCP
 final class TransportEvents: @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: [FxTransportEvent] = []
@@ -277,6 +301,15 @@ struct SubscriptionHTTP: FxHTTPClient {
         }
         try await subscribed.close()
         let port = ProcessInfo.processInfo.environment["LIBFX_PROVIDER_PORT"]!
+        let mcp = try await FxMCPAdapter.connect(transport: HTTPClientTransport(endpoint: URL(string: "http://127.0.0.1:\(port)/mcp")!, streaming: false),
+            prefix: "mcp_", resources: ["memory://consumer"], prompts: [.init(name: "review")])
+        guard mcp.tools.map(\.name) == ["mcp_echo"], mcp.instructions.contains("MCP_RESOURCE"), mcp.instructions.contains("MCP_PROMPT") else {
+            throw FxError.protocolViolation("Unexpected MCP catalog or context")
+        }
+        let mcpResult = try await mcp.tools[0].execute(.object(["value": .string("hello")]),
+            FxToolContext(executionID: "consumer-call", sessionID: "consumer", turnID: "consumer-turn"))
+        guard mcpResult.text == "MCP_CONSUMER:hello", !mcpResult.isError else { throw FxError.protocolViolation("Unexpected MCP result") }
+        await mcp.close()
         for prefix in ["v1", "redirect"] {
             let provider = try FxCustomProvider(name: "local", baseURL: URL(string: "http://127.0.0.1:\(port)/\(prefix)")!,
                                                 models: ["local-model": .init(contextWindow: 32768, maxOutputTokens: 4096)])

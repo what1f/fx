@@ -2,7 +2,7 @@
 // its assertions and size boundaries remain unchanged.
 const adapter = new URL('./adapter.mjs', import.meta.url).href;
 export async function resolve(specifier, context, nextResolve) {
-  if (context.parentURL?.includes('/sdk/tests/') && (specifier === '../node.js' || specifier === '../skills.js' || specifier === '../skills-node.js' ||
+  if (context.parentURL?.includes('/sdk/tests/') && (['../node.js', '../skills.js', '../skills-node.js', '../mcp.js'].includes(specifier) ||
       specifier === '../browser.js' && context.parentURL.endsWith('/test-list-models.mjs'))) {
     return { url: adapter, shortCircuit: true };
   }
