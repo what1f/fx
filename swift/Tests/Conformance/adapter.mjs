@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 import { createMcpAdapter as bridgeMcpAdapter } from './mcp-adapter.mjs';
 import { swiftObservationScope } from './observation-scope.mjs';
 // Host-owned byte storage and JavaScript error identities; engine behavior remains in Swift.
-export { createMemoryPersistence, FxFencedError, FxJournalVersionError } from '../../../sdk/fx-sdk.js';
+import { createMemoryPersistence, FxFencedError, FxJournalVersionError } from '../../../sdk/fx-sdk.js';
+export { createMemoryPersistence, FxFencedError, FxJournalVersionError };
 
 const defaultDriver = process.env.LIBFX_SWIFT_DRIVER || join(execFileSync('swift', [
   'build', '--package-path', fileURLToPath(new URL('../..', import.meta.url)), '--show-bin-path',
@@ -85,6 +86,22 @@ export async function createFxEngine(options = {}) {
         hooks.captureContent !== undefined && typeof hooks.captureContent !== 'boolean' ||
         hooks.onError !== undefined && typeof hooks.onError !== 'function') throw new TypeError('Invalid hooks options');
   }
+  // JavaScript shapes that Swift expresses with FxPersistence, Int and typed arguments.
+  if (options.persistence !== undefined) {
+    const store = options.persistence;
+    if (!store || typeof store !== 'object' || typeof store.load !== 'function' || typeof store.append !== 'function' ||
+        store.saveCheckpoint !== undefined && typeof store.saveCheckpoint !== 'function') {
+      throw new TypeError('persistence must be an object with load(), append() and, optionally, saveCheckpoint()');
+    }
+    if (options.checkpoint !== undefined) throw new TypeError('persistence cannot be combined with checkpoint');
+  }
+  const nativeStore = typeof options.sqlitePath === 'string' || options.__agent === true && typeof options.sessionStorePath === 'string';
+  if (!nativeStore && options.checkpointAfterBytes !== undefined) {
+    if (options.persistence === undefined) throw new TypeError('checkpointAfterBytes needs persistence');
+    if (!Number.isSafeInteger(options.checkpointAfterBytes) || options.checkpointAfterBytes < 0) {
+      throw new RangeError('checkpointAfterBytes must be a non-negative integer');
+    }
+  }
   const child = spawn(process.env.LIBFX_SWIFT_DRIVER || defaultDriver, [], { stdio: ['pipe', 'pipe', 'pipe'] });
   const lines = createInterface({ input: child.stdout });
   const pending = new Map();
@@ -112,7 +129,7 @@ export async function createFxEngine(options = {}) {
     if (child.stdin.writableEnded || child.stdin.destroyed) return Promise.reject(new Error('Swift driver input is closed'));
     const id = nextID++;
     return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
+      pending.set(id, { resolve, reject, op });
       child.stdin.write(JSON.stringify({ id, op, ...args }) + '\n', error => {
         if (error) { pending.delete(id); reject(error); }
       });
@@ -198,6 +215,46 @@ export async function createFxEngine(options = {}) {
     for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
   });
+  const persistenceFailures = new Map();
+  let appendFailure, reportedAppendFailure;
+  function persistenceError(value) {
+    const failure = persistenceFailures.get(value.persistenceFailureID) ??
+      (value.persistenceError === 'fenced' ? appendFailure : undefined);
+    if (failure) {
+      if (failure.kind !== 'append') return { error: failure.error };
+      failure.wrapped ??= Object.assign(new Error('libfx journal append failed', { cause: failure.error }), {
+        code: 'FX_JOURNAL_APPEND_FAILED',
+      });
+      return { error: failure.wrapped };
+    }
+    const message = value.message ?? value.failed;
+    if (value.persistenceError === 'unsupportedVersion' || message === 'libfx journal was written by a newer fx' ||
+        message === 'libfx checkpoint was written by a newer fx') {
+      return { error: new FxJournalVersionError(message ?? 'libfx journal was written by a newer fx') };
+    }
+    if (value.persistenceError === 'invalidJournal') {
+      return { error: Object.assign(new Error('Invalid libfx journal'), { code: 'FX_JOURNAL_INVALID' }) };
+    }
+    if (value.persistenceError === 'sizeLimit') {
+      return { error: Object.assign(new Error('libfx journal is too large'), { code: 'FX_JOURNAL_TOO_LARGE' }) };
+    }
+    // The current core reports these journal-open failures by exact message.
+    // Swift retains the RPC error; JS exposes its corresponding public code.
+    const journalCodes = new Map([
+      ['Invalid libfx journal', 'FX_JOURNAL_INVALID'],
+      ['libfx journal events are out of order', 'FX_JOURNAL_INVALID'],
+      ['libfx journal is too large', 'FX_JOURNAL_TOO_LARGE'],
+      ['libfx journal holds more than 1024 turns', 'FX_JOURNAL_TOO_LARGE'],
+      ['libfx journal images are too large', 'FX_JOURNAL_TOO_LARGE'],
+      ['Invalid libfx journal images', 'FX_JOURNAL_INVALID'],
+      ['libfx image does not match its name', 'FX_JOURNAL_IMAGE_MISSING'],
+    ]);
+    if (value.rpcCode !== undefined && journalCodes.has(message)) {
+      return { error: Object.assign(new Error(message), { code: journalCodes.get(message) }) };
+    }
+    if (value.persistenceError === 'fenced') return { error: new FxFencedError(value.message ?? value.failed) };
+    return undefined;
+  }
   const fetchErrorNames = [];
   lines.on('line', line => {
     const value = JSON.parse(line);
@@ -259,8 +316,10 @@ export async function createFxEngine(options = {}) {
           ErrorType = TypeError;
           message = 'effort must contain 1 to 64 letters, digits, periods, underscores or hyphens';
         }
-        const error = new ErrorType(message);
-        if (value.error.data) Object.assign(error, value.error.data);
+        const translated = persistenceError(value.error);
+        const error = translated ? translated.error : new ErrorType(message);
+        if (value.error.data && error && typeof error === 'object') Object.assign(error, value.error.data);
+        if (appendFailure && waiter?.op !== 'close' && error === appendFailure.wrapped) reportedAppendFailure = error;
         waiter?.reject(error);
       } else waiter?.resolve(value.result);
     } else if (value.turnStarted) {
@@ -293,10 +352,11 @@ export async function createFxEngine(options = {}) {
       state?.cleanup?.(); state?.finish(value.completed);
       if (turn === state) turn = null;
       turnStates.delete(value.turnToken);
-    } else if (value.failed) {
+    } else if ('failed' in value) {
       const state = turnStates.get(value.turnToken);
-      const error = new Error(value.persistenceError ? `Journal append failed: ${value.persistenceError}` : value.failed);
-      if (value.persistenceError === 'fenced') error.code = 'FX_FENCED';
+      const translated = persistenceError(value);
+      const error = translated ? translated.error : new Error(value.failed);
+      if (appendFailure && error === appendFailure.wrapped) reportedAppendFailure = error;
       state?.cleanup?.(); state?.fail(error);
       const queued = followUps.get(value.turnToken);
       queued?.rejectTurn(error); queued?.rejectAccepted(error);
@@ -328,6 +388,9 @@ export async function createFxEngine(options = {}) {
           }
           await request('persistenceResult', { persistenceID: call.id, value: result });
         } catch (error) {
+          const failure = { error, kind: call.kind };
+          persistenceFailures.set(call.id, failure);
+          if (call.kind === 'append') appendFailure ??= failure;
           // Swift has a typed fencing error. Unwrap the host exception at this
           // language boundary without changing the Swift persistence contract.
           const visited = new Set();
@@ -337,7 +400,9 @@ export async function createFxEngine(options = {}) {
             if (cause.code === 'FX_FENCED') { code = cause.code; break; }
             cause = cause.cause;
           }
-          await request('persistenceResult', { persistenceID: call.id, error: String(error), code }).catch(() => {});
+          let description;
+          try { description = String(error); } catch { description = 'Host persistence operation failed'; }
+          await request('persistenceResult', { persistenceID: call.id, error: description, code }).catch(() => {});
         }
       })();
     } else if (value.fetchRequest) {
@@ -544,9 +609,17 @@ export async function createFxEngine(options = {}) {
     return {
       sessionId: opened.sessionId,
       prompt(text, promptOptions = {}) {
+        if (reportedAppendFailure) throw reportedAppendFailure;
+        if (promptOptions.turnId !== undefined && (typeof promptOptions.turnId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(promptOptions.turnId))) {
+          throw new TypeError('turnId must be 1 to 128 ASCII letters, digits, periods, underscores or hyphens');
+        }
         return begin('prompt', { text }, promptOptions);
       },
       resume(promptOptions = {}) {
+        if (reportedAppendFailure) throw reportedAppendFailure;
+        if (promptOptions.onAmbiguous !== undefined && typeof promptOptions.onAmbiguous !== 'function') {
+          throw new TypeError('onAmbiguous must be a function');
+        }
         if (!resumable) return null;
         const rerun = recoveryCalls.filter(call => promptOptions.onAmbiguous?.(call) === 'rerun').map(call => call.executionId);
         return begin('resume', { rerun, replayOutput: promptOptions[Symbol.for('libfx.resumeOutputShown')] !== true }, promptOptions);
@@ -566,7 +639,7 @@ export async function createFxEngine(options = {}) {
         started.accepted = accepted;
         void started.catch(() => {});
         void accepted.catch(() => {});
-        request('followUp', { text: Array.isArray(input) ? input.map(block => block.text).join('\n') : input, turnToken: token })
+        started[Symbol.for('libfx.swift.followUpReceipt')] = request('followUp', { text: Array.isArray(input) ? input.map(block => block.text).join('\n') : input, turnToken: token })
           .then(reply => { queued.id = reply.inputID; }, error => {
             state.fail(error); rejectTurn(error); rejectAccepted(error); turnStates.delete(token); followUps.delete(token);
           });
@@ -585,7 +658,12 @@ export async function createFxEngine(options = {}) {
       async close() {
         if (closed) return;
         closed = true;
-        try { await request('close'); } finally { await finish(); }
+        try { await request('close'); }
+        catch (error) {
+          // JS reports an append failure once. Swift close keeps throwing its
+          // original error; normalize only that same already-exposed instance.
+          if (!reportedAppendFailure || error !== reportedAppendFailure) throw error;
+        } finally { await finish(); }
       },
     };
   } catch (error) { child.stdin.end(); await exited; lines.close(); throw error; }
@@ -615,7 +693,7 @@ function createTurn(cancel, steer, withdraw) {
     public: {
       result,
       cancel(options = {}) { return cancel(options).catch(error => state.fail(error)); },
-      steer(input, id = randomUUID()) {
+      steer(input, id = `in_${randomUUID()}`) {
         const receipt = steer(input, id);
         receipt.id = id;
         return receipt;

@@ -6,6 +6,11 @@ private struct RelayedToolError: Error, CustomStringConvertible {
     let description: String
 }
 
+private struct RelayedPersistenceError: Error, CustomStringConvertible {
+    let id: Int
+    let description: String
+}
+
 enum DriverOutput {
     private static let lock = NSLock()
     static func emit(_ value: JSONValue) {
@@ -92,15 +97,24 @@ actor Driver: FxHTTPClient, FxPersistence {
                 fields["rpcCode"] = .number(Double(code))
                 fields["data"] = data
             }
+            fields.merge(persistenceErrorFields(error), uniquingKeysWith: { _, value in value })
             emit(.object(["id": id, "error": .object(fields)]))
         }
     }
 
+    private func persistenceErrorFields(_ error: any Error) -> [String: JSONValue] {
+        if let relayed = error as? RelayedPersistenceError {
+            return ["persistenceFailureID": .number(Double(relayed.id))]
+        }
+        if let persistence = error as? FxPersistenceError {
+            return ["persistenceError": .string(String(describing: persistence))]
+        }
+        return [:]
+    }
+
     private func emitFailure(_ error: any Error, token: String) {
         var fields: [String: JSONValue] = ["failed": .string(String(describing: error)), "turnToken": .string(token)]
-        if let persistenceError = error as? FxPersistenceError {
-            fields["persistenceError"] = .string(String(describing: persistenceError))
-        }
+        fields.merge(persistenceErrorFields(error), uniquingKeysWith: { _, value in value })
         emit(.object(fields))
     }
 
@@ -635,7 +649,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                 throw FxError.invalidInput("Unknown persistence operation")
             }
             if let error = value["error"]?.string {
-                waiter.resume(throwing: value["code"] == .string("FX_FENCED") ? FxPersistenceError.fenced : FxError.transport(error))
+                waiter.resume(throwing: value["code"] == .string("FX_FENCED") ? FxPersistenceError.fenced : RelayedPersistenceError(id: id, description: error))
             } else { waiter.resume(returning: value["value"] ?? .null) }
             return .null
         default: throw FxError.invalidInput("Unknown driver operation")

@@ -19,6 +19,11 @@ export async function load(url, context, nextLoad) {
     if ([asset, loop].some(marker => source.split(marker).length !== 2)) throw new Error('Upstream journal fixture changed; review test ownership');
     source = source.replace(asset,
       'const wasm = sourceBackend === "wasm" || targetBackend === "wasm" ? await readFile(resolve(scriptDir, "../../zig-out/bin/fx-core.wasm")) : undefined;');
+    // Swift returns its generated receipt through IPC. Wait for that receipt,
+    // without waiting for journal acceptance or changing the assertions.
+    const followUp = 'const next = agent.followUp("then summarize");';
+    if (source.split(followUp).length !== 4) throw new Error('Upstream follow-up receipt fixtures changed');
+    source = source.replaceAll(followUp, followUp + '\n  await next[Symbol.for("libfx.swift.followUpReceipt")];');
     if (process.env.LIBFX_SWIFT_JOURNAL_CASES) {
       const names = JSON.parse(process.env.LIBFX_SWIFT_JOURNAL_CASES);
       if (!Array.isArray(names) || names.length === 0 || names.some(name => typeof name !== 'string') || new Set(names).size !== names.length) {

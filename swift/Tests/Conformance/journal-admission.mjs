@@ -22,6 +22,40 @@ const cases = {
     "a crash after the final reply, before its turn ends, delivers the saved reply without asking the model again",
     "a resume that restarts a reply the last process had started sends that start first",
     "a turn's result waits until its end is stored"
+  ],
+  "continuation": [
+    "a turn whose end fails to store rejects its result",
+    "a resumed turn answers a call a crash left running instead of running it again",
+    "a host that knows a running call never ran has the resumed turn run it again",
+    "a resumed turn keeps what the model wrote before the calls a crash left running",
+    "a new prompt instead of resume ends the crashed turn as interrupted",
+    "each turn appends its own events, not the whole history",
+    "a slow store receives one opaque record at a time, each naming the cursor before it"
+  ],
+  "inputs": [
+    "a steer is stored before the model request that carries it",
+    "a steer withdrawn before its boundary never reaches the model",
+    "a steer accepted before a crash reaches the model when the turn resumes",
+    "a follow-up queued during a turn runs after it as its own turn",
+    "a follow-up the journal holds runs when the session resumes",
+    "a held follow-up waits for resume() without holding up the agent's own",
+    "a follow-up on an idle agent runs at once"
+  ],
+  "versions": [
+    "a turn left open resumes under the tools the new agent has",
+    "a journal from a newer libfx is refused",
+    "a checkpoint from a newer libfx is refused with the journal's typed error",
+    "a v1 journal from the first journaled libfx still resumes",
+    "a checkpoint saved by the previous published libfx restores in this one",
+    "each progress event names the model its request goes to"
+  ],
+  "failures": [
+    "a second agent on the same store fences the first",
+    "a journal that does not fold is refused",
+    "a failed append fails the turn and stops the agent",
+    "persistence options are checked before the core starts",
+    "a session taken over mid-turn fences the first agent, which stops at once",
+    "a takeover does not run a running call again and records one outcome for it"
   ]
 };
 const group = process.argv[2] ?? 'admission';

@@ -244,3 +244,41 @@ private actor RetryingCheckpointStore: FxCheckpointPersistence {
         try await restored.close()
     }
 }
+
+private final class CommitFailure: Error {}
+
+private actor FailingCommitStore: FxPersistence {
+    let memory = FxMemoryPersistence()
+    let failure: CommitFailure
+    private(set) var failedAppends = 0
+    init(failure: CommitFailure) { self.failure = failure }
+    func load() async -> FxPersistenceSnapshot { await memory.load() }
+    func append(expected: String?, idempotencyKey: String, data: Data, barrier: Bool) async throws -> String {
+        let record = try JSONDecoder().decode(JSONValue.self, from: data)
+        if case .array(let events) = record["events"], events.contains(where: { $0["type"] == .string("turn_committed") }) {
+            failedAppends += 1
+            throw failure
+        }
+        return try await memory.append(expected: expected, idempotencyKey: idempotencyKey, data: data, barrier: barrier)
+    }
+}
+
+@Test func failedTurnEndPreservesOriginalStoreErrorAcrossAllWaiters() async throws {
+    let failure = CommitFailure(), store = FailingCommitStore(failure: failure), http = JournalGateway()
+    let engine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "fixture", model: "swift/journal", httpClient: http), persistence: store)
+    let turn = try await engine.prompt("fail at commit")
+    let operations: [@Sendable () async throws -> Void] = [
+        { for try await _ in turn {} },
+        { _ = try await turn.result },
+        { try await engine.flushPersistence() },
+        { _ = try await engine.prompt("must not start") },
+        { try await engine.close() },
+        { try await engine.close() },
+    ]
+    for operation in operations {
+        do { try await operation(); Issue.record("Expected the original store error") }
+        catch { #expect(error as? CommitFailure === failure) }
+    }
+    #expect(await store.failedAppends == 1)
+    #expect(await http.bodies.count == 1)
+}
