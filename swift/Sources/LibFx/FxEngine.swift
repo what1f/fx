@@ -559,9 +559,10 @@ public actor FxEngine {
                     guard let tool else { throw FxError.invalidInput("Unknown tool") }
                     let value = try await tool.execute(params["input"] ?? .null, context)
                     try Task.checkCancellation()
-                    response = try value.response()
+                    response = try value.response(toolName: name)
                 } catch {
-                    response = .object(["content": .string(String(describing: error)), "isError": .bool(true)])
+                    let message = (error as? any LocalizedError)?.errorDescription ?? String(describing: error)
+                    response = .object(["content": .string(message.isEmpty ? "Tool \(name) failed without a message" : message), "isError": .bool(true)])
                 }
                 guard !Task.isCancelled, await self.isActive(expectedTurn) else { return }
                 try? await rpc.respond(id: requestID, result: response)

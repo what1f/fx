@@ -2,6 +2,10 @@ import Foundation
 import LibFxMCP
 @_spi(Conformance) import LibFx
 
+private struct RelayedToolError: Error, CustomStringConvertible {
+    let description: String
+}
+
 enum DriverOutput {
     private static let lock = NSLock()
     static func emit(_ value: JSONValue) {
@@ -614,7 +618,7 @@ actor Driver: FxHTTPClient, FxPersistence {
         case "toolResult":
             guard let requestID = value["toolID"]?.integer,
                   let waiter = toolWaiters.removeValue(forKey: requestID) else { throw FxError.invalidInput("Unknown tool result") }
-            if let error = value["error"]?.string { waiter.resume(throwing: FxError.transport(error)) }
+            if let error = value["error"]?.string { waiter.resume(throwing: RelayedToolError(description: error)) }
             else if let result = value["rich"] {
                 do {
                     let images: [FxImage]

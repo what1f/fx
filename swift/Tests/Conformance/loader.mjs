@@ -12,6 +12,14 @@ export async function resolve(specifier, context, nextResolve) {
 
 export async function load(url, context, nextLoad) {
   const result = await nextLoad(url, context);
+  if (url.endsWith('/sdk/tests/test-tool-contract.mjs')) {
+    const source = result.source.toString();
+    const asset = 'const wasm = await readFile(resolve(scriptDir, "../../zig-out/bin/fx-core.wasm"));';
+    if (source.split(asset).length !== 2) throw new Error('Upstream tool-contract fixture changed; review native asset loading');
+    // Native Swift tests do not consume the fixture's WASM bytes.
+    return { ...result, source: source.replace(asset,
+      'const wasm = backend === "wasm" ? await readFile(resolve(scriptDir, "../../zig-out/bin/fx-core.wasm")) : undefined;') };
+  }
   if (url.endsWith('/sdk/tests/test-hooks.mjs')) {
     let source = result.source.toString();
     const start = '// A host-created child adds its outer parent only to its own root session.';

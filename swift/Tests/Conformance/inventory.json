@@ -460,8 +460,8 @@
     {
       "upstream": "sdk/tests/test-tool-contract.mjs",
       "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "reason": "All assertions run through the real Swift SDK and shared Zig scheduler. The bridge converts object-keyed JavaScript tools to typed Swift descriptors and validates JavaScript-only name/type shapes. A checked loader adaptation skips the fixture's unused WASM asset read in native mode. Swift owns writer admission, overlapping readers, result order, context identity, persisted sessions and nonempty tool error text. Native barrier tests and localized/returned/thrown error cases add direct Swift proof.",
+      "status": "passed: complete upstream file with assertions unchanged"
     },
     {
       "upstream": "sdk/tests/test-types.mjs",

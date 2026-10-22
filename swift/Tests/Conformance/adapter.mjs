@@ -60,7 +60,24 @@ function swiftModel(options) {
   return model;
 }
 
+function swiftTools(value) {
+  let tools;
+  if (value === undefined) tools = [];
+  else if (Array.isArray(value)) tools = value;
+  else if (value && typeof value === 'object') tools = Object.entries(value).map(([name, tool]) => {
+    if (!tool || typeof tool !== 'object') throw new TypeError(`tool ${name} must be an object`);
+    if (tool.name !== undefined && tool.name !== name) throw new TypeError(`tool ${name} has a different name: ${tool.name}`);
+    return { ...tool, name };
+  });
+  else throw new TypeError('tools must be an array or an object');
+  for (const tool of tools) {
+    if (tool.writes !== undefined && typeof tool.writes !== 'boolean') throw new TypeError(`tool ${tool.name} writes must be a boolean`);
+  }
+  return tools;
+}
+
 export async function createFxEngine(options = {}) {
+  options = { ...options, tools: swiftTools(options.tools) };
   // These invalid callback shapes cannot be constructed by a typed Swift caller.
   if (options.hooks !== undefined) {
     const hooks = options.hooks;
@@ -364,7 +381,8 @@ export async function createFxEngine(options = {}) {
         ...(result?.type === 'libfx.tool-result' ? { rich: result } : {
           content: typeof result === 'string' ? result : JSON.stringify(result) ?? 'null',
         }),
-      }), error => controller.signal.aborted ? undefined : request('toolResult', { toolID: call.id, error: String(error) }))
+      }), error => controller.signal.aborted ? undefined : request('toolResult', { toolID: call.id,
+        error: error instanceof Error ? error.message : String(error) }))
         .catch(() => {}).finally(() => toolControllers.delete(call.id));
     }
   });

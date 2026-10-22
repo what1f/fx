@@ -186,6 +186,10 @@ let turn = try await engine.prompt([.text("Describe this image"), .image(image)]
 
 Pass tools through `FxConfiguration.tools`. A tool can return text, images, and an explicit error flag through `FxToolResult`. Its context carries a stable execution ID for effect deduplication, the session ID, and the public turn ID. Tool closures must cooperate with task cancellation.
 
+`writes` controls admission separately from `isIdempotent`. When omitted, non-idempotent tools act as writers and idempotent tools as readers. Readers can run together until a writer. A writer waits for all preceding calls and blocks later calls until it finishes; results retain the model's call order. Set `writes: true` for an idempotent tool that changes state, or `writes: false` for a read-only tool whose result is not safe to replay.
+
+Thrown errors become tool error results. The engine uses `LocalizedError.errorDescription` when supplied, otherwise the error's string description. An empty description or empty error result becomes `Tool <name> failed without a message` so the model receives usable text.
+
 A `.toolStarted` event carries an optional `FxToolInput`: `.complete(JSONValue)` when the compact input fits in 64 KiB, or `.truncated(preview:)` with a bounded UTF-8 JSON prefix. Previews use sorted object keys and can end before the JSON value is complete. The event uses the core's redacted display input; the tool closure receives the complete execution arguments separately. Session event storage preserves this distinction across reopening.
 
 Pass `providerTools: [.webSearch]` to `FxConfiguration` to advertise search executed by the model service. It has no host closure. Search calls and results appear as ordinary tool events and remain in checkpoint and journal history. Availability depends on the model service. Provider and host tool names share one namespace; duplicate names are rejected.

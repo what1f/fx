@@ -58,7 +58,7 @@ public struct FxToolResult: Sendable, Equatable, ExpressibleByStringLiteral {
 
     public init(stringLiteral value: String) { self.init(text: value) }
 
-    func response() throws -> JSONValue {
+    func response(toolName: String) throws -> JSONValue {
         guard images.count <= 8 else { throw FxError.invalidInput("A tool result accepts at most 8 images") }
         var content = text
         if !images.isEmpty {
@@ -77,7 +77,7 @@ public struct FxToolResult: Sendable, Equatable, ExpressibleByStringLiteral {
             guard bytes.count <= 8 * 1024 * 1024 else { throw FxError.invalidInput("Tool result exceeds the size limit") }
             content = String(decoding: bytes, as: UTF8.self)
         }
-        if isError && content.isEmpty { content = "Tool failed without a message" }
+        if isError && content.isEmpty { content = "Tool \(toolName) failed without a message" }
         var fields: [String: JSONValue] = ["content": .string(content), "isError": .bool(isError)]
         if !images.isEmpty { fields["contentType"] = .string("rich") }
         return .object(fields)

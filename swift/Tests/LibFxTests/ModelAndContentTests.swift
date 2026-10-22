@@ -215,7 +215,7 @@ func ultrafastRoutingTakesPriorityOverFastWhenEnabled(ultrafast: Bool) async thr
 
 @Test func richToolResultPreservesImagesAndFailure() throws {
     let image = FxImage(data: Data([1, 2, 3]), format: .png, sourceReference: "screenshot-1")
-    let response = try FxToolResult(text: "partial", images: [image], isError: true).response()
+    let response = try FxToolResult(text: "partial", images: [image], isError: true).response(toolName: "probe")
     #expect(response["contentType"] == .string("rich"))
     #expect(response["isError"] == .bool(true))
     let content = try JSONDecoder().decode(JSONValue.self, from: Data(response["content"]!.string!.utf8))
