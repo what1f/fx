@@ -1,0 +1,106 @@
+name: libfx Swift
+
+on:
+  pull_request:
+    paths:
+      - 'swift/**'
+      - 'src/c_core_main.zig'
+      - 'src/native_core_runtime.zig'
+      - 'src/napi_core_main.zig'
+      - 'src/acp/**'
+      - 'src/core/**'
+      - 'build.zig'
+      - '.github/workflows/libfx-swift.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: libfx-swift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift:
+    name: Swift SDK (macOS)
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-zig
+        with:
+          version: '0.17.0'
+          cache-key: libfx-swift
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Show Swift toolchain
+        run: swift --version
+      - name: Build C archive and XCFramework
+        run: swift/scripts/build-xcframework.sh
+      - name: Test Swift SDK
+        run: swift test --package-path swift --no-parallel
+      - name: Test independent release consumer
+        run: swift/scripts/test-consumer.sh
+      - name: Build Node comparison backend
+        run: zig build libfx-napi -Dnapi-surface=core
+      - name: Run conformance checks
+        run: node swift/Tests/Conformance/run.mjs
+      - name: Check Swift memory with Address Sanitizer
+        run: |
+          swift test --package-path swift --no-parallel --sanitize=address
+          swift build --package-path swift --sanitize=address
+          export LIBFX_SWIFT_DRIVER="$(swift build --package-path swift --sanitize=address --show-bin-path)/FxSwiftDriver"
+          node swift/Tests/Conformance/mcp-observation.mjs
+          node swift/Tests/Conformance/input-observation.mjs
+          node swift/Tests/Conformance/tool-observation.mjs
+          node swift/Tests/Conformance/turn-control.mjs
+          node swift/Tests/Conformance/handoff.mjs
+          node swift/Tests/Conformance/journal-admission.mjs
+          node swift/Tests/Conformance/journal-admission.mjs recovery
+          node swift/Tests/Conformance/journal-admission.mjs continuation
+          node swift/Tests/Conformance/journal-admission.mjs failures
+          node swift/Tests/Conformance/journal-admission.mjs inputs
+          node swift/Tests/Conformance/journal-admission.mjs versions
+          node swift/Tests/Conformance/journal-admission.mjs cancellation
+          node swift/Tests/Conformance/journal-admission.mjs image-recovery
+          node swift/Tests/Conformance/journal-admission.mjs image-storage
+          node swift/Tests/Conformance/journal-admission.mjs image-limits
+          node swift/Tests/Conformance/journal-admission.mjs tool-images
+          node swift/Tests/Conformance/journal-admission.mjs checkpoints
+          node swift/Tests/Conformance/journal-admission.mjs turn-identity
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-checkpoint.mjs native native
+          node swift/Tests/Conformance/persistence-errors.mjs
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-images.mjs native
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-instruction-limits.mjs native
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-native-core-image-framing.mjs
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-tool-contract.mjs native
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native
+      - name: Check Swift concurrency with Thread Sanitizer
+        run: |
+          swift test --package-path swift --no-parallel --sanitize=thread
+          swift build --package-path swift --sanitize=thread
+          export LIBFX_SWIFT_DRIVER="$(swift build --package-path swift --sanitize=thread --show-bin-path)/FxSwiftDriver"
+          node swift/Tests/Conformance/mcp-observation.mjs
+          node swift/Tests/Conformance/input-observation.mjs
+          node swift/Tests/Conformance/tool-observation.mjs
+          node swift/Tests/Conformance/turn-control.mjs
+          node swift/Tests/Conformance/handoff.mjs
+          node swift/Tests/Conformance/journal-admission.mjs
+          node swift/Tests/Conformance/journal-admission.mjs recovery
+          node swift/Tests/Conformance/journal-admission.mjs continuation
+          node swift/Tests/Conformance/journal-admission.mjs failures
+          node swift/Tests/Conformance/journal-admission.mjs inputs
+          node swift/Tests/Conformance/journal-admission.mjs versions
+          node swift/Tests/Conformance/journal-admission.mjs cancellation
+          node swift/Tests/Conformance/journal-admission.mjs image-recovery
+          node swift/Tests/Conformance/journal-admission.mjs image-storage
+          node swift/Tests/Conformance/journal-admission.mjs image-limits
+          node swift/Tests/Conformance/journal-admission.mjs tool-images
+          node swift/Tests/Conformance/journal-admission.mjs checkpoints
+          node swift/Tests/Conformance/journal-admission.mjs turn-identity
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-checkpoint.mjs native native
+          node swift/Tests/Conformance/persistence-errors.mjs
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-images.mjs native
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-instruction-limits.mjs native
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-native-core-image-framing.mjs
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-tool-contract.mjs native
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native

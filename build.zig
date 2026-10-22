@@ -116,6 +116,28 @@ pub fn build(b: *std.Build) void {
         addNapiArtifact(b, napi_surface, target, git_commit, app_version, update_channel);
     }
 
+    const c_options = b.addOptions();
+    c_options.addOption([]const u8, "git_commit", git_commit);
+    c_options.addOption([]const u8, "app_version", app_version);
+    c_options.addOption([]const u8, "update_channel", @tagName(update_channel));
+    c_options.addOption(bool, "libfx", true);
+    const c_core = b.addLibrary(.{
+        .name = "fx_core",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/c_core_main.zig"),
+            .target = target,
+            .optimize = .safe,
+            .link_libc = true,
+        }),
+    });
+    c_core.bundle_compiler_rt = true;
+    c_core.root_module.addImport("build_options", c_options.createModule());
+    _ = addSessionManager(b, c_core.root_module, target, .safe, null);
+    const c_install = b.addInstallArtifact(c_core, .{});
+    const c_step = b.step("libfx-c", "Build the libfx C ABI core library");
+    c_step.dependOn(&c_install.step);
+
     const mcp_test_exports = b.createModule(.{
         .root_source_file = b.path("src/mcp_test_exports.zig"),
         .target = target,

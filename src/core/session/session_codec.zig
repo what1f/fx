@@ -452,22 +452,16 @@ pub fn parseDurableBytes(alloc: Allocator, value: std.json.Value) ![]u8 {
         .string => |text| return try alloc.dupe(u8, text),
         .object => |object| {
             if (object.count() != 2) return error.InvalidDurableBytes;
-            var iterator = object.iterator();
-            const encoding_entry = iterator.next() orelse return error.InvalidDurableBytes;
-            const data_entry = iterator.next() orelse return error.InvalidDurableBytes;
-            if (!std.mem.eql(u8, encoding_entry.key_ptr.*, "encoding") or
-                !std.mem.eql(u8, data_entry.key_ptr.*, "data"))
-            {
-                return error.InvalidDurableBytes;
-            }
-            if (encoding_entry.value_ptr.* != .string or
-                !std.mem.eql(u8, encoding_entry.value_ptr.string, "base64") or
-                data_entry.value_ptr.* != .string)
+            const encoding = object.get("encoding") orelse return error.InvalidDurableBytes;
+            const data = object.get("data") orelse return error.InvalidDurableBytes;
+            if (encoding != .string or
+                !std.mem.eql(u8, encoding.string, "base64") or
+                data != .string)
             {
                 return error.InvalidDurableBytes;
             }
 
-            const encoded = data_entry.value_ptr.string;
+            const encoded = data.string;
             const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch
                 return error.InvalidDurableBytes;
             const decoded = try alloc.alloc(u8, decoded_len);
@@ -491,6 +485,20 @@ test "durable binary decoding uses only decoded storage" {
     const decoded = try parseDurableBytes(alloc, parsed.value);
     defer alloc.free(decoded);
     try std.testing.expectEqualSlices(u8, "\xff", decoded);
+}
+
+test "durable binary decoding accepts either JSON member order" {
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{
+        "{\"encoding\":\"base64\",\"data\":\"/wA=\"}",
+        "{\"data\":\"/wA=\",\"encoding\":\"base64\"}",
+    }) |source| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, alloc, source, .{});
+        defer parsed.deinit();
+        const decoded = try parseDurableBytes(alloc, parsed.value);
+        defer alloc.free(decoded);
+        try std.testing.expectEqualSlices(u8, "\xff\x00", decoded);
+    }
 }
 
 pub fn encodeState(state: DurableSessionState, writer: *std.Io.Writer) !EncodeSummary {
@@ -3935,7 +3943,9 @@ test "durable byte fields use canonical string or padded base64 representation" 
         "{\"encoding\":\"base64\",\"data\":\"/wA\"}",
         "{\"encoding\":\"base64\",\"data\":\"***=\"}",
         "{\"encoding\":\"base64\",\"data\":\"aGk=\"}",
-        "{\"data\":\"/wA=\",\"encoding\":\"base64\"}",
+        "{\"encoding\":\"hex\",\"data\":\"/wA=\"}",
+        "{\"encoding\":\"base64\",\"other\":\"/wA=\"}",
+        "{\"encoding\":\"base64\",\"data\":42}",
         "{\"encoding\":\"base64\",\"data\":\"/wA=\",\"extra\":true}",
     };
     for (invalid_values) |json_text| {

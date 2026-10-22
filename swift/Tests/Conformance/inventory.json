@@ -1,0 +1,509 @@
+{
+  "baseline": "current fork checkout; regenerate and review when upstream test owners change",
+  "tests": [
+    {
+      "upstream": "sdk/tests/test-agent-bootstrap.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream native file through Swift; 65 invalid checkpoint creations fail before a later engine opens and closes successfully"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-codex.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete upstream native file unchanged against JavaScript and Swift through the provider-suite runner; Swift owns engine, session, storage, credentials and refresh behavior; adapter validates JavaScript-only input shapes"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-custom.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete upstream native file unchanged against JavaScript and Swift through the provider-suite runner; Swift owns engine, session, storage, credentials and refresh behavior; adapter validates JavaScript-only input shapes"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-effort.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete upstream native file unchanged through Swift; real core validates capabilities and effort strings; adapter alone translates JavaScript model shapes, deprecated top-level options, and error classes"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-fast.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete upstream native file unchanged through Swift; real core validates capabilities and effort strings; adapter alone translates JavaScript model shapes, deprecated top-level options, and error classes"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-grok.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete upstream native file unchanged against JavaScript and Swift through the provider-suite runner; Swift owns engine, session, storage, credentials and refresh behavior; adapter validates JavaScript-only input shapes"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-images.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete upstream native file through Swift with original assertions; includes synchronous admission, Blob/File reads, preparation, transport failures, queued steering limits, cancellation before dispatch, checkpoints and recovery, image dimensions and history windows, rich tool fallback and response frame limits"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-provider-tools.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream native file through Swift; provider advertisement, streamed search events and results, and checkpoint restoration without a host executor"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-request-context.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream native file through Swift; instructions, session affinity, host fetch ownership, request attempts, response identifiers and credential exclusion use the public Swift transport observer"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-reserved-tool-names.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged native file through Swift; write_file and edit_file host executors receive full arguments and return successful results under their original names; this fixture does not qualify a public permission callback"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-steering.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed via Swift adapter on macOS arm64, Node.js 25.9.0"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-step-limit.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed via Swift adapter on macOS arm64, Node.js 25.9.0"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-tool-start.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: all upstream assertions through Swift; loader normalizes only the expected JSON preview object-key order to Swift canonical order; five native tests separately cover byte boundaries, UTF-8, full executor input, stable event records and SQLite reopen"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-transport-retry.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream native file through Swift; bounded pre-header retry, sampled cumulative body progress, ordinary cancellation and cancellation awaited from the retry observer; adapter translates host error names and synchronizes the JavaScript callback boundary only"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-ultrafast-options.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream native file through Swift; kernel-selected default models, ultrafast routing, pricing eligibility, mode precedence, warnings and rejection; adapter reports actual Swift driver process exit after runtime use"
+    },
+    {
+      "upstream": "sdk/tests/test-backend-info.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-browser-wasm.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-chatgpt-sign-in.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-checkpoint.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: all five upstream native/native checkpoint scenarios through Swift, retaining original assertions for text, reasoning with text, reasoning-only, provider terminal tools and image restoration; loader skips only the unused WASM fixture read in native mode"
+    },
+    {
+      "upstream": "sdk/tests/test-core-browser.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-core-cancel.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-core-home-unavailable.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-core-live.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-core-output-pressure.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-core-output.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-core.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-default-import.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-durable-core.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-durable-harness.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-durable-provider-crash.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "partial: separate Swift agent SIGKILL checks cover model streaming, ambiguous write skipping and idempotent tool rerun with stable execution identity; unchanged upstream file awaits local-world adapter support"
+    },
+    {
+      "upstream": "sdk/tests/test-durable.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-grok-sign-in.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-hooks.mjs",
+      "classification": "adapted",
+      "reason": "All upstream assertions execute through Swift, including engine/journal behavior, durable resume, input waits, MCP spans, injected-runtime descendant authority and standalone helper cancellation. Both helper fixtures use actual Swift scopes and child options. Checked loader markers guard asynchronous frame/effect/cancellation acknowledgements and fixture cleanup; no assertion block is excluded. The bridge supplies omitted protocol metadata and preserves JavaScript callback/result identity. Native and differential checks additionally cover original errors, cyclic late results, already-cancelled scopes, effect call counts, bounds and invalidation.",
+      "status": "passed: complete hooks assertions through Swift with explicit IPC timing and protocol metadata adaptations"
+    },
+    {
+      "upstream": "sdk/tests/test-host-tool-cancel.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed via Swift adapter on macOS arm64, Node.js 25.9.0"
+    },
+    {
+      "upstream": "sdk/tests/test-host-tools.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed via Swift adapter on macOS arm64, Node.js 25.9.0"
+    },
+    {
+      "upstream": "sdk/tests/test-instruction-limits.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete upstream native file with original assertions through Swift; 65536-byte engine, skill and MCP bounds, including framing and rejection before runtime factory; bridge supplies omitted MCP protocol envelopes and closes its added foreign adapter"
+    },
+    {
+      "upstream": "sdk/tests/test-journal.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: all 77 upstream native/native cases through Swift, including named prompt/tool images, count/byte windows, 4104-image and 4112-image recovery, large checkpoints, original store failures, slow barriers, fencing, handoff and turn-ID replay; loader changes only fixture asset loading and IPC receipt waits; Swift-native tests also verify cancellation, SQLite image recovery and session image isolation"
+    },
+    {
+      "upstream": "sdk/tests/test-libfx-benchmark.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-libfx-loader.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-linux-abi.py",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-list-models.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed via Swift adapter on macOS arm64, Node.js 25.9.0"
+    },
+    {
+      "upstream": "sdk/tests/test-mcp-adapter.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: native stdio and HTTP text, images, image-only and image-error modes retain all upstream assertions through the actual Swift MCP adapter and core; the bridge expands the stdio fixture prompt content array into standard single-block messages without dropping content or roles; MCP-specific observation spans remain pending"
+    },
+    {
+      "upstream": "sdk/tests/test-minimal-api.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-cancel-before-fetch.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-cancel.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-config-isolation.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-env-growth.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-exit-code.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-fetch-failure.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-http-cleanup.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-image-framing.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream file through the Swift C ABI backend; 7 MiB tool images survive framing, provider request overflow evicts only older images with a notice, and image-free overflow fails before host fetch"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-misuse.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-ready.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-security.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-stream.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-worker-termination.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-workers.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-host-tool-frame-limit.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-native-host-tool-late-settle.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-next-package.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-node-async-assets.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-node-bundled-assets.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-node-napi.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-node-package.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-node-tracing.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-node-wasm.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-package-resilience.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-packed-example.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-pi-benchmark.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-sdk.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-skills-adapter.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged records/native and disk/native modes through Swift file loading, instruction composition and actual core conversation; host resources and original tool closures remain typed Swift values; YAML decoding uses Yams"
+    },
+    {
+      "upstream": "sdk/tests/test-term-demo-package.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-term-login.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-term-session-resume.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-term.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-tool-contract.mjs",
+      "classification": "adapted",
+      "reason": "All assertions run through the real Swift SDK and shared Zig scheduler. The bridge converts object-keyed JavaScript tools to typed Swift descriptors and validates JavaScript-only name/type shapes. A checked loader adaptation skips the fixture's unused WASM asset read in native mode. Swift owns writer admission, overlapping readers, result order, context identity, persisted sessions and nonempty tool error text. Native barrier tests and localized/returned/thrown error cases add direct Swift proof.",
+      "status": "passed: complete upstream file with assertions unchanged"
+    },
+    {
+      "upstream": "sdk/tests/test-types.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-vercel-package.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-vercel-storage.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-wasm-jspi-tier-up.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-wasm-memory.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-wasm-module-cache.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "pending"
+    },
+    {
+      "upstream": "sdk/tests/test-world-persistence.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "pending"
+    }
+  ]
+}
