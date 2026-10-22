@@ -20,6 +20,26 @@ final class SQLiteDatabase: @unchecked Sendable {
 
     deinit { if let handle { sqlite3_close_v2(handle) } }
 
+    func enableWriteAheadLogging() throws {
+        guard let handle else { throw FxSQLiteError.closed }
+        // Concurrent mode changes can return BUSY without invoking SQLite's busy handler.
+        // Retry only this initialization operation, within the existing one-second budget.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        sqlite3_busy_timeout(handle, 0)
+        defer { sqlite3_busy_timeout(handle, 1_000) }
+        while true {
+            do {
+                try execute("PRAGMA journal_mode=WAL")
+                return
+            } catch let failure as FxSQLiteError {
+                guard case .database(let code, _) = failure,
+                      code & 0xff == SQLITE_BUSY, ContinuousClock.now < deadline else { throw failure }
+                try Task.checkCancellation()
+                sqlite3_sleep(1)
+            }
+        }
+    }
+
     func close() throws {
         guard let handle else { return }
         let code = sqlite3_close(handle)

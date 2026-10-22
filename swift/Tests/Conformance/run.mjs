@@ -38,6 +38,14 @@ const checks = [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-agent-steering.mjs', 'native', '--hooks',
   ] },
   ...[
+    ['replay', 'a prompt streams its turn, and the session replays from any cursor'],
+    ['isolation', "each session's stream holds only its own turns"],
+    ['dedup', 'a retried prompt with the same messageId runs its turn once'],
+    ['ordering', 'two servers prompting one session run its turns one at a time, in one history'],
+  ].map(([kind, test]) => ({ name: `upstream/test-durable-session-${kind}`, expected: '1/1 durable tests passed', env: { LIBFX_TEST_ONLY: test }, args: [
+    '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable.mjs', 'memory', 'native',
+  ] })),
+  ...[
     ['automatic', "a turn's end saves a checkpoint once the records since the last reach 64 KiB, and the next turn starts from it"],
     ['tools', 'a tool that stops being idempotent changes the tools a checkpoint names'],
     ['metadata', 'a checkpoint names the libfx, tools and model that saved it, and a resume with others hears so'],
@@ -66,7 +74,7 @@ const checks = [
   ].map(([kind, test]) => ({ name: `upstream/test-durable-delivery-${kind}`, expected: '1/1 durable tests passed', env: { LIBFX_TEST_ONLY: test }, args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable.mjs', 'memory', 'native',
   ] })),
-  ...['http-cleanup', 'persistence-errors', 'driver-lifecycle', 'smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'input-observation', 'tool-observation', 'mcp-observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing', 'turn-identity', 'handoff', 'follow-up', 'custom-provider', 'provider-suites', 'agent-crash', 'session-checkpoint', 'session-steering-crash'].map(name => ({
+  ...['admission-cache', 'session-readable', 'http-cleanup', 'persistence-errors', 'driver-lifecycle', 'smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'input-observation', 'tool-observation', 'mcp-observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing', 'turn-identity', 'handoff', 'follow-up', 'custom-provider', 'provider-suites', 'agent-crash', 'session-checkpoint', 'session-steering-crash'].map(name => ({
     name, args: [`swift/Tests/Conformance/${name}.mjs`],
   })),
 ];

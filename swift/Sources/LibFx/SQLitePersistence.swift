@@ -26,7 +26,7 @@ public actor FxSQLitePersistence: FxCheckpointPersistence, FxImagePersistence {
         guard url.isFileURL, !url.path.isEmpty, !url.path.utf8.contains(0) else { throw FxSQLiteError.invalidURL }
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let database = try SQLiteDatabase(path: url.path)
-        try database.execute("PRAGMA journal_mode=WAL")
+        try database.enableWriteAheadLogging()
         try database.statement("PRAGMA journal_mode") { statement in
             guard try database.step(statement), let mode = sqlite3_column_text(statement, 0),
                   String(cString: mode) == "wal" else {

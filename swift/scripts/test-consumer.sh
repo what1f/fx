@@ -369,6 +369,16 @@ struct SubscriptionHTTP: FxHTTPClient {
         guard durableText == "consumer ok", try await durable.result.stopReason == .endTurn else {
             throw FxError.protocolViolation("Unexpected durable response")
         }
+        var replay = session.events().makeAsyncIterator()
+        guard let firstEntry = try await replay.next(),
+              case .started(let messageID, let sessionID, let acceptedInput) = firstEntry.event,
+              messageID == durable.id, sessionID == session.id, acceptedInput == [.text("hello")] else {
+            throw FxPersistenceError.invalidJournal
+        }
+        var later = session.events(after: firstEntry.cursor).makeAsyncIterator()
+        guard let nextEntry = try await later.next(), nextEntry.cursor > firstEntry.cursor,
+              case .update(let replayedID, .text("consumer ok")) = nextEntry.event,
+              replayedID == durable.id else { throw FxPersistenceError.invalidJournal }
         let repeated = try await session.prompt("ignored", id: durable.id)
         guard try await repeated.result.isRepeated else { throw FxPersistenceError.invalidJournal }
         guard try await session.resume() == nil else { throw FxPersistenceError.invalidJournal }

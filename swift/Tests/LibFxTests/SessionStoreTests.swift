@@ -24,7 +24,7 @@ import CSQLite
         try await reopened.finish(lease, id: input.id, result: result)
         #expect(try await reopened.result(session: "session", agent: "agent", id: input.id) == result)
         let entries = try await reopened.entries(session: "session", agent: "agent", after: 0)
-        #expect(entries.map(\.event) == [.started(id: "first", sessionID: "session"), .update(id: "first", .text("回复")), .ended(result)])
+        #expect(entries.map(\.event) == [.started(id: "first", sessionID: "session", input: [.text("一")]), .update(id: "first", .text("回复")), .ended(result)])
         #expect(try await reopened.entries(session: "session", agent: "agent", after: entries[0].cursor).count == 2)
         #expect(try await reopened.next(lease)?.id == "second")
         try await reopened.release(lease)
@@ -173,6 +173,44 @@ import CSQLite
         await #expect(throws: FxSessionError.invalidCursor) { try await store.entries(session: "s", agent: "a", after: -1) }
         try await store.close()
         await #expect(throws: FxSQLiteError.closed) { try await store.hasWork(session: "s", agent: "a") }
+    }
+
+    @Test func replayRetainsAcceptedInputAfterDuplicateAndDatabaseReopen() async throws {
+        let url = location()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let png = try #require(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="))
+        let input: [FxPromptContent] = [.text("原始输入"), .image(FxImage(data: png, format: .png, sourceReference: "host:original"))]
+        let store = try FxSessionStore(url: url)
+        #expect(try await store.accept(session: "s", agent: "a", id: "m", content: input, options: .init()) == false)
+        #expect(try await store.accept(session: "s", agent: "a", id: "m", content: [.text("replacement")], options: .init()) == true)
+        let lease = try #require(try await store.claim(session: "s", agent: "a"))
+        let accepted = try #require(try await store.next(lease))
+        try await store.start(lease, input: accepted)
+        try await store.finish(lease, id: "m", result: completed("m", lease))
+        try await store.release(lease)
+        try await store.close()
+
+        let reopened = try FxSessionStore(url: url)
+        let entries = try await reopened.entries(session: "s", agent: "a", after: 0)
+        #expect(entries.count == 2)
+        #expect(entries.first?.event == .started(id: "m", sessionID: "s", input: input))
+        let cursor = try #require(entries.first?.cursor)
+        let later = try await reopened.entries(session: "s", agent: "a", after: cursor)
+        #expect(later == Array(entries.dropFirst()))
+        try await reopened.close()
+    }
+
+    @Test func concurrentFirstConnectionsCanInitializeOneDatabase() async throws {
+        for _ in 0..<10 {
+            let url = location()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            try await withThrowingTaskGroup(of: FxSessionStore.self) { group in
+                for _ in 0..<8 { group.addTask { try FxSessionStore(url: url) } }
+                var stores: [FxSessionStore] = []
+                for try await store in group { stores.append(store) }
+                for store in stores { try await store.close() }
+            }
+        }
     }
 
     private func location() -> URL {

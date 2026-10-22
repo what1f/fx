@@ -22,7 +22,7 @@ public actor FxSessionStore {
         let canonicalURL = url?.standardizedFileURL.resolvingSymlinksInPath()
         let database = try SQLiteDatabase(path: canonicalURL?.path ?? ":memory:")
         if url != nil {
-            try database.execute("PRAGMA journal_mode=WAL")
+            try database.enableWriteAheadLogging()
             try database.execute("PRAGMA fullfsync=ON")
             try database.execute("PRAGMA checkpoint_fullfsync=ON")
         }
@@ -200,7 +200,7 @@ public actor FxSessionStore {
         try database.transaction {
             try checkLease(lease)
             try database.execute("UPDATE fx_inputs SET started=1 WHERE session=? AND id=?", [.text(lease.sessionID), .text(input.id)])
-            try insertEvent(lease, input.wasStarted ? .resumed(id: input.id, sessionID: lease.sessionID) : .started(id: input.id, sessionID: lease.sessionID))
+            try insertEvent(lease, input.wasStarted ? .resumed(id: input.id, sessionID: lease.sessionID) : .started(id: input.id, sessionID: lease.sessionID, input: input.content))
         }
     }
 

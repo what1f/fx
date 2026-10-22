@@ -107,8 +107,8 @@ private actor SteeringGate {
         #expect(await http.bodies.last?.contains("after cancellation") == true)
         #expect(await http.bodies.last?.contains("and keep the second guidance") == true)
         let entries = try await store.entries(session: "s", agent: "default", after: 0)
-        #expect(entries.contains { if case .started(id: "guide", sessionID: _) = $0.event { return true }; return false })
-        #expect(!entries.contains { if case .started(id: "guide-2", sessionID: _) = $0.event { return true }; return false })
+        #expect(entries.contains { if case .started(id: "guide", sessionID: _, input: _) = $0.event { return true }; return false })
+        #expect(!entries.contains { if case .started(id: "guide-2", sessionID: _, input: _) = $0.event { return true }; return false })
         try await store.close()
     }
 
@@ -128,7 +128,7 @@ private actor SteeringGate {
         #expect(bodies.last?.contains("match this") == true && bodies.last?.contains(png) == true)
         #expect(bodies.last?.contains("keep it small") == true)
         let entries = try await store.entries(session: "s", agent: "default", after: 0)
-        let starts = entries.compactMap { if case .started(let id, _) = $0.event { return id }; return nil }
+        let starts = entries.compactMap { if case .started(let id, _, _) = $0.event { return id }; return nil }
         #expect(starts == ["prompt", "image"])
         try await store.close()
     }

@@ -491,7 +491,7 @@ actor Driver: FxHTTPClient, FxPersistence {
             } else { next = try await session.prompt(content, id: value["messageID"]?.string ?? UUID().uuidString) }
             let token = value["turnToken"]?.string ?? next.id
             sessionTurns[token] = next
-            emit(.object(["sessionAccepted": .string(token), "messageID": .string(next.id), "sessionID": .string(next.sessionID)]))
+            emit(.object(["sessionAccepted": .string(token), "messageID": .string(next.id), "sessionID": .string(next.sessionID), "isRepeated": .bool(next.isRepeated)]))
             sessionDeliveries[token] = Task {
                 do {
                     for try await event in next { emit(.object(["event": encode(event), "turnToken": .string(token)])) }
@@ -528,9 +528,22 @@ actor Driver: FxHTTPClient, FxPersistence {
                 guard let entry = try await iterator.next() else { return JSONValue.null }
                 var fields: [String: JSONValue] = ["cursor": .number(Double(entry.cursor)), "epoch": .number(Double(entry.epoch))]
                 switch entry.event {
-                case .started(let id, let session):
+                case .started(let id, let session, let input):
                     fields["type"] = .string("turn_start")
                     fields["messageId"] = .string(id); fields["sessionId"] = .string(session)
+                    if input.count == 1, case .text(let text) = input[0] { fields["input"] = .string(text) }
+                    else {
+                        fields["input"] = .array(input.map { block in
+                            switch block {
+                            case .text(let text): return .object(["type": .string("text"), "text": .string(text)])
+                            case .image(let image):
+                                var fields: [String: JSONValue] = ["type": .string("image"), "mimeType": .string(image.format.rawValue)]
+                                if let data = image.data { fields["data"] = .string(data.base64EncodedString()) }
+                                if let reference = image.sourceReference { fields["sourceRef"] = .string(reference) }
+                                return .object(fields)
+                            }
+                        })
+                    }
                 case .resumed(let id, let session):
                     fields["type"] = .string("turn_resume")
                     fields["messageId"] = .string(id); fields["sessionId"] = .string(session)

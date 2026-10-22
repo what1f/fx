@@ -311,7 +311,7 @@ export async function createFxEngine(options = {}) {
         .then(credentials => request('refreshLockResult', { token: call.token, credentials }),
           () => request('refreshLockResult', { token: call.token })).catch(() => {});
     } else if (value.sessionAccepted) {
-      acceptedSessions.get(value.sessionAccepted)?.resolve({ id: value.messageID, messageId: value.messageID, sessionId: value.sessionID });
+      acceptedSessions.get(value.sessionAccepted)?.resolve({ id: value.messageID, messageId: value.messageID, sessionId: value.sessionID, isRepeated: value.isRepeated });
       acceptedSessions.delete(value.sessionAccepted);
     } else if (value.credentialRequest) {
       const call = value.credentialRequest;
@@ -842,7 +842,12 @@ function checkPromptWithSwift(input, preparing, driver) {
     return { type: 'image', mimeType, ...reference, ...(data === undefined ? {} : { data }) };
   });
   const request = JSON.stringify({ id: 1, op: 'validatePrompt', blocks: descriptors, preparing });
-  const key = createHash('sha256').update(driver).update(request).digest('hex');
+  // Swift admission uses text emptiness and JSON frame size. Printable ASCII
+  // without escapes has identical admission at the same width. Keep the actual
+  // request and dispatched content intact; all other descriptors retain their bytes.
+  const cacheBlocks = descriptors.map(block => block.type === 'text' && /^[\x20-\x21\x23-\x5b\x5d-\x7e]*$/.test(block.text)
+    ? { type: 'asciiText', length: block.text.length } : block);
+  const key = createHash('sha256').update(driver).update(JSON.stringify({ blocks: cacheBlocks, preparing })).digest('hex');
   let admitted = promptAdmissions.get(key);
   if (!admitted) {
     const process = spawnSync(driver, ['check-prompt'], { input: request, encoding: 'utf8', timeout: 30_000, maxBuffer: 16 * 1024 * 1024 });
@@ -952,12 +957,43 @@ export function createFxAgent(options = {}) {
     maximumDurationMs: durability.__swiftMaximumDurationMs, reserveMs: durability.__swiftReserveMs });
   ready.catch(() => {});
   function turnView(sessionID, sessionOptions, input, promptOptions = {}, resume = false) {
-    let id = promptOptions.messageId ?? promptOptions.id ?? randomUUID();
+    let id = promptOptions.messageId ?? promptOptions.id ?? `msg_${randomUUID()}`;
     const started = ready.then(agent => agent.sessionPrompt(sessionID, input, id, sessionOptions, resume));
     const accepted = started.then(turn => turn.accepted).then(receipt => { id = receipt.id; return receipt; });
-    const result = started.then(turn => turn.result);
+    const result = started.then(turn => turn.result).then(outcome => ({ ...outcome, messageId: outcome.id,
+      ...(outcome.isRepeated ? { repeated: true } : {}) }));
     accepted.catch(() => {}); result.catch(() => {});
     return { get id() { return id; }, accepted, result,
+      get readable() {
+        let reader, cancelled = false;
+        return new ReadableStream({
+          async pull(controller) {
+            const receipt = await accepted;
+            if (cancelled) return;
+            if (receipt.isRepeated) {
+              const outcome = await result;
+              if (cancelled) return;
+              controller.enqueue(new TextEncoder().encode(JSON.stringify({ ...outcome, type: 'turn_end', messageId: id, repeated: true }) + '\n'));
+              controller.close();
+              return;
+            }
+            const remote = await ready;
+            if (cancelled) return;
+            reader ??= remote.sessionStream(sessionID).getReader();
+            for (;;) {
+              const { value, done } = await reader.read();
+              if (cancelled) return;
+              if (done) { controller.close(); return; }
+              const event = JSON.parse(new TextDecoder().decode(value));
+              if (event.messageId !== id) continue;
+              controller.enqueue(value);
+              if (event.type === 'turn_end') { await reader.cancel(); if (!cancelled) controller.close(); }
+              return;
+            }
+          },
+          async cancel() { cancelled = true; await reader?.cancel(); },
+        });
+      },
       cancel: () => started.then(turn => turn.cancel()),
       async *[Symbol.asyncIterator]() { yield* await started; },
     };
