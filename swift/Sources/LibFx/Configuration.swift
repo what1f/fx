@@ -28,8 +28,9 @@ public struct FxConfiguration: Sendable {
     public var gatewayURL: URL
     public var httpClient: any FxHTTPClient
     public var observation: FxObservationOptions?
-    /// Receives host lifecycle events without enabling runtime hooks. Keep callbacks short.
-    public var onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)?
+    /// Awaits host lifecycle notifications before advancing. Keep callbacks short.
+    public var onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)?
+    var validatePermission: (@Sendable () async throws -> Void)?
     /// Chooses an offered core permission option. Missing or failed callbacks deny the request.
     public var onPermission: (@Sendable (FxPermissionRequest) async throws -> FxPermissionDecision)?
     /// Receives request metadata. The transport awaits this callback before advancing.
@@ -46,7 +47,7 @@ public struct FxConfiguration: Sendable {
         checkpointAfterBytes: Int? = 1024 * 1024,
         onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)? = nil,
         onPermission: (@Sendable (FxPermissionRequest) async throws -> FxPermissionDecision)? = nil,
-        onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)? = nil
+        onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil
     ) {
         self.init(provider: .gateway(apiKey: apiKey), model: model, instructions: instructions,
                   tools: tools, providerTools: providerTools, workspace: workspace, httpClient: httpClient,
@@ -62,7 +63,7 @@ public struct FxConfiguration: Sendable {
         checkpointAfterBytes: Int? = 1024 * 1024,
         onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)? = nil,
         onPermission: (@Sendable (FxPermissionRequest) async throws -> FxPermissionDecision)? = nil,
-        onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)? = nil
+        onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil
     ) {
         self.provider = provider
         self.model = model

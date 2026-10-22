@@ -7,11 +7,12 @@ public actor FxEngine {
     private let transport: any EngineTransport
     private let tools: [String: FxTool]
     private let permissions: PermissionRequests
+    private let validatePermission: (@Sendable () async throws -> Void)?
     private let journal: JournalWriter?
     private let imagePersistence: (any FxImagePersistence)?
     private let prepareImage: (@Sendable (FxImage) async throws -> FxImage)?
     private let observation: FxObservationOptions?
-    private let onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)?
+    private let onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)?
     private let checkpointAfterBytes: Int?
     private let checkpointMetadata: CheckpointMetadata
     private var recovery: FxRecoveryState?
@@ -45,9 +46,10 @@ public actor FxEngine {
 
     private init(
         sessionID: String, rpc: RPCClient, transport: any EngineTransport,
-        tools: [String: FxTool], journal: JournalWriter?, imagePersistence: (any FxImagePersistence)?, prepareImage: (@Sendable (FxImage) async throws -> FxImage)?, observation: FxObservationOptions?, checkpointAfterBytes: Int?, checkpointMetadata: CheckpointMetadata, onPermission: PermissionRequests.Handler?, onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)?
+        tools: [String: FxTool], journal: JournalWriter?, imagePersistence: (any FxImagePersistence)?, prepareImage: (@Sendable (FxImage) async throws -> FxImage)?, observation: FxObservationOptions?, checkpointAfterBytes: Int?, checkpointMetadata: CheckpointMetadata, onPermission: PermissionRequests.Handler?, validatePermission: (@Sendable () async throws -> Void)?, onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)?
     ) {
         self.sessionID = sessionID
+        self.validatePermission = validatePermission
         self.rpc = rpc
         self.transport = transport
         self.tools = tools
@@ -60,7 +62,7 @@ public actor FxEngine {
                 return decision
             }
         } else { permissionHandler = nil }
-        self.permissions = PermissionRequests(sessionID: sessionID, rpc: rpc, handler: permissionHandler)
+        self.permissions = PermissionRequests(sessionID: sessionID, rpc: rpc, handler: permissionHandler, onLifecycleEvent: onLifecycleEvent)
         self.journal = journal
         self.imagePersistence = imagePersistence
         self.prepareImage = prepareImage
@@ -185,7 +187,7 @@ public actor FxEngine {
                 throw FxError.protocolViolation("Runtime does not support observation")
             }
             let journal = persistence.map { JournalWriter(store: $0, head: loaded?.head, lastSequence: loaded?.lastSequence ?? 0, tailBytes: loaded?.tailBytes ?? 0) }
-            let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, imagePersistence: persistence as? any FxImagePersistence, prepareImage: configuration.prepareImage, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes, checkpointMetadata: checkpointMetadata, onPermission: configuration.onPermission, onLifecycleEvent: configuration.onLifecycleEvent)
+            let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, imagePersistence: persistence as? any FxImagePersistence, prepareImage: configuration.prepareImage, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes, checkpointMetadata: checkpointMetadata, onPermission: configuration.onPermission, validatePermission: configuration.validatePermission, onLifecycleEvent: configuration.onLifecycleEvent)
             await journal?.setHandler { [weak engine] result in await engine?.journalSettled(result) }
             await rpc.setHandler { [weak engine] message in await engine?.handle(message) }
             await rpc.setFailureHandler { [weak engine] error in await engine?.transportFailed(error) }
@@ -194,7 +196,7 @@ public actor FxEngine {
                 let restored = try await rpc.request("libfx/restore", .object([
                     "sessionId": .string(id), "checkpointAttachment": .number(1),
                 ]))
-                checkpointMetadata.compare(restored["checkpointMeta"], sessionID: id, observation: configuration.observation, onLifecycleEvent: configuration.onLifecycleEvent)
+                await checkpointMetadata.compare(restored["checkpointMeta"], sessionID: id, observation: configuration.observation, onLifecycleEvent: configuration.onLifecycleEvent)
             }
             if let loaded {
                 let imageStore = persistence as? any FxImagePersistence
@@ -235,9 +237,9 @@ public actor FxEngine {
                         throw FxPersistenceError.missingImage(missing.first?.string ?? "")
                     }
                 }
-                checkpointMetadata.compare(opened["checkpointMeta"], sessionID: id, observation: configuration.observation, onLifecycleEvent: configuration.onLifecycleEvent)
+                await checkpointMetadata.compare(opened["checkpointMeta"], sessionID: id, observation: configuration.observation, onLifecycleEvent: configuration.onLifecycleEvent)
                 await engine.setRecovery(opened)
-                configuration.onLifecycleEvent?(.journalOpened(FxJournalRestoration(
+                await configuration.onLifecycleEvent?(.journalOpened(FxJournalRestoration(
                     sessionID: id, cursor: loaded.head, lastSequence: loaded.lastSequence,
                     resumable: opened["resumable"] == .bool(true), openTurnID: opened["openTurnId"]?.string,
                     lastTurnID: opened["lastTurnId"]?.string, eventCount: loaded.events.count,
@@ -641,7 +643,7 @@ public actor FxEngine {
         } else if message.method == "session/request_permission", let id = message.id {
             let expectedTurn = turnID
             await permissions.handle(id: id, params: message.params, turnID: publicTurnID, scope: expectedTurn) { [weak self] in
-                await self?.isActive(expectedTurn) == true
+                await self?.permissionIsActive(expectedTurn) == true
             }
         } else if let id = message.id {
             try? await rpc.respond(id: id, error: .protocolViolation("Unsupported host request: \(message.method)"))
@@ -700,6 +702,15 @@ public actor FxEngine {
     }
 
     private func isActive(_ id: UUID?) -> Bool { id != nil && turnID == id && !closed && !turnCancelled }
+    private func permissionIsActive(_ id: UUID?) async -> Bool {
+        guard isActive(id) else { return false }
+        do {
+            try await journal?.check()
+            try await validatePermission?()
+            return isActive(id)
+        } catch { return false }
+    }
+
     private func removeTool(_ id: String, turn: UUID?) {
         guard turnID == turn else { return }
         toolTasks.removeValue(forKey: id)
@@ -723,8 +734,12 @@ public actor FxEngine {
         await permissions.cancel(scope: id)
         if await promptDispatch?.currentResult() == nil { return }
         guard await promptDispatch?.wait() == true, turnID == id, !closed else { return }
-        try? await rpc.notify("session/cancel", .object(["sessionId": .string(sessionID)]))
-        await transport.abortEffects()
+        // Cancelling a permission callback can cancel the task calling this method.
+        // Cleanup must still reach the core before cancel() returns.
+        await Task { [rpc, transport, sessionID] in
+            try? await rpc.notify("session/cancel", .object(["sessionId": .string(sessionID)]))
+            await transport.abortEffects()
+        }.value
     }
 
     private func checkPromptBeforeWrite(_ id: UUID, resuming: Bool) throws {
@@ -869,7 +884,7 @@ public actor FxEngine {
               !closed, !handedOff, turnID == id else { return }
         do { try await storeCheckpoint(finishing: id) }
         catch {
-            onLifecycleEvent?(.checkpointFailed(sessionID: sessionID, error: error))
+            await onLifecycleEvent?(.checkpointFailed(sessionID: sessionID, error: error))
             observation?.deliver(FxObservation(journal: .checkpointError, sessionID: sessionID, data: .object([
                 "error": .string(String(describing: type(of: error))),
                 "fenced": .bool((error as? FxPersistenceError) == .fenced),
@@ -894,7 +909,7 @@ public actor FxEngine {
             }
             let data = try await transport.takeAttachment(id: attachmentID)
             if let through = try await journal.saveSnapshot(data, at: sequence) {
-                onLifecycleEvent?(.checkpointSaved(sessionID: sessionID, cursor: through, byteCount: data.count))
+                await onLifecycleEvent?(.checkpointSaved(sessionID: sessionID, cursor: through, byteCount: data.count))
                 observation?.deliver(FxObservation(journal: .checkpointSaved, sessionID: sessionID, data: .object([
                     "through": .string(through), "bytes": .number(Double(data.count)),
                 ])))

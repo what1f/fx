@@ -70,11 +70,12 @@ actor PermissionRequests {
     private let sessionID: String
     private let rpc: RPCClient
     private let handler: Handler?
+    private let onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)?
     private var tasks: [UUID: (scope: UUID, task: Task<Void, Never>)] = [:]
     var pendingCount: Int { tasks.count }
 
-    init(sessionID: String, rpc: RPCClient, handler: Handler?) {
-        self.sessionID = sessionID; self.rpc = rpc; self.handler = handler
+    init(sessionID: String, rpc: RPCClient, handler: Handler?, onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil) {
+        self.sessionID = sessionID; self.rpc = rpc; self.handler = handler; self.onLifecycleEvent = onLifecycleEvent
     }
 
     func handle(id: JSONValue, params: JSONValue, turnID: String?, scope: UUID?, isActive: @escaping @Sendable () async -> Bool) async {
@@ -82,20 +83,27 @@ actor PermissionRequests {
             try? await rpc.respond(id: id, error: .protocolViolation("Permission request does not belong to this conversation"))
             return
         }
-        guard let turnID, let scope, let handler, let request = try? FxPermissionRequest(params, turnID: turnID) else {
+        guard let turnID, let scope, let request = try? FxPermissionRequest(params, turnID: turnID) else {
             try? await rpc.respond(id: id, result: Self.outcome(.cancel, options: []))
             return
         }
         let token = UUID()
-        let task = Task { [weak self, rpc] in
+        let task = Task { [weak self, rpc, handler, onLifecycleEvent] in
             var decision = FxPermissionDecision.cancel
             do {
                 try Task.checkCancellation()
                 guard await isActive() else { await self?.remove(token); return }
-                decision = try await handler(request)
+                await onLifecycleEvent?(.permissionRequested(sessionID: request.sessionID, turnID: request.turnID, toolID: request.tool.id))
+                try Task.checkCancellation()
+                guard await isActive() else { await self?.remove(token); return }
+                if let handler { decision = try await handler(request) }
             } catch { /* Failed callbacks deny the request without copying host error details. */ }
             if !Task.isCancelled, await isActive() {
-                try? await rpc.respond(id: id, result: Self.outcome(decision, options: request.options))
+                if case .select(let id) = decision, !request.options.contains(where: { $0.id == id }) { decision = .cancel }
+                await onLifecycleEvent?(.permissionResolved(sessionID: request.sessionID, turnID: request.turnID, toolID: request.tool.id, decision: decision))
+                if !Task.isCancelled, await isActive() {
+                    try? await rpc.respond(id: id, result: Self.outcome(decision, options: request.options))
+                }
             }
             await self?.remove(token)
         }

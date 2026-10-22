@@ -5,6 +5,8 @@ public enum FxLifecycleEvent: Sendable {
     case checkpointFailed(sessionID: String, error: any Error)
     case checkpointMismatch(sessionID: String, fields: [FxCheckpointField], saved: FxCheckpointIdentity, current: FxCheckpointIdentity)
     case deliveryDeadline(sessionID: String, epoch: Int64, cutoffs: Int)
+    case permissionRequested(sessionID: String, turnID: String, toolID: String)
+    case permissionResolved(sessionID: String, turnID: String, toolID: String, decision: FxPermissionDecision)
 }
 
 public struct FxJournalRestoration: Sendable, Equatable {

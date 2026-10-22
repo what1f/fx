@@ -148,8 +148,8 @@
     {
       "upstream": "sdk/tests/test-core-output.mjs",
       "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "reason": "Permission cancellation assertions execute through Swift; the loader adds required typed tool metadata. The framing section still executes JavaScript CoreOutput and does not qualify Swift framing.",
+      "status": "partial: both permission callback cancellation phases pass through Swift; native framing equivalents and a permission initiated by the actual Zig runtime remain unqualified"
     },
     {
       "upstream": "sdk/tests/test-core.mjs",
@@ -185,7 +185,7 @@
       "upstream": "sdk/tests/test-durable.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "partial: nine unchanged session selections cover replay/cursors, isolation, completed-message deduplication, two-worker ordering, per-call tool context, model/instruction overrides, cancellation versus dropped views, image bytes and explicit JavaScript idempotency declarations; five checkpoint, seven steering and five delivery selections also pass; generic external durability and remaining scenarios pending"
+      "status": "partial: nine unchanged session selections cover replay/cursors, isolation, completed-message deduplication, two-worker ordering, per-call tool context, model/instruction overrides, cancellation versus dropped views, image bytes and explicit JavaScript idempotency declarations; five checkpoint, seven steering and five delivery selections also pass; generic external durability and remaining scenarios pending; latest combined run failed queued-turn cancellation once; 100 normal reruns and twenty Address Sanitizer reruns pass without explaining the failure, so cancellation qualification remains open"
     },
     {
       "upstream": "sdk/tests/test-grok-sign-in.mjs",

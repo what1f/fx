@@ -405,8 +405,8 @@ actor Driver: FxHTTPClient, FxPersistence {
                     DriverOutput.emit(.object(["observationError": .string(String(describing: error))]))
                 }
             }
-            config.onLifecycleEvent = { event in
-                DriverOutput.emit(.object(["diagnostic": encodeLifecycleEvent(event)]))
+            config.onLifecycleEvent = { [weak self] event in
+                await self?.observeLifecycleEvent(event)
             }
             config.onTransportEvent = { [weak self] event in
                 if case .retrying = event { await self?.observeRetry(event) }
@@ -1003,6 +1003,21 @@ actor Driver: FxHTTPClient, FxPersistence {
     }
 
     private func finishRetryObservation(_ token: String) { retryObservers.removeValue(forKey: token)?.resume() }
+
+    private func observeLifecycleEvent(_ event: FxLifecycleEvent) async {
+        switch event {
+        case .permissionRequested, .permissionResolved:
+            let token = UUID().uuidString
+            await withTaskCancellationHandler {
+                guard !Task.isCancelled else { return }
+                await withCheckedContinuation { continuation in
+                    retryObservers[token] = continuation
+                    DriverOutput.emit(.object(["diagnostic": encodeLifecycleEvent(event), "diagnosticToken": .string(token)]))
+                }
+            } onCancel: { Task { await self.finishRetryObservation(token) } }
+        default: DriverOutput.emit(.object(["diagnostic": encodeLifecycleEvent(event)]))
+        }
+    }
 
     // Keep an export pending until its receiving JS event loop has observed it.
     // This preserves call ordering while synchronous Swift admission runs there.

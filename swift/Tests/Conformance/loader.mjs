@@ -15,7 +15,7 @@ export async function resolve(specifier, context, nextResolve) {
   if (context.parentURL?.includes('/sdk/tests/') && (['../node.js', '../skills.js', '../skills-node.js', '../mcp.js'].includes(specifier) ||
       specifier === '../browser.js' && context.parentURL.endsWith('/test-list-models.mjs') ||
       ['../fx-sdk.js', '../tool-observation.js'].includes(specifier) && context.parentURL.endsWith('/test-hooks.mjs') ||
-      specifier === '../fx-sdk.js' && ['/test-agent-images.mjs', '/test-instruction-limits.mjs'].some(path => context.parentURL.endsWith(path)))) {
+      specifier === '../fx-sdk.js' && ['/test-agent-images.mjs', '/test-instruction-limits.mjs', '/test-core-output.mjs'].some(path => context.parentURL.endsWith(path)))) {
     return { url: adapter, shortCircuit: true };
   }
   return nextResolve(specifier, context);
@@ -23,6 +23,13 @@ export async function resolve(specifier, context, nextResolve) {
 
 export async function load(url, context, nextLoad) {
   const result = await nextLoad(url, context);
+  if (url.endsWith('/sdk/tests/test-core-output.mjs')) {
+    const source = result.source.toString();
+    const marker = '{ sessionId: "session", options: [] }';
+    if (source.split(marker).length !== 2) throw new Error('Upstream permission fixture changed; review typed tool metadata');
+    return { ...result, source: source.replace(marker,
+      '{ sessionId: "session", options: [], toolCall: { toolCallId: "fixture-permission", name: "fixture", title: "Permission", kind: "other" } }') };
+  }
   if (url.endsWith('/sdk/tests/test-instruction-limits.mjs')) {
     const source = result.source.toString();
     const marker = 'console.log(`${backend} instruction limits passed`);';

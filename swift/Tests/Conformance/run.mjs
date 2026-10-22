@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const checks = [
+  { name: 'upstream/test-core-output-control', expected: 'core output framing passed:', args: [
+    '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-core-output.mjs',
+  ] },
   { name: 'upstream/test-durable-provider-crash', expected: 'Node native durable provider crash passed', args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable-provider-crash.mjs', 'native',
   ] },

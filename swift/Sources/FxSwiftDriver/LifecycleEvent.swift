@@ -34,6 +34,14 @@ func encodeLifecycleEvent(_ event: FxLifecycleEvent) -> JSONValue {
         fields["sessionId"] = .string(sessionID)
         fields["epoch"] = .number(Double(epoch))
         fields["cutoffs"] = .number(Double(cutoffs))
+    case .permissionRequested(let sessionID, let turnID, let toolID):
+        fields["type"] = .string("permission.request")
+        fields["sessionId"] = .string(sessionID); fields["turnId"] = .string(turnID); fields["toolCallId"] = .string(toolID)
+    case .permissionResolved(let sessionID, let turnID, let toolID, let decision):
+        fields["type"] = .string("permission.resolve")
+        fields["sessionId"] = .string(sessionID); fields["turnId"] = .string(turnID); fields["toolCallId"] = .string(toolID)
+        if case .select(let id) = decision { fields["optionId"] = .string(id) }
+        else { fields["optionId"] = .null }
     }
     return .object(fields)
 }

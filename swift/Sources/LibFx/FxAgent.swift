@@ -175,6 +175,19 @@ public actor FxAgent {
         var config = configured(for: input.options)
         config.checkpointAfterBytes = checkpointAfterBytes
         let store = self.store
+        config.validatePermission = { try await store.checkLease(lease) }
+        if let onLifecycleEvent = configuration.onLifecycleEvent {
+            let publicTurnID = input.id
+            config.onLifecycleEvent = { event in
+                switch event {
+                case .permissionRequested(_, _, let toolID):
+                    await onLifecycleEvent(.permissionRequested(sessionID: lease.sessionID, turnID: publicTurnID, toolID: toolID))
+                case .permissionResolved(_, _, let toolID, let decision):
+                    await onLifecycleEvent(.permissionResolved(sessionID: lease.sessionID, turnID: publicTurnID, toolID: toolID, decision: decision))
+                default: await onLifecycleEvent(event)
+                }
+            }
+        }
         if let onPermission = configuration.onPermission {
             config.onPermission = { request in
                 try await store.checkLease(lease)
@@ -242,7 +255,7 @@ public actor FxAgent {
                         }
                         if let stop = deadlines?.stop, ContinuousClock.now >= stop {
                             let cutoffs = try await store.cutOffDelivery(lease, id: input.id)
-                            self.configuration.onLifecycleEvent?(.deliveryDeadline(sessionID: lease.sessionID, epoch: Int64(lease.epoch), cutoffs: cutoffs))
+                            await self.configuration.onLifecycleEvent?(.deliveryDeadline(sessionID: lease.sessionID, epoch: Int64(lease.epoch), cutoffs: cutoffs))
                             self.configuration.observation?.deliver(FxObservation(journal: .sessionDeadline, sessionID: lease.sessionID,
                                 data: .object(["epoch": .number(Double(lease.epoch)), "cutoffs": .number(Double(cutoffs))])))
                             try await turn.handoff()

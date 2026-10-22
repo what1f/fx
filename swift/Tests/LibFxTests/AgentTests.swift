@@ -123,6 +123,23 @@ private actor SessionStreamingHTTP: FxHTTPClient {
         try await store.close()
     }
 
+    @Test func sessionCancellationLeavesQueuedTurnsRunnable() async throws {
+        for _ in 0..<20 {
+            let http = SessionHTTP(blocked: true), store = try FxSessionStore()
+            let agent = try FxAgent(configuration: config(http), store: store)
+            let session = try await agent.session(id: "cancel-then-continue")
+            let first = try await session.prompt("first", id: "one")
+            await http.waitForRequest()
+            let second = try await session.prompt("second", id: "two")
+            try await session.cancel()
+            await http.release()
+            #expect(try await first.result.stopReason == .cancelled)
+            #expect(try await second.result.stopReason == .endTurn)
+            try await agent.close()
+            try await store.close()
+        }
+    }
+
     @Test func competingAgentsDrainOneInboxAndReopenDeduplicatesHistory() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

@@ -18,14 +18,14 @@ struct CheckpointMetadata: Sendable {
         value = .object(fields)
     }
 
-    func compare(_ saved: JSONValue?, sessionID: String, observation: FxObservationOptions?, onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)? = nil) {
+    func compare(_ saved: JSONValue?, sessionID: String, observation: FxObservationOptions?, onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil) async {
         guard let saved else { return }
         let changed = ["libfxVersion", "toolSchemaHash", "model"].filter { key in
             guard let text = saved[key]?.string, !text.isEmpty else { return false }
             return saved[key] != value[key]
         }
         guard !changed.isEmpty else { return }
-        onLifecycleEvent?(.checkpointMismatch(sessionID: sessionID,
+        await onLifecycleEvent?(.checkpointMismatch(sessionID: sessionID,
             fields: changed.compactMap(FxCheckpointField.init(rawValue:)), saved: FxCheckpointIdentity(saved), current: FxCheckpointIdentity(value)))
         observation?.deliver(FxObservation(journal: .checkpointMismatch, sessionID: sessionID, data: .object([
             "changed": .array(changed.map(JSONValue.string)), "saved": saved, "current": value,
