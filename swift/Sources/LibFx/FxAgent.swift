@@ -15,6 +15,7 @@ public actor FxAgent {
     private var deliveries: [String: AsyncResult<FxDeliveryOutcome>] = [:]
     private typealias Deadlines = (yield: Date, stop: ContinuousClock.Instant?)
     private var workers: [String: Task<Void, Never>] = [:]
+    private var pendingKicks: Set<String> = []
     private var cleanups: [UUID: Task<Void, Never>] = [:]
     private var cleanupFailure: (any Error)?
     private struct ActiveHarness {
@@ -329,7 +330,8 @@ public actor FxAgent {
     }
 
     private func kick(_ session: String) {
-        guard workers[session] == nil else { return }
+        guard !closed else { return }
+        guard workers[session] == nil else { pendingKicks.insert(session); return }
         failures[session] = nil
         workers[session] = Task { _ = await self.run(session) }
     }
@@ -345,14 +347,18 @@ public actor FxAgent {
             failures[session] = cause
             result = .failure(cause)
         }
-        workers[session] = nil
-        deliveries.removeValue(forKey: session)
-        // Local intake can interleave with the final empty-inbox read. External
-        // intake publishes its own wakeup and never starts another delivery here.
-        if !external, failures[session] == nil {
-            do { if try await store.hasWork(session: session, agent: name) { kick(session) } }
+        // Keep the worker registered through its last storage read so close()
+        // joins it. Intake during that read records a wake even if the read's
+        // snapshot does not yet contain the newly accepted input.
+        var hasWork = false
+        if !external, !closed, failures[session] == nil {
+            do { hasWork = try await store.hasWork(session: session, agent: name) }
             catch { failures[session] = error }
         }
+        let kicked = pendingKicks.remove(session) != nil
+        workers[session] = nil
+        deliveries.removeValue(forKey: session)
+        if !external, failures[session] == nil, hasWork || kicked { kick(session) }
         return result
     }
 

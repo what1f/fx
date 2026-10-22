@@ -14,15 +14,20 @@ actor SessionStorageProxy: FxSessionStorage {
     private let afterClaim: (@Sendable (FxSessionLease?) async throws -> Void)?
     private let afterLeaseCheck: (@Sendable (FxSessionLease) async throws -> Void)?
     private let beforeCancellationRead: (@Sendable () async throws -> Void)?
+    private let beforeWorkRead: (@Sendable () async throws -> Void)?
+    private let afterWorkRead: (@Sendable (Bool) async throws -> Void)?
     init(_ base: FxSessionStore, beforeJournalAppend: (@Sendable (Data, Bool) async throws -> Void)? = nil,
          beforeLeaseRenewal: (@Sendable () async throws -> Void)? = nil,
          afterClaim: (@Sendable (FxSessionLease?) async throws -> Void)? = nil,
          afterLeaseCheck: (@Sendable (FxSessionLease) async throws -> Void)? = nil,
-         beforeCancellationRead: (@Sendable () async throws -> Void)? = nil) {
+         beforeCancellationRead: (@Sendable () async throws -> Void)? = nil,
+         beforeWorkRead: (@Sendable () async throws -> Void)? = nil,
+         afterWorkRead: (@Sendable (Bool) async throws -> Void)? = nil) {
         self.base = base; self.beforeJournalAppend = beforeJournalAppend
         self.beforeLeaseRenewal = beforeLeaseRenewal
         self.afterClaim = afterClaim; self.afterLeaseCheck = afterLeaseCheck
         self.beforeCancellationRead = beforeCancellationRead
+        self.beforeWorkRead = beforeWorkRead; self.afterWorkRead = afterWorkRead
     }
     func failNext(_ operation: String, with error: any Error, after successfulCalls: Int = 0, count: Int = 1) {
         failure = (operation, error, successfulCalls, count)
@@ -52,7 +57,10 @@ actor SessionStorageProxy: FxSessionStorage {
     }
     func hasWork(session: String, agent: String) async throws -> Bool {
         try before("hasWork")
-        return try await base.hasWork(session: session, agent: agent)
+        try await beforeWorkRead?()
+        let result = try await base.hasWork(session: session, agent: agent)
+        try await afterWorkRead?(result)
+        return result
     }
     func claim(session: String, agent: String) async throws -> FxSessionLease? {
         try before("claim")

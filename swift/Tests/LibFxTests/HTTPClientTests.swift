@@ -29,7 +29,10 @@ private final class ScriptedURLProtocol: URLProtocol, @unchecked Sendable {
         }
         let response = HTTPURLResponse(url: url, statusCode: 503, httpVersion: nil, headerFields: [:])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        let data = url.path == "/large" ? Data(repeating: 65, count: 128 * 1024) : Data("data: 你好\n\n".utf8)
+        let data: Data
+        if url.path == "/burst" { data = Data(String(repeating: "data: {\"text\":\"hi\"}\n\n", count: 1000).utf8) }
+        else if url.path == "/large" { data = Data(repeating: 65, count: 128 * 1024) }
+        else { data = Data("data: 你好\n\n".utf8) }
         client?.urlProtocol(self, didLoad: data)
         if url.path == "/stalled" { Self.stalledStarted.set() }
         else { client?.urlProtocolDidFinishLoading(self) }
@@ -70,6 +73,30 @@ private func session() -> URLSession {
         count += chunk.count
     }
     #expect(count == 128 * 1024)
+}
+
+@Test func httpClientPreservesBurstWhileConsumerIsPaused() async throws {
+    let session = session()
+    defer { session.invalidateAndCancel() }
+    let response = try await FxURLSessionHTTPClient(session: session).send(
+        URLRequest(url: URL(string: "https://example.invalid/burst")!))
+    defer { response.cancel() }
+    try await Task.sleep(for: .milliseconds(200))
+    var body = Data()
+    for try await chunk in response.body { body.append(chunk) }
+    #expect(body == Data(String(repeating: "data: {\"text\":\"hi\"}\n\n", count: 1000).utf8))
+}
+
+@Test func httpClientCancellationBeforeConsumptionStopsBody() async throws {
+    let session = session()
+    defer { session.invalidateAndCancel() }
+    let response = try await FxURLSessionHTTPClient(session: session).send(
+        URLRequest(url: URL(string: "https://example.invalid/burst")!))
+    response.cancel()
+    await #expect(throws: CancellationError.self) {
+        var iterator = response.body.makeAsyncIterator()
+        _ = try await iterator.next()
+    }
 }
 
 @Test func httpClientRejectsNonHTTPResponse() async throws {

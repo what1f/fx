@@ -1,5 +1,9 @@
 import Foundation
 
+private enum ToolTaskContext {
+    @TaskLocal static var current: UUID?
+}
+
 /// One conversation backed by the native fx core. Call close when the conversation ends.
 public actor FxEngine {
     public nonisolated let sessionID: String
@@ -29,6 +33,7 @@ public actor FxEngine {
     private var publicTurnID: String?
     private var output: TurnOutput?
     private var toolTasks: [String: Task<Void, Never>] = [:]
+    private var ownedToolTasks: [UUID: Task<Void, Never>] = [:]
     private var toolObservations: [String: FxToolObservation] = [:]
     private var toolNames: [String: String] = [:]
     private var closed = false
@@ -633,24 +638,30 @@ public actor FxEngine {
             let context = FxToolContext(executionID: callID, sessionID: sessionID, turnID: publicTurnID,
                                         observation: toolObservations[callID])
             let tool = tools[name]
-            toolTasks[callID] = Task { [weak self, rpc] in
-                guard let self, await self.isActive(expectedTurn) else { return }
-                let response: JSONValue
-                do {
-                    try await self.journal?.checkFailure()
-                    try Task.checkCancellation()
-                    guard let tool else { throw FxError.invalidInput("Unknown tool") }
-                    let value = try await tool.execute(params["input"] ?? .null, context)
-                    try Task.checkCancellation()
-                    response = try await PersistedImages.tool(value, name: name, store: self.imagePersistence)
-                } catch {
-                    let message = (error as? any LocalizedError)?.errorDescription ?? String(describing: error)
-                    response = .object(["content": .string(message.isEmpty ? "Tool \(name) failed without a message" : message), "isError": .bool(true)])
+            let token = UUID()
+            let task = Task { [weak self, rpc] in
+                await ToolTaskContext.$current.withValue(token) {
+                    guard let self, await self.isActive(expectedTurn) else { return }
+                    let response: JSONValue
+                    do {
+                        try await self.journal?.checkFailure()
+                        try Task.checkCancellation()
+                        guard let tool else { throw FxError.invalidInput("Unknown tool") }
+                        let value = try await tool.execute(params["input"] ?? .null, context)
+                        try Task.checkCancellation()
+                        response = try await PersistedImages.tool(value, name: name, store: self.imagePersistence)
+                    } catch {
+                        let message = (error as? any LocalizedError)?.errorDescription ?? String(describing: error)
+                        response = .object(["content": .string(message.isEmpty ? "Tool \(name) failed without a message" : message), "isError": .bool(true)])
+                    }
+                    guard !Task.isCancelled, await self.isActive(expectedTurn) else { return }
+                    try? await rpc.respondToTool(id: requestID, result: response)
+                    await self.removeTool(callID, turn: expectedTurn)
                 }
-                guard !Task.isCancelled, await self.isActive(expectedTurn) else { return }
-                try? await rpc.respondToTool(id: requestID, result: response)
-                await self.removeTool(callID, turn: expectedTurn)
+                await self?.releaseToolTask(token)
             }
+            toolTasks[callID] = task
+            ownedToolTasks[token] = task
         } else if message.method == "session/request_permission", let id = message.id {
             let expectedTurn = turnID
             await permissions.handle(id: id, params: message.params, turnID: publicTurnID, scope: expectedTurn) { [weak self] in
@@ -721,6 +732,8 @@ public actor FxEngine {
             return isActive(id)
         } catch { return false }
     }
+
+    private func releaseToolTask(_ token: UUID) { ownedToolTasks.removeValue(forKey: token) }
 
     private func removeTool(_ id: String, turn: UUID?) {
         guard turnID == turn else { return }
@@ -964,29 +977,38 @@ public actor FxEngine {
     }
 
     public func close() async throws {
-        if let closingTask { try await closingTask.value; return }
-        closed = true
-        for waiter in checkpointWaiters { waiter.continuation.resume(throwing: FxError.closed) }
-        checkpointWaiters.removeAll()
-        let preparation = imagePreparation
-        failFollowUps(FxError.closed)
-        if let turnID {
-            let failure = journalFailure ?? terminalFailure ?? (failedPrompt?.id == turnID ? failedPrompt?.error : nil) ?? FxError.closed
-            await output?.finish(throwing: failure, discarding: true)
-            await finish(turn: turnID, error: failure)
+        if closingTask == nil {
+            closed = true
+            for waiter in checkpointWaiters { waiter.continuation.resume(throwing: FxError.closed) }
+            checkpointWaiters.removeAll()
+            let preparation = imagePreparation
+            let checkpointSave = checkpointSaveTask
+            let cancellation = cancellationTask
+            failFollowUps(FxError.closed)
+            // Publish the shared teardown task before its first suspension.
+            closingTask = Task {
+                if let turnID {
+                    let failure = journalFailure ?? terminalFailure ?? (failedPrompt?.id == turnID ? failedPrompt?.error : nil) ?? FxError.closed
+                    await output?.finish(throwing: failure, discarding: true)
+                    await finish(turn: turnID, error: failure)
+                }
+                let saved = await checkpointSave?.result
+                _ = await preparation?.result
+                await permissions.cancelAll()
+                await rpc.close()
+                await cancellation?.value
+                try await journal?.check()
+                try saved?.get()
+            }
         }
-        let checkpointSave = checkpointSaveTask
-        let cancellation = cancellationTask
-        let task = Task {
-            let saved = await checkpointSave?.result
-            _ = await preparation?.result
-            await permissions.cancelAll()
-            await rpc.close()
-            await cancellation?.value
-            try await journal?.check()
-            try saved?.get()
+        let result = await closingTask!.result
+        // A tool can request shutdown, but cannot join itself (or another tool
+        // also requesting shutdown). External callers still join every callback.
+        if ToolTaskContext.current.flatMap({ ownedToolTasks[$0] }) == nil {
+            while !ownedToolTasks.isEmpty {
+                for task in Array(ownedToolTasks.values) { await task.value }
+            }
         }
-        closingTask = task
-        try await task.value
+        try result.get()
     }
 }

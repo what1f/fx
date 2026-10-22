@@ -49,50 +49,69 @@ public struct FxURLSessionHTTPClient: FxHTTPClient {
             bytes.task.cancel()
             throw FxError.transport("Invalid HTTP response")
         }
-        let (body, continuation) = AsyncThrowingStream<Data, any Error>.makeStream(
-            bufferingPolicy: .bufferingOldest(256)
-        )
-        let producer = Task {
-            do {
-                try Task.checkCancellation()
-                var chunk = Data()
-                for try await byte in bytes {
-                    chunk.append(byte)
-                    // Forward SSE lines promptly, while bounding an individual chunk.
-                    if byte == 10 || chunk.count == 16 * 1024 {
-                        try Self.yield(chunk, to: continuation)
-                        chunk.removeAll(keepingCapacity: true)
-                    }
-                }
-                if !chunk.isEmpty { try Self.yield(chunk, to: continuation) }
-                continuation.finish()
-            } catch {
-                bytes.task.cancel()
-                continuation.finish(throwing: error)
-            }
-        }
-        let cancel: @Sendable () -> Void = {
-            producer.cancel()
-            bytes.task.cancel()
-        }
-        continuation.onTermination = { _ in cancel() }
+        let reader = HTTPBodyReader(bytes)
+        let body = AsyncThrowingStream<Data, any Error>(unfolding: { try await reader.next() })
         let headers = response.allHeaderFields.reduce(into: [String: String]()) { fields, entry in
             fields[String(describing: entry.key)] = String(describing: entry.value)
         }
-        return FxHTTPResponse(statusCode: response.statusCode, headers: headers, body: body, cancel: cancel)
+        return FxHTTPResponse(statusCode: response.statusCode, headers: headers, body: body, cancel: { reader.cancel() })
+    }
+}
+
+// Pull directly from Foundation when the consumer asks for another chunk. The
+// iterator leaves the lock during an await; no producer reads ahead of demand.
+private final class HTTPBodyReader: @unchecked Sendable {
+    private let lock = NSLock()
+    private let task: URLSessionTask
+    private var iterator: URLSession.AsyncBytes.Iterator?
+    private var ended = false
+    private var cancelled = false
+
+    init(_ bytes: URLSession.AsyncBytes) {
+        task = bytes.task
+        iterator = bytes.makeAsyncIterator()
     }
 
-    private static func yield(
-        _ data: Data,
-        to continuation: AsyncThrowingStream<Data, any Error>.Continuation
-    ) throws {
-        try Task.checkCancellation()
-        switch continuation.yield(data) {
-        case .enqueued: return
-        case .dropped: throw FxError.outputOverflow
-        case .terminated: throw CancellationError()
-        @unknown default: throw FxError.outputOverflow
-        }
+    deinit { task.cancel() }
+
+    func cancel() {
+        lock.withLock { cancelled = true; iterator = nil }
+        task.cancel()
+    }
+
+    func next() async throws -> Data? {
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            let current = try lock.withLock { () throws -> URLSession.AsyncBytes.Iterator? in
+                guard !cancelled else { throw CancellationError() }
+                if ended { return nil }
+                guard let current = iterator else { throw FxError.protocolViolation("HTTP body already has a reader") }
+                iterator = nil
+                return current
+            }
+            guard var current else { return nil }
+            defer { lock.withLock { if !cancelled && !ended { iterator = current } } }
+            do {
+                var chunk = Data()
+                while let byte = try await current.next() {
+                    try Task.checkCancellation()
+                    chunk.append(byte)
+                    if byte == 10 || chunk.count == 16 * 1024 {
+                        try lock.withLock { if cancelled { throw CancellationError() } }
+                        return chunk
+                    }
+                }
+                try Task.checkCancellation()
+                try lock.withLock {
+                    guard !cancelled else { throw CancellationError() }
+                    ended = true
+                }
+                return chunk.isEmpty ? nil : chunk
+            } catch {
+                cancel()
+                throw error
+            }
+        } onCancel: { self.cancel() }
     }
 }
 
