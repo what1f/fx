@@ -11,6 +11,7 @@ public actor FxAgent {
     private let openingRetryPolicy: FxOpeningRetryPolicy?
     private let deliveryPolicy: FxDeliveryPolicy?
     private let queue: (any FxSessionQueue)?
+    private let queueAuthority: FxQueueDeliveryAuthority?
     private var deliveries: [String: AsyncResult<FxDeliveryOutcome>] = [:]
     private typealias Deadlines = (yield: Date, stop: ContinuousClock.Instant?)
     private var workers: [String: Task<Void, Never>] = [:]
@@ -43,11 +44,11 @@ public actor FxAgent {
         return try await router.agent(named: owner)
     }
 
-    public init(configuration: FxConfiguration, name: String = "default", store: any FxSessionStorage, checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024, deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil) throws {
+    public init(configuration: FxConfiguration, name: String = "default", store: any FxSessionStorage, checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024, deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil, queueAuthority: FxQueueDeliveryAuthority? = nil) throws {
         try configuration.validateInstructions()
         try self.init(harness: KernelSessionHarness(configuration: configuration), name: name, store: store,
                   checkpoint: checkpoint, checkpointAfterBytes: checkpointAfterBytes,
-                  deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy, queue: queue, onLifecycleEvent: { event in
+                  deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy, queue: queue, queueAuthority: queueAuthority, onLifecycleEvent: { event in
             await configuration.onLifecycleEvent?(event)
             if case .deliveryDeadline(let sessionID, let epoch, let cutoffs) = event {
                 configuration.observation?.deliver(FxObservation(journal: .sessionDeadline, sessionID: sessionID,
@@ -59,10 +60,17 @@ public actor FxAgent {
     public init(harness: any FxSessionHarness, name: String = "default", store: any FxSessionStorage,
                 checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024,
                 deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil,
+                queueAuthority: FxQueueDeliveryAuthority? = nil,
                 onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil) throws {
         guard validSessionIdentifier(name), name.utf8.count <= 64,
               let first = name.utf8.first, (48...57).contains(first) || (65...90).contains(first) || (97...122).contains(first) else { throw FxError.invalidInput("Invalid agent name") }
         if let checkpointAfterBytes, checkpointAfterBytes < 0 { throw FxError.invalidInput("Checkpoint interval must not be negative") }
+        if let queueAuthority {
+            guard queue != nil, let queueStore = store as? any FxQueueSessionStorage,
+                  queueStore.queueSource == queueAuthority.source, queueStore.leasePolicy != nil else {
+                throw FxQueueDeliveryError.unsupportedStorage
+            }
+        }
         self.harness = harness
         self.onLifecycleEvent = onLifecycleEvent
         self.initialCheckpoint = checkpoint
@@ -70,6 +78,7 @@ public actor FxAgent {
         self.openingRetryPolicy = openingRetryPolicy
         self.deliveryPolicy = deliveryPolicy
         self.queue = queue
+        self.queueAuthority = queueAuthority
         self.name = name
         self.store = store
     }
@@ -273,6 +282,26 @@ public actor FxAgent {
     /// Runs one queue delivery. A retry result or thrown error must not acknowledge the message.
     /// Cancelling this waiter leaves durable work running; close() waits for active deliveries.
     public func deliver(_ wakeup: FxSessionWakeup, policy: FxDeliveryPolicy? = nil) async throws -> FxDeliveryOutcome {
+        try await startDelivery(wakeup, policy: policy, claim: nil)
+    }
+
+    /// Authenticated callback metadata is separate from the Codable wakeup.
+    /// The configured authority verifies it before storage can replace an owner.
+    public func deliver(_ wakeup: FxSessionWakeup, context: FxQueueDeliveryContext,
+                        policy: FxDeliveryPolicy? = nil) async throws -> FxDeliveryOutcome {
+        guard !closed else { throw FxError.closed }
+        guard let queueAuthority else { throw FxQueueDeliveryError.missingAuthority }
+        guard wakeup.agent == name else { throw FxSessionError.wrongAgent }
+        guard validSessionIdentifier(wakeup.sessionID), let inputID = wakeup.inputID,
+              validSessionIdentifier(inputID) else { throw FxQueueDeliveryError.invalidContext }
+        let claim = try await queueAuthority.prepare(context, for: wakeup)
+        return try await startDelivery(wakeup, policy: policy, claim: claim)
+    }
+
+    private func startDelivery(_ wakeup: FxSessionWakeup, policy: FxDeliveryPolicy?,
+                               claim: FxQueueClaim?) async throws -> FxDeliveryOutcome {
+        var started = false
+        defer { if !started { claim?.finish() } }
         guard !closed else { throw FxError.closed }
         guard queue != nil else { throw FxError.invalidInput("Agent has no delivery queue") }
         guard wakeup.agent == name else { throw FxSessionError.wrongAgent }
@@ -285,9 +314,10 @@ public actor FxAgent {
         failures[session] = nil
         let deadlines = (policy ?? deliveryPolicy)?.deadlines()
         workers[session] = Task {
-            let result = await self.run(session, external: true, deadlines: deadlines)
+            let result = await self.run(session, external: true, deadlines: deadlines, queueClaim: claim)
             await completion.resolve(result)
         }
+        started = true
         return try await completion.wait()
     }
 
@@ -297,10 +327,12 @@ public actor FxAgent {
         workers[session] = Task { _ = await self.run(session) }
     }
 
-    private func run(_ session: String, external: Bool = false, deadlines: Deadlines? = nil) async -> Result<FxDeliveryOutcome, any Error> {
+    private func run(_ session: String, external: Bool = false, deadlines: Deadlines? = nil,
+                     queueClaim: FxQueueClaim? = nil) async -> Result<FxDeliveryOutcome, any Error> {
+        defer { queueClaim?.finish() }
         let result: Result<FxDeliveryOutcome, any Error>
         do {
-            result = .success(try await drain(session, external: external, deadlines: deadlines))
+            result = .success(try await drain(session, external: external, deadlines: deadlines, queueClaim: queueClaim))
         } catch {
             let cause = (error as? SessionStorageFailure)?.cause ?? error
             failures[session] = cause
@@ -317,7 +349,7 @@ public actor FxAgent {
         return result
     }
 
-    private func drain(_ session: String, external: Bool, deadlines: Deadlines?) async throws -> FxDeliveryOutcome {
+    private func drain(_ session: String, external: Bool, deadlines: Deadlines?, queueClaim: FxQueueClaim?) async throws -> FxDeliveryOutcome {
         var openingRetries: UInt = 0
         var openingDeadline = deadlines?.stop ?? deliveryPolicy.map { ContinuousClock.now.advanced(by: $0.maximumDuration) }
         while true {
@@ -327,7 +359,12 @@ public actor FxAgent {
             guard pending else { return .complete }
             if external, let stop = deadlines?.stop, ContinuousClock.now >= stop { return .retry(after: .zero) }
             let claimedAt = ContinuousClock.now
-            guard let lease = try await store.claim(session: session, agent: name) else {
+            let claimed: FxSessionLease?
+            if let queueClaim {
+                guard let queueStore = store as? any FxQueueSessionStorage else { throw FxQueueDeliveryError.unsupportedStorage }
+                claimed = try await queueStore.claim(session: session, agent: name, delivery: queueClaim)
+            } else { claimed = try await store.claim(session: session, agent: name) }
+            guard let lease = claimed else {
                 if external { return .retry(after: .seconds(1)) }
                 try await Task.sleep(for: .milliseconds(20))
                 continue
@@ -420,9 +457,11 @@ public actor FxAgent {
     }
 
     private func stopOwnership(_ lease: FxSessionLease) async {
-        guard let current = leaseGuards[lease.sessionID], current.lease == lease else { return }
-        leaseGuards[lease.sessionID] = nil
-        await current.guard.stop()
+        if let current = leaseGuards[lease.sessionID], current.lease == lease {
+            leaseGuards[lease.sessionID] = nil
+            await current.guard.stop()
+        }
+        if let queueStore = store as? any FxQueueSessionStorage { await queueStore.endExecution(lease) }
     }
 
     private func execute(_ input: FxSessionInput, lease: FxSessionLease, deadlines suppliedDeadlines: Deadlines? = nil, recoveringOnly: Bool = false, leaseGuard: SessionLeaseGuard? = nil) async throws -> Bool {

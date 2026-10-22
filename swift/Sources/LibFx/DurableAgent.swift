@@ -8,12 +8,12 @@ public struct FxDurableAgent<Input: Codable & Sendable, Update: Codable & Sendab
 
     public init<Harness: FxDurableHarness>(harness: Harness, name: String = "default", store: any FxSessionStorage,
         checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024,
-        deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil,
+        deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil, queueAuthority: FxQueueDeliveryAuthority? = nil,
         onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil
     ) throws where Harness.Input == Input, Harness.Update == Update {
         agent = try FxAgent(harness: DurableHarnessAdapter(harness: harness), name: name, store: store,
             checkpoint: checkpoint, checkpointAfterBytes: checkpointAfterBytes, deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy,
-            queue: queue, onLifecycleEvent: onLifecycleEvent)
+            queue: queue, queueAuthority: queueAuthority, onLifecycleEvent: onLifecycleEvent)
     }
 
     public func session(id: String = UUID().uuidString, options: FxSessionOptions = .init()) async throws -> FxDurableSession<Input, Update> {
@@ -22,6 +22,11 @@ public struct FxDurableAgent<Input: Codable & Sendable, Update: Codable & Sendab
     public func deliver(_ wakeup: FxSessionWakeup, policy: FxDeliveryPolicy? = nil) async throws -> FxDeliveryOutcome {
         try await agent.deliver(wakeup, policy: policy)
     }
+    public func deliver(_ wakeup: FxSessionWakeup, context: FxQueueDeliveryContext,
+                        policy: FxDeliveryPolicy? = nil) async throws -> FxDeliveryOutcome {
+        try await agent.deliver(wakeup, context: context, policy: policy)
+    }
+
     public func close() async throws { try await agent.close() }
 }
 

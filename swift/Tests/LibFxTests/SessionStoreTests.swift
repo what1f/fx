@@ -154,6 +154,10 @@ import CSQLite
         try connection.execute("ALTER TABLE fx_sessions DROP COLUMN recovery_input")
         try connection.execute("ALTER TABLE fx_sessions DROP COLUMN completed_turn")
         try connection.execute("ALTER TABLE fx_sessions DROP COLUMN lease_until")
+        for column in ["delivery_source", "delivery_message", "delivery_attempt", "delivery_invocation", "delivery_process"] {
+            try connection.execute("ALTER TABLE fx_sessions DROP COLUMN \(column)")
+        }
+        try connection.execute("DROP TABLE fx_queue_invocations")
         try connection.execute("DROP TABLE fx_agent_ownership")
         try connection.execute("UPDATE fx_agent_schema SET version=1")
         try connection.close()

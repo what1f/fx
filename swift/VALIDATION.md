@@ -474,3 +474,10 @@ The fixed-archive compatibility rerun passes all 104 selected entries, including
 The current compatibility run passes all 105 selected entries with no stderr or signals. The added unchanged `test-native-core.mjs` owner qualifies initialization, checkpoint, close and diagnostics. Its adapter derives JavaScript's `runtime.ready` diagnostic from Swift's first observed wire send after native transport startup. Swift retains async open completion without adding a duplicate readiness callback.
 
 The optional PostgreSQL experiment is preserved on `experiment/libfx-postgres`. It is excluded from the migration branch's sources, products and dependencies. Its database tests are not counted as original libfx migration acceptance. After removal, the complete SDK run still passes all 376 test functions (365 LibFx and 11 MCP).
+
+
+## Authenticated queue ownership
+
+`FxQueueDeliveryAuthority` verifies host callback metadata separately from the Codable wakeup. Queue-aware SQLite stores opt in with a fixed `queueSource` and a timed lease. A verified redelivery can replace its prior unexpired owner; ordinary deliveries retain TTL rules. Equal-attempt replacement requires explicit provider support. A known live execution in this process cannot be replaced. Invocation records reject superseded grants, and every lease-scoped mutation retains epoch fencing.
+
+Local backend checks pass 25 test functions normally and under Swift Thread Sanitizer, including nine queue-ownership functions (ten parameter cases), migration, failed SQL release, and competing SQLite connections. The Agent/HTTP regression selection passes 47 functions: 33 core and 14 HTTP. Three new HTTP functions exercise verified delivery through the actual native engine, metadata binding, one-use contexts, and unsupported-storage rejection. These results do not yet qualify process death recovery or a deployed provider callback.

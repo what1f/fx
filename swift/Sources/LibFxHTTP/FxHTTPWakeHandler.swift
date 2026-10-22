@@ -55,7 +55,8 @@ public struct FxHTTPWakeHandler: Sendable {
 
     /// Mount this operation in the application's existing HTTP server.
     /// The host must limit body collection to 16 KiB before calling this method.
-    public func handle(_ request: HTTPRequest, body: Data) async throws -> FxHTTPWakeResponse {
+    public func handle(_ request: HTTPRequest, body: Data,
+                       context: FxQueueDeliveryContext? = nil) async throws -> FxHTTPWakeResponse {
         try Task.checkCancellation()
         guard request.method == .post else {
             var response = HTTPResponse(status: .methodNotAllowed)
@@ -81,7 +82,7 @@ public struct FxHTTPWakeHandler: Sendable {
         do {
             let outcome = try await router.deliverAccepted(
                 FxSessionWakeup(agent: message.agent, sessionID: message.sessionID),
-                inputID: message.inputID, policy: policy)
+                inputID: message.inputID, policy: policy, context: context)
             try Task.checkCancellation()
             switch outcome {
             case .complete:

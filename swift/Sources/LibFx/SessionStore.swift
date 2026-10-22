@@ -8,9 +8,10 @@ import Glibc
 #endif
 
 /// Durable intake, event history, and core journals. A nil URL keeps all data in memory.
-public actor FxSessionStore: FxRenewableSessionStorage {
+public actor FxSessionStore: FxQueueSessionStorage {
     let database: SQLiteDatabase
     public nonisolated let leasePolicy: FxSessionLeasePolicy?
+    public nonisolated let queueSource: String?
     private let leaseNow: @Sendable () -> Date
     private let lockDirectory: URL?
     private struct HeldLease { let lease: FxSessionLease; let descriptor: Int32? }
@@ -19,11 +20,15 @@ public actor FxSessionStore: FxRenewableSessionStorage {
     /// Timed ownership is opt-in and fixed when a database is created.
     /// Its backend clock is the shared host's wall clock; the agent uses a
     /// separate monotonic clock to stop local authority conservatively.
-    public init(url: URL? = nil, leasePolicy: FxSessionLeasePolicy? = nil) throws {
-        try self.init(url: url, leasePolicy: leasePolicy, leaseNow: { Date() })
+    public init(url: URL? = nil, leasePolicy: FxSessionLeasePolicy? = nil, queueSource: String? = nil) throws {
+        try self.init(url: url, leasePolicy: leasePolicy, queueSource: queueSource, leaseNow: { Date() })
     }
 
-    init(url: URL? = nil, leasePolicy: FxSessionLeasePolicy?, leaseNow: @escaping @Sendable () -> Date) throws {
+    init(url: URL? = nil, leasePolicy: FxSessionLeasePolicy?, queueSource: String? = nil, leaseNow: @escaping @Sendable () -> Date) throws {
+        if let queueSource {
+            guard leasePolicy != nil, !queueSource.isEmpty, queueSource.utf8.count <= 256,
+                  !queueSource.utf8.contains(0) else { throw FxError.invalidInput("Queue ownership requires a timed lease and a valid source") }
+        }
         if let url {
             guard url.isFileURL, !url.path.isEmpty, !url.path.utf8.contains(0) else { throw FxSQLiteError.invalidURL }
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -46,7 +51,7 @@ public actor FxSessionStore: FxRenewableSessionStorage {
                 guard try database.step(statement) else { throw FxPersistenceError.invalidJournal }
                 return Int(sqlite3_column_int(statement, 0))
             }
-            guard (1...6).contains(version) else { throw FxSQLiteError.unsupportedVersion(version) }
+            guard (1...7).contains(version) else { throw FxSQLiteError.unsupportedVersion(version) }
             try database.execute("CREATE TABLE IF NOT EXISTS fx_sessions (id TEXT PRIMARY KEY, agent TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0, owner TEXT, head INTEGER NOT NULL DEFAULT 0, checkpoint_cursor INTEGER, checkpoint BLOB)")
             try database.execute("CREATE TABLE IF NOT EXISTS fx_inputs (sequence INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, id TEXT NOT NULL, content BLOB NOT NULL, options BLOB NOT NULL, started INTEGER NOT NULL DEFAULT 0, cancelled INTEGER NOT NULL DEFAULT 0, result BLOB, UNIQUE(session,id))")
             try database.execute("CREATE TABLE IF NOT EXISTS fx_session_events (cursor INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, epoch INTEGER NOT NULL, data BLOB NOT NULL)")
@@ -85,8 +90,15 @@ public actor FxSessionStore: FxRenewableSessionStorage {
                 try database.execute("ALTER TABLE fx_sessions ADD COLUMN lease_until INTEGER")
                 try database.execute("UPDATE fx_agent_schema SET version=6 WHERE id=1")
             }
+            if version < 7 {
+                for column in ["delivery_source TEXT", "delivery_message TEXT", "delivery_attempt INTEGER", "delivery_invocation TEXT", "delivery_process TEXT"] {
+                    try database.execute("ALTER TABLE fx_sessions ADD COLUMN \(column)")
+                }
+                try database.execute("UPDATE fx_agent_schema SET version=7 WHERE id=1")
+            }
+            try database.execute("CREATE TABLE IF NOT EXISTS fx_queue_invocations (invocation TEXT PRIMARY KEY, session TEXT NOT NULL, source TEXT NOT NULL, message TEXT NOT NULL, attempt INTEGER NOT NULL, process TEXT NOT NULL)")
             try database.execute("CREATE TABLE IF NOT EXISTS fx_agent_ownership (id INTEGER PRIMARY KEY CHECK(id=1), mode TEXT NOT NULL)")
-            let requestedMode = leasePolicy == nil ? "process" : "timed"
+            let requestedMode = queueSource.map { "queue:\($0)" } ?? (leasePolicy == nil ? "process" : "timed")
             // Do not silently convert a database that existing processes may own.
             let initialMode = existingSchema && version < 6 ? "process" : requestedMode
             try database.execute("INSERT OR IGNORE INTO fx_agent_ownership VALUES (1,?)", [.text(initialMode)])
@@ -98,13 +110,17 @@ public actor FxSessionStore: FxRenewableSessionStorage {
         }
         self.database = database
         self.leasePolicy = leasePolicy
+        self.queueSource = queueSource
         self.leaseNow = leaseNow
         self.lockDirectory = leasePolicy == nil ? canonicalURL.map { URL(fileURLWithPath: $0.path + ".locks", isDirectory: true) } : nil
         if let lockDirectory { try FileManager.default.createDirectory(at: lockDirectory, withIntermediateDirectories: true) }
     }
 
     deinit {
-        for item in held.values { if let descriptor = item.descriptor { closeDescriptor(descriptor) } }
+        for item in held.values {
+            QueueDeliveryProcess.unmark(owner: item.lease.owner)
+            if let descriptor = item.descriptor { closeDescriptor(descriptor) }
+        }
     }
 
     public func close() throws {
@@ -203,10 +219,11 @@ public actor FxSessionStore: FxRenewableSessionStorage {
                 guard epoch < Int64.max else { throw FxPersistenceError.sizeLimit }
                 let lease = FxSessionLease(sessionID: session, owner: UUID().uuidString, epoch: epoch + 1)
                 let expiry: SQLiteDatabase.Value = try leasePolicy.map { .integer(try leaseExpiry(now, policy: $0)) } ?? .null
-                try database.execute("UPDATE fx_sessions SET epoch=?, owner=?, lease_until=? WHERE id=?", [.integer(lease.epoch), .text(lease.owner), expiry, .text(session)])
+                try database.execute("UPDATE fx_sessions SET epoch=?, owner=?, lease_until=?, delivery_source=NULL,delivery_message=NULL,delivery_attempt=NULL,delivery_invocation=NULL,delivery_process=NULL WHERE id=?", [.integer(lease.epoch), .text(lease.owner), expiry, .text(session)])
                 return lease
             }
             guard let lease else { if let descriptor { closeDescriptor(descriptor) }; return nil }
+            if let previous = held[session] { QueueDeliveryProcess.unmark(owner: previous.lease.owner) }
             held[session] = HeldLease(lease: lease, descriptor: descriptor)
             return lease
         } catch {
@@ -215,10 +232,75 @@ public actor FxSessionStore: FxRenewableSessionStorage {
         }
     }
 
+    public func claim(session: String, agent: String, delivery: FxQueueClaim) throws -> FxSessionLease? {
+        guard delivery.isActive else { throw FxPersistenceError.fenced }
+        guard let queueSource, let leasePolicy, delivery.source == queueSource,
+              delivery.wakeup.sessionID == session, delivery.wakeup.agent == agent,
+              let inputID = delivery.wakeup.inputID else { throw FxPersistenceError.fenced }
+        var markedOwner: String?
+        do {
+            let lease = try database.transaction { () -> FxSessionLease? in
+                guard delivery.isActive else { throw FxPersistenceError.fenced }
+                try checkAgent(session, agent: agent)
+                let known = try database.statement("SELECT 1 FROM fx_inputs WHERE session=? AND id=?", [.text(session), .text(inputID)]) { try database.step($0) }
+                guard known else { throw FxPersistenceError.fenced }
+                let state = try database.statement("SELECT epoch,owner,lease_until,delivery_source,delivery_message,delivery_attempt,delivery_invocation,delivery_process FROM fx_sessions WHERE id=?", [.text(session)]) { row -> (epoch: Int64, owner: String?, expiry: Int64, source: String, message: String, attempt: Int64, invocation: String, process: String) in
+                    guard try database.step(row) else { throw FxSessionError.notFound }
+                    return (sqlite3_column_int64(row, 0), sqlite3_column_type(row, 1) == SQLITE_NULL ? nil : database.text(row, column: 1),
+                            sqlite3_column_int64(row, 2), database.text(row, column: 3), database.text(row, column: 4),
+                            sqlite3_column_int64(row, 5), database.text(row, column: 6), database.text(row, column: 7))
+                }
+                let seen = try database.statement("SELECT session,source,message,attempt,process FROM fx_queue_invocations WHERE invocation=?", [.text(delivery.invocationID)]) { row -> Bool in
+                    guard try database.step(row) else { return false }
+                    guard database.text(row, column: 0) == session, database.text(row, column: 1) == queueSource,
+                          database.text(row, column: 2) == delivery.messageID, sqlite3_column_int64(row, 3) == delivery.attempt,
+                          database.text(row, column: 4) == delivery.processID,
+                          state.invocation == delivery.invocationID else { throw FxPersistenceError.fenced }
+                    return true
+                }
+                // One active callback can reopen after its own release, but cannot
+                // reassert a grant that another callback or plain claim superseded.
+                if seen, state.owner != nil { return nil }
+                let now = try leaseMilliseconds()
+                if let owner = state.owner, state.expiry > now {
+                    if state.process == QueueDeliveryProcess.id, QueueDeliveryProcess.contains(owner: owner) { return nil }
+                    guard state.source == queueSource, state.message == delivery.messageID,
+                          delivery.attempt > state.attempt || (delivery.attempt == state.attempt && delivery.allowsSameAttempt) else { return nil }
+                }
+                guard state.epoch < Int64.max else { throw FxPersistenceError.sizeLimit }
+                guard delivery.isActive else { throw FxPersistenceError.fenced }
+                let lease = FxSessionLease(sessionID: session, owner: UUID().uuidString, epoch: state.epoch + 1)
+                try database.execute("UPDATE fx_sessions SET epoch=?,owner=?,lease_until=?,delivery_source=?,delivery_message=?,delivery_attempt=?,delivery_invocation=?,delivery_process=? WHERE id=?",
+                    [.integer(lease.epoch), .text(lease.owner), .integer(try leaseExpiry(now, policy: leasePolicy)), .text(queueSource), .text(delivery.messageID), .integer(delivery.attempt), .text(delivery.invocationID), .text(delivery.processID), .text(session)])
+                if !seen {
+                    try database.execute("INSERT INTO fx_queue_invocations(invocation,session,source,message,attempt,process) VALUES (?,?,?,?,?,?)",
+                        [.text(delivery.invocationID), .text(session), .text(queueSource), .text(delivery.messageID), .integer(delivery.attempt), .text(delivery.processID)])
+                }
+                // Register before COMMIT releases the SQLite writer lock. Otherwise
+                // a second connection could mistake a live local grant for a rerun.
+                QueueDeliveryProcess.mark(owner: lease.owner)
+                markedOwner = lease.owner
+                return lease
+            }
+            guard let lease else { return nil }
+            if let previous = held[session] { QueueDeliveryProcess.unmark(owner: previous.lease.owner) }
+            held[session] = HeldLease(lease: lease, descriptor: nil)
+            return lease
+        } catch {
+            if let markedOwner { QueueDeliveryProcess.unmark(owner: markedOwner) }
+            throw error
+        }
+    }
+
     public func release(_ lease: FxSessionLease) throws {
         guard held[lease.sessionID]?.lease == lease else { return }
         try database.execute("UPDATE fx_sessions SET owner=NULL,lease_until=NULL WHERE id=? AND owner=? AND epoch=?", [.text(lease.sessionID), .text(lease.owner), .integer(lease.epoch)])
+        QueueDeliveryProcess.unmark(owner: lease.owner)
         if let descriptor = held.removeValue(forKey: lease.sessionID)?.descriptor { closeDescriptor(descriptor) }
+    }
+
+    public func endExecution(_ lease: FxSessionLease) {
+        QueueDeliveryProcess.unmark(owner: lease.owner)
     }
 
     public func checkLease(_ lease: FxSessionLease) throws {

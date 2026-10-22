@@ -17,24 +17,24 @@ public actor FxAgentRouter {
 
     public func makeAgent<Harness: FxDurableHarness>(harness: Harness, name: String = "default",
         checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024,
-        deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil,
+        deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil, queueAuthority: FxQueueDeliveryAuthority? = nil,
         onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil
     ) async throws -> FxDurableAgent<Harness.Input, Harness.Update> {
         let agent = try await makeAgent(harness: DurableHarnessAdapter(harness: harness), name: name,
             checkpoint: checkpoint, checkpointAfterBytes: checkpointAfterBytes, deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy,
-            queue: queue, onLifecycleEvent: onLifecycleEvent)
+            queue: queue, queueAuthority: queueAuthority, onLifecycleEvent: onLifecycleEvent)
         return FxDurableAgent(agent: agent)
     }
 
     public func makeAgent(harness: any FxSessionHarness, name: String = "default",
         checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024,
-        deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil,
+        deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil, queueAuthority: FxQueueDeliveryAuthority? = nil,
         onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil
     ) async throws -> FxAgent {
         guard agents[name]?.agent == nil else { throw FxAgentRoutingError.duplicateName(name) }
         let agent = try FxAgent(harness: harness, name: name, store: store, checkpoint: checkpoint,
             checkpointAfterBytes: checkpointAfterBytes, deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy,
-            queue: queue, onLifecycleEvent: onLifecycleEvent)
+            queue: queue, queueAuthority: queueAuthority, onLifecycleEvent: onLifecycleEvent)
         agents[name] = Registration(agent: agent)
         await agent.attachRouter(self)
         return agent
@@ -42,11 +42,11 @@ public actor FxAgentRouter {
 
     public func makeAgent(configuration: FxConfiguration, name: String = "default",
         checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024,
-        deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil
+        deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil, queueAuthority: FxQueueDeliveryAuthority? = nil
     ) async throws -> FxAgent {
         guard agents[name]?.agent == nil else { throw FxAgentRoutingError.duplicateName(name) }
         let agent = try FxAgent(configuration: configuration, name: name, store: store, checkpoint: checkpoint,
-            checkpointAfterBytes: checkpointAfterBytes, deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy, queue: queue)
+            checkpointAfterBytes: checkpointAfterBytes, deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy, queue: queue, queueAuthority: queueAuthority)
         agents[name] = Registration(agent: agent)
         await agent.attachRouter(self)
         return agent
@@ -66,11 +66,16 @@ public actor FxAgentRouter {
         try await agent(named: wakeup.agent).deliver(wakeup, policy: policy)
     }
 
+    public func deliver(_ wakeup: FxSessionWakeup, context: FxQueueDeliveryContext,
+                        policy: FxDeliveryPolicy? = nil) async throws -> FxDeliveryOutcome {
+        try await agent(named: wakeup.agent).deliver(wakeup, context: context, policy: policy)
+    }
+
     package var hasWakeAgents: Bool { agents.values.contains { $0.agent != nil } }
 
     /// HTTP deliveries reference accepted input; their bodies never create work.
     package func deliverAccepted(_ wakeup: FxSessionWakeup, inputID: String,
-                                 policy: FxDeliveryPolicy?) async throws -> FxDeliveryOutcome {
+                                 policy: FxDeliveryPolicy?, context: FxQueueDeliveryContext? = nil) async throws -> FxDeliveryOutcome {
         _ = try agent(named: wakeup.agent)
         guard validSessionIdentifier(wakeup.sessionID), validSessionIdentifier(inputID) else { return .complete }
         guard let owner = try await store.owner(session: wakeup.sessionID) else { return .complete }
@@ -80,6 +85,13 @@ public actor FxAgentRouter {
             return .complete
         }
         try Task.checkCancellation()
-        return try await agent(named: owner).deliver(FxSessionWakeup(agent: owner, sessionID: wakeup.sessionID), policy: policy)
+        let target = try agent(named: owner)
+        let accepted = FxSessionWakeup(agent: owner, sessionID: wakeup.sessionID, inputID: inputID)
+        if let context {
+            // A trusted receipt must retain the exact authenticated agent binding.
+            guard owner == wakeup.agent else { throw FxQueueDeliveryError.invalidContext }
+            return try await target.deliver(accepted, context: context, policy: policy)
+        }
+        return try await target.deliver(accepted, policy: policy)
     }
 }

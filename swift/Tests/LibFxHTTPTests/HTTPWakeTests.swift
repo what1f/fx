@@ -376,3 +376,61 @@ extension HTTPWakeTests {
         try await store.close()
     }
 }
+
+
+@Suite(.serialized, .timeLimit(.minutes(1)))
+struct VerifiedHTTPQueueTests {
+    private func authority() throws -> FxQueueDeliveryAuthority {
+        try FxQueueDeliveryAuthority(source: "verified-http") { (wakeup: FxSessionWakeup, bound: FxSessionWakeup) in
+            guard wakeup == bound else { throw FxQueueDeliveryError.invalidContext }
+            return try FxQueueReceipt(messageID: "authenticated-message", attempt: 1)
+        }
+    }
+
+    @Test func verifiedCallbackRunsThePublishedInputAndCannotReuseItsContext() async throws {
+        let policy = try FxSessionLeasePolicy(duration: .seconds(60), renewalInterval: .seconds(20))
+        let store = try FxSessionStore(leasePolicy: policy, queueSource: "verified-http")
+        let router = FxAgentRouter(store: store), queue = Queue(), gateway = Gateway("verified")
+        let agent = try await router.makeAgent(configuration: configuration(gateway), queue: queue, queueAuthority: authority())
+        let turn = try await agent.session(id: "session").prompt("accepted", id: "input")
+        let wakeup = try #require(await queue.messages.first)
+        let context = FxQueueDeliveryContext(wakeup)
+        let handler = FxHTTPWakeHandler(routes: ["main": router])
+        let request = HTTPRequest(method: .post, scheme: "https", authority: "app.example", path: "/wake")
+        let body = try JSONEncoder().encode(FxHTTPWakeRequest(store: "main", wakeup: wakeup))
+        let reply = try await handler.handle(request, body: body, context: context)
+        #expect(reply.response.status == .ok)
+        #expect(try await turn.result.stopReason == .endTurn)
+        #expect(await gateway.bodies.count == 1)
+        let repeated = try await handler.handle(request, body: body, context: context)
+        #expect(repeated.response.status == .internalServerError)
+        #expect(await gateway.bodies.count == 1)
+        try await agent.close(); try await store.close()
+    }
+
+    @Test func metadataMustBindToTheAcceptedBodyAndPlainJSONCannotGrantAuthority() async throws {
+        let policy = try FxSessionLeasePolicy(duration: .seconds(60), renewalInterval: .seconds(20))
+        let store = try FxSessionStore(leasePolicy: policy, queueSource: "verified-http")
+        let router = FxAgentRouter(store: store), queue = Queue(), gateway = Gateway("verified")
+        let agent = try await router.makeAgent(configuration: configuration(gateway), queue: queue, queueAuthority: authority())
+        _ = try await agent.session(id: "session").prompt("accepted", id: "input")
+        let wakeup = try #require(await queue.messages.first)
+        let handler = FxHTTPWakeHandler(routes: ["main": router])
+        let request = HTTPRequest(method: .post, scheme: "https", authority: "app.example", path: "/wake")
+        let body = try JSONEncoder().encode(FxHTTPWakeRequest(store: "main", wakeup: wakeup))
+        let wrong = FxQueueDeliveryContext(FxSessionWakeup(agent: "default", sessionID: "other", inputID: "input"))
+        #expect(try await handler.handle(request, body: body, context: wrong).response.status == .internalServerError)
+        #expect(await gateway.bodies.isEmpty)
+        #expect(try await handler.handle(request, body: body).response.status == .ok)
+        #expect(await gateway.bodies.count == 1)
+        try await agent.close(); try await store.close()
+    }
+
+    @Test func authorityRequiresMatchingQueueAwareStorage() async throws {
+        let store = try FxSessionStore(), queue = Queue(), gateway = Gateway("unused")
+        #expect(throws: FxQueueDeliveryError.unsupportedStorage) {
+            _ = try FxAgent(configuration: configuration(gateway), store: store, queue: queue, queueAuthority: authority())
+        }
+        try await store.close()
+    }
+}
