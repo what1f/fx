@@ -11,6 +11,8 @@ public struct FxConfiguration: Sendable {
     public var gatewayURL: URL
     public var httpClient: any FxHTTPClient
     public var observation: FxObservationOptions?
+    /// Receives host lifecycle events without enabling runtime hooks. Keep callbacks short.
+    public var onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)?
     /// Chooses an offered core permission option. Missing or failed callbacks deny the request.
     public var onPermission: (@Sendable (FxPermissionRequest) async throws -> FxPermissionDecision)?
     /// Receives request metadata. The transport awaits this callback before advancing.
@@ -26,11 +28,12 @@ public struct FxConfiguration: Sendable {
         httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil,
         checkpointAfterBytes: Int? = 1024 * 1024,
         onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)? = nil,
-        onPermission: (@Sendable (FxPermissionRequest) async throws -> FxPermissionDecision)? = nil
+        onPermission: (@Sendable (FxPermissionRequest) async throws -> FxPermissionDecision)? = nil,
+        onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)? = nil
     ) {
         self.init(provider: .gateway(apiKey: apiKey), model: model, instructions: instructions,
                   tools: tools, providerTools: providerTools, workspace: workspace, httpClient: httpClient,
-                  observation: observation, checkpointAfterBytes: checkpointAfterBytes, onTransportEvent: onTransportEvent, onPermission: onPermission)
+                  observation: observation, checkpointAfterBytes: checkpointAfterBytes, onTransportEvent: onTransportEvent, onPermission: onPermission, onLifecycleEvent: onLifecycleEvent)
         self.gatewayURL = gatewayURL
     }
 
@@ -41,7 +44,8 @@ public struct FxConfiguration: Sendable {
         httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), observation: FxObservationOptions? = nil,
         checkpointAfterBytes: Int? = 1024 * 1024,
         onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)? = nil,
-        onPermission: (@Sendable (FxPermissionRequest) async throws -> FxPermissionDecision)? = nil
+        onPermission: (@Sendable (FxPermissionRequest) async throws -> FxPermissionDecision)? = nil,
+        onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)? = nil
     ) {
         self.provider = provider
         self.model = model
@@ -54,6 +58,7 @@ public struct FxConfiguration: Sendable {
         self.onTransportEvent = onTransportEvent
         self.observation = observation
         self.onPermission = onPermission
+        self.onLifecycleEvent = onLifecycleEvent
         self.checkpointAfterBytes = checkpointAfterBytes
     }
 

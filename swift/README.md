@@ -161,6 +161,12 @@ For multiple processes or servers, supply `refreshLock`. Hold the account lock w
 
 The SDK supplies authentication and token refresh for existing credentials. Sign-in helpers and the full durable agent/session provider suites remain pending.
 
+## Observe host lifecycle events
+
+Set `FxConfiguration.onLifecycleEvent` to receive typed `FxLifecycleEvent` values for journal restoration, saved snapshots, automatic snapshot failures, checkpoint metadata differences, and delivery deadlines. The callback works without `FxObservationOptions` and does not enable runtime hooks or content capture. Snapshot failures retain the original Swift error. `FxJournalRestoration` reports the restored cursor, sequence, turn IDs, counts, and checkpoint presence; mismatch events identify changed `FxCheckpointField` values and the saved and current `FxCheckpointIdentity`.
+
+Callbacks are synchronous and can run concurrently across engines or session workers. Keep them short and protect shared state. The event enum and its payloads are `Sendable`; see Swift's [concurrency contract](https://docs.swift.org/latest/documentation/swift/sendable/). Use `onTransportEvent` for HTTP request diagnostics and `FxObservationOptions` for runtime and tool observations.
+
 ## Provide tools and images
 
 ```swift

@@ -162,11 +162,6 @@ export async function createFxEngine(options = {}) {
       }).then(value => request('credentialResult', { token: call.token, credentials: value }),
           () => request('credentialResult', { token: call.token })).catch(() => {});
     } else if (value.observation) {
-      const event = value.observation;
-      if (['journal.restore', 'checkpoint.save', 'checkpoint.error', 'checkpoint.mismatch', 'session.deadline'].includes(event.type)) {
-        try { options.onEvent?.({ type: event.type === 'journal.restore' ? 'journal.open' : event.type,
-          timestamp: event.timestamp, sessionId: event.sessionId, ...event.data }); } catch {}
-      }
       try { Promise.resolve(options.hooks?.onEvent(value.observation)).catch(error => {
         try { Promise.resolve(options.hooks?.onError?.(error)).catch(() => {}); } catch {}
       }); } catch (error) {
@@ -339,7 +334,7 @@ export async function createFxEngine(options = {}) {
     const opened = await request(options.__agent ? 'openAgent' : 'open', { options: {
       ...configuration,
       model: swiftModel(options),
-      ...(options.hooks || typeof onEvent === 'function' ? { hooks: options.hooks ?? {} } : {}),
+      ...(options.hooks ? { hooks: options.hooks } : {}),
       hasCredentials: typeof options.credentials === 'function',
       hasRefreshLock: typeof options.refreshLock === 'function',
       credentialsType: typeof options.credentials, onCredentialsType: typeof options.onCredentials,

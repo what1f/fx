@@ -78,6 +78,12 @@ final class TransportEvents: @unchecked Sendable {
     var values: [FxTransportEvent] { lock.withLock { recorded } }
     func record(_ event: FxTransportEvent) { lock.withLock { recorded.append(event) } }
 }
+final class LifecycleEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [FxLifecycleEvent] = []
+    var values: [FxLifecycleEvent] { lock.withLock { recorded } }
+    func record(_ event: FxLifecycleEvent) { lock.withLock { recorded.append(event) } }
+}
 final class Observations: @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: [FxObservation] = []
@@ -203,13 +209,14 @@ struct SubscriptionHTTP: FxHTTPClient {
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try FxSQLitePersistence(url: directory.appendingPathComponent("conversation.sqlite"))
         let transportEvents = TransportEvents()
+        let lifecycleEvents = LifecycleEvents()
         let engine = try await FxEngine.open(configuration: FxConfiguration(
             apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP(), checkpointAfterBytes: 0,
             onTransportEvent: { transportEvents.record($0) },
             onPermission: { request in
                 let offered: FxPermissionOption? = request.options.first { $0.kind == .rejectOnce }
                 return offered.map { FxPermissionDecision.select(optionID: $0.id) } ?? .cancel
-            }
+            }, onLifecycleEvent: lifecycleEvents.record
         ), persistence: store)
         let turn = try await engine.prompt("hello", id: "consumer-turn")
         var text = ""
@@ -243,6 +250,12 @@ struct SubscriptionHTTP: FxHTTPClient {
         }) else { throw FxError.protocolViolation("Missing response progress") }
         let saved = try await store.load()
         guard saved.checkpoint != nil, saved.journal.isEmpty else { throw FxPersistenceError.invalidJournal }
+        guard lifecycleEvents.values.contains(where: {
+            if case .checkpointSaved(let id, let cursor, let bytes) = $0 {
+                return id == engine.sessionID && cursor == saved.checkpoint?.through && bytes > 0
+            }
+            return false
+        }) else { throw FxError.protocolViolation("Missing lifecycle snapshot event") }
         let restored = try await FxEngine.open(configuration: FxConfiguration(
             apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()
         ), persistence: store)

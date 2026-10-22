@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import LibFx
+@_spi(Conformance) @testable import LibFx
 
 private final class Observations: @unchecked Sendable {
     private let lock = NSLock()
@@ -249,4 +249,124 @@ private actor PausedCheckpointStore: FxCheckpointPersistence {
             }
         }
     }
+}
+
+
+private final class LifecycleEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [FxLifecycleEvent] = []
+    private var messages: [JSONValue] = []
+    var events: [FxLifecycleEvent] { lock.withLock { values } }
+    var wireMessages: [JSONValue] { lock.withLock { messages } }
+    func record(_ event: FxLifecycleEvent) { lock.withLock { values.append(event) } }
+    func recordWire(_ message: JSONValue) { lock.withLock { messages.append(message) } }
+}
+
+@Test func lifecycleCallbacksReportRestorationAndSnapshotsWithoutRuntimeHooks() async throws {
+    let collected = LifecycleEvents(), store = FxMemoryPersistence()
+    var config = FxConfiguration(apiKey: "test-key", model: "swift/observe", httpClient: ObservationHTTP(),
+        checkpointAfterBytes: nil, onLifecycleEvent: collected.record)
+    config.wireObserver = { _, message in collected.recordWire(message) }
+    let engine = try await FxEngine.open(configuration: config, persistence: store)
+    let turn = try await engine.prompt("remember lifecycle")
+    for try await _ in turn {}
+    _ = try await turn.result
+    try await engine.saveCheckpoint()
+    try await engine.close()
+    config.tools = [FxTool(name: "extra", description: "Extra tool", inputSchema: .object(["type": .string("object")]),
+        isIdempotent: true) { _, _ in FxToolResult(text: "unused") }]
+    let restored = try await FxEngine.open(configuration: config, persistence: store)
+    let restoredID = restored.sessionID
+    try await restored.close()
+    let opened = collected.events.compactMap { event -> FxJournalRestoration? in
+        if case .journalOpened(let state) = event { return state }; return nil
+    }
+    #expect(opened.count == 2)
+    #expect(opened.first?.hasCheckpoint == false && opened.first?.eventCount == 0)
+    #expect(opened.last?.sessionID == restoredID && opened.last?.hasCheckpoint == true)
+    #expect(opened.last?.lastTurnID == turn.id)
+    #expect(opened.last?.resumable == false)
+    let saves = collected.events.compactMap { event -> String? in
+        if case .checkpointSaved(let id, let cursor, let bytes) = event {
+            #expect(id == engine.sessionID && bytes > 0)
+            return cursor
+        }; return nil
+    }
+    #expect(saves.count == 1 && saves.first == opened.last?.cursor)
+    let changes = collected.events.compactMap { event -> [FxCheckpointField]? in
+        if case .checkpointMismatch(let id, let fields, let saved, let current) = event {
+            #expect(id == restoredID)
+            #expect(saved.version == current.version && saved.modelID == current.modelID)
+            #expect(saved.toolSchemaHash != current.toolSchemaHash)
+            return fields
+        }; return nil
+    }
+    #expect(changes == [[.toolSchemaHash]])
+    let requests = collected.wireMessages.filter { $0["method"] == .string("libfx/new") }
+    #expect(requests.count == 2)
+    #expect(requests.allSatisfy { $0["params"]?["hooks"] == nil })
+    #expect(!collected.wireMessages.contains { $0["method"] == .string("libfx/hook") })
+}
+
+private final class LifecycleSnapshotFailure: Error, Sendable {}
+private struct LifecycleFailingSnapshots: FxCheckpointPersistence {
+    let memory = FxMemoryPersistence()
+    let failure = LifecycleSnapshotFailure()
+    func load() async -> FxPersistenceSnapshot { await memory.load() }
+    func append(expected: String?, idempotencyKey: String, data: Data, barrier: Bool) async throws -> String {
+        try await memory.append(expected: expected, idempotencyKey: idempotencyKey, data: data, barrier: barrier)
+    }
+    func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) throws { throw failure }
+}
+
+@Test func lifecycleSnapshotFailurePreservesTheHostError() async throws {
+    let collected = LifecycleEvents(), store = LifecycleFailingSnapshots()
+    let engine = try await FxEngine.open(configuration: FxConfiguration(
+        apiKey: "test-key", model: "swift/observe", httpClient: ObservationHTTP(),
+        checkpointAfterBytes: 0, onLifecycleEvent: collected.record), persistence: store)
+    let turn = try await engine.prompt("keep the journal")
+    for try await _ in turn {}
+    #expect(try await turn.result.stopReason == .endTurn)
+    try await engine.close()
+    let failures = collected.events.compactMap { event -> (any Error)? in
+        if case .checkpointFailed(let id, let error) = event {
+            #expect(id == engine.sessionID)
+            return error
+        }; return nil
+    }
+    #expect(failures.count == 1)
+    #expect((failures.first as? LifecycleSnapshotFailure) === store.failure)
+    #expect(!(await store.memory.load()).journal.isEmpty)
+}
+
+
+@Test func sessionValidationAndReadOnlyExportsDoNotAddLifecycleNotifications() async throws {
+    let collected = LifecycleEvents(), store = try FxSessionStore()
+    let agent = try FxAgent(configuration: FxConfiguration(apiKey: "test-key", model: "swift/observe",
+        httpClient: ObservationHTTP(), onLifecycleEvent: collected.record), store: store, checkpointAfterBytes: nil)
+    let session = try await agent.session(id: "lifecycle-session")
+    let turn = try await session.prompt("export without notifications", id: "input")
+    for try await _ in turn {}
+    _ = try await turn.result
+    let before = collected.events.count
+    #expect(before > 0)
+    let checkpoint = try await session.checkpoint()
+    #expect(!checkpoint.isEmpty)
+    #expect(collected.events.count == before)
+    try await agent.close()
+    try await store.close()
+    let destination = try FxSessionStore()
+    var config = FxConfiguration(apiKey: "test-key", model: "swift/observe", httpClient: ObservationHTTP(),
+        onLifecycleEvent: collected.record)
+    config.tools = [FxTool(name: "changed", description: "Changed schema", inputSchema: .object(["type": .string("object")]),
+        isIdempotent: true) { _, _ in FxToolResult(text: "unused") }]
+    let seeded = try FxAgent(configuration: config, store: destination, checkpoint: checkpoint)
+    let seededSession = try await seeded.session(id: "seeded-session")
+    let next = try await seededSession.prompt("restore once", id: "next")
+    for try await _ in next {}
+    _ = try await next.result
+    try await seeded.close()
+    try await destination.close()
+    let mismatches = collected.events.dropFirst(before).filter { if case .checkpointMismatch = $0 { return true }; return false }
+    #expect(mismatches.count == 1)
 }

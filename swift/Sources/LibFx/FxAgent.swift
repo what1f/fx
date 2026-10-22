@@ -42,6 +42,7 @@ public actor FxAgent {
             catch FxSessionError.notFound {
                 var config = configured(for: options)
                 config.observation = nil
+                config.onLifecycleEvent = nil
                 let temporary = try await FxEngine.open(configuration: config, checkpoint: checkpoint)
                 try await temporary.close()
             }
@@ -81,6 +82,7 @@ public actor FxAgent {
         var config = configured(for: options)
         config.checkpointAfterBytes = nil
         config.observation = nil
+        config.onLifecycleEvent = nil
         let temporary = try await FxEngine.open(configuration: config, sessionID: session,
                                                  persistence: ReadOnlySessionPersistence(snapshot: snapshot))
         do {
@@ -205,6 +207,7 @@ public actor FxAgent {
                         }
                         if let stop = deadlines?.stop, ContinuousClock.now >= stop {
                             let cutoffs = try await store.cutOffDelivery(lease, id: input.id)
+                            self.configuration.onLifecycleEvent?(.deliveryDeadline(sessionID: lease.sessionID, epoch: Int64(lease.epoch), cutoffs: cutoffs))
                             self.configuration.observation?.deliver(FxObservation(journal: .sessionDeadline, sessionID: lease.sessionID,
                                 data: .object(["epoch": .number(Double(lease.epoch)), "cutoffs": .number(Double(cutoffs))])))
                             try await turn.handoff()

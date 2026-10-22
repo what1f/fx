@@ -9,6 +9,7 @@ public actor FxEngine {
     private let permissions: PermissionRequests
     private let journal: JournalWriter?
     private let observation: FxObservationOptions?
+    private let onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)?
     private let checkpointAfterBytes: Int?
     private let checkpointMetadata: CheckpointMetadata
     private var recovery: FxRecoveryState?
@@ -35,7 +36,7 @@ public actor FxEngine {
 
     private init(
         sessionID: String, rpc: RPCClient, transport: NativeTransport,
-        tools: [String: FxTool], journal: JournalWriter?, observation: FxObservationOptions?, checkpointAfterBytes: Int?, checkpointMetadata: CheckpointMetadata, onPermission: PermissionRequests.Handler?
+        tools: [String: FxTool], journal: JournalWriter?, observation: FxObservationOptions?, checkpointAfterBytes: Int?, checkpointMetadata: CheckpointMetadata, onPermission: PermissionRequests.Handler?, onLifecycleEvent: (@Sendable (FxLifecycleEvent) -> Void)?
     ) {
         self.sessionID = sessionID
         self.rpc = rpc
@@ -53,6 +54,7 @@ public actor FxEngine {
         self.permissions = PermissionRequests(sessionID: sessionID, rpc: rpc, handler: permissionHandler)
         self.journal = journal
         self.observation = observation
+        self.onLifecycleEvent = onLifecycleEvent
         self.checkpointAfterBytes = checkpointAfterBytes
         self.checkpointMetadata = checkpointMetadata
     }
@@ -132,14 +134,14 @@ public actor FxEngine {
                 throw FxError.protocolViolation("Runtime does not support observation")
             }
             let journal = persistence.map { JournalWriter(store: $0, head: loaded?.head, lastSequence: loaded?.lastSequence ?? 0, tailBytes: loaded?.tailBytes ?? 0) }
-            let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes, checkpointMetadata: checkpointMetadata, onPermission: configuration.onPermission)
+            let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes, checkpointMetadata: checkpointMetadata, onPermission: configuration.onPermission, onLifecycleEvent: configuration.onLifecycleEvent)
             await rpc.setHandler { [weak engine] message in await engine?.handle(message) }
             if let checkpoint {
                 try await transport.putAttachment(checkpoint, id: 1)
                 let restored = try await rpc.request("libfx/restore", .object([
                     "sessionId": .string(id), "checkpointAttachment": .number(1),
                 ]))
-                checkpointMetadata.compare(restored["checkpointMeta"], sessionID: id, observation: configuration.observation)
+                checkpointMetadata.compare(restored["checkpointMeta"], sessionID: id, observation: configuration.observation, onLifecycleEvent: configuration.onLifecycleEvent)
             }
             if let loaded {
                 var params: [String: JSONValue] = ["sessionId": .string(id)]
@@ -154,8 +156,13 @@ public actor FxEngine {
                     params["snapshotAttachment"] = .number(Double(attachment))
                 }
                 let opened = try await rpc.request("libfx/journal_open", .object(params))
-                checkpointMetadata.compare(opened["checkpointMeta"], sessionID: id, observation: configuration.observation)
+                checkpointMetadata.compare(opened["checkpointMeta"], sessionID: id, observation: configuration.observation, onLifecycleEvent: configuration.onLifecycleEvent)
                 await engine.setRecovery(opened)
+                configuration.onLifecycleEvent?(.journalOpened(FxJournalRestoration(
+                    sessionID: id, cursor: loaded.head, lastSequence: loaded.lastSequence,
+                    resumable: opened["resumable"] == .bool(true), openTurnID: opened["openTurnId"]?.string,
+                    lastTurnID: opened["lastTurnId"]?.string, eventCount: loaded.events.count,
+                    hasCheckpoint: loaded.checkpoint != nil, turnCount: opened["turns"]?.integer ?? 0)))
                 configuration.observation?.deliver(FxObservation(journal: .journalRestored, sessionID: id, data: .object([
                     "cursor": loaded.head.map(JSONValue.string) ?? .null,
                     "lastSeq": .number(Double(loaded.lastSequence)),
@@ -683,6 +690,7 @@ public actor FxEngine {
               !closed, !handedOff, turnID == id else { return }
         do { try await storeCheckpoint(finishing: id) }
         catch {
+            onLifecycleEvent?(.checkpointFailed(sessionID: sessionID, error: error))
             observation?.deliver(FxObservation(journal: .checkpointError, sessionID: sessionID, data: .object([
                 "error": .string(String(describing: type(of: error))),
                 "fenced": .bool((error as? FxPersistenceError) == .fenced),
@@ -697,7 +705,7 @@ public actor FxEngine {
         guard let journal else { throw FxError.invalidInput("Persistence store is required") }
         checkpointing = true
         defer { checkpointing = false; checkpointSaveTask = nil; startNextFollowUp() }
-        let task = Task { [rpc, transport, sessionID, observation, checkpointMetadata] in
+        let task = Task { [rpc, transport, sessionID, observation, checkpointMetadata, onLifecycleEvent] in
             try await journal.check()
             let reply = try await rpc.request("libfx/snapshot", .object(["sessionId": .string(sessionID), "checkpointMeta": checkpointMetadata.value]))
             if reply["snapshotAttachment"] == .null { return }
@@ -707,6 +715,7 @@ public actor FxEngine {
             }
             let data = try await transport.takeAttachment(id: attachmentID)
             if let through = try await journal.saveSnapshot(data, at: sequence) {
+                onLifecycleEvent?(.checkpointSaved(sessionID: sessionID, cursor: through, byteCount: data.count))
                 observation?.deliver(FxObservation(journal: .checkpointSaved, sessionID: sessionID, data: .object([
                     "through": .string(through), "bytes": .number(Double(data.count)),
                 ])))

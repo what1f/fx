@@ -111,4 +111,31 @@ for (const wrapped of [false, true]) {
   await fencing(createJSEngine, wrapped);
   await fencing(createSwiftEngine, wrapped);
 }
-console.log('Observation parity passed: tool causality, parent scopes, content opt-in, errors, committed cursors and fenced writes');
+async function lifecycleWithoutHooks(create) {
+  const diagnostics = [], persistence = createMemoryPersistence();
+  const engine = await create({ backend: 'native', nativeAddon, apiKey: 'observation-credential', model: 'fixture/observation',
+    persistence, checkpointAfterBytes: 0, onEvent: event => diagnostics.push(event),
+    async fetch(_url, init) {
+      if (init.method === 'GET') return Response.json({ data: [{ id: 'fixture/observation', type: 'language' }] });
+      return new Response('data: {"type":"text-delta","delta":"saved"}\n\ndata: {"type":"finish","finishReason":{"unified":"stop","raw":"stop"}}\n\ndata: [DONE]\n\n');
+    },
+  });
+  try {
+    const turn = engine.prompt('save without hooks');
+    for await (const _ of turn) {}
+    assert.equal((await turn.result).stopReason, 'end_turn');
+  } finally { await engine.close(); }
+  const created = diagnostics.filter(event => event.type === 'acp.send' && event.message?.method === 'libfx/new');
+  assert.equal(created.length, 1);
+  assert.equal(created[0].message.params.hooks, undefined);
+  assert.ok(!diagnostics.some(event => event.message?.method === 'libfx/hook'));
+  assert.equal(diagnostics.filter(event => event.type === 'journal.open').length, 1);
+  const snapshots = diagnostics.filter(event => event.type === 'checkpoint.save');
+  assert.equal(snapshots.length, 1);
+  const saved = await persistence.load();
+  assert.equal(snapshots[0].through, saved.checkpoint.through);
+  assert.equal(snapshots[0].bytes, saved.checkpoint.data.byteLength);
+}
+await lifecycleWithoutHooks(createJSEngine);
+await lifecycleWithoutHooks(createSwiftEngine);
+console.log('Observation parity passed: scopes, content, fencing and lifecycle diagnostics without runtime hooks');

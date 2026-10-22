@@ -285,6 +285,9 @@ actor Driver: FxHTTPClient, FxPersistence {
                     DriverOutput.emit(.object(["observationError": .string(String(describing: error))]))
                 }
             }
+            config.onLifecycleEvent = { event in
+                DriverOutput.emit(.object(["diagnostic": encodeLifecycleEvent(event)]))
+            }
             config.onTransportEvent = { [weak self] event in
                 if case .retrying = event { await self?.observeRetry(event) }
                 else { DriverOutput.emit(.object(["diagnostic": encodeTransportEvent(event)])) }
