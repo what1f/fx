@@ -283,10 +283,20 @@ The host fixture forwards to SQLite. This proves the injectable public contract 
 
 All 251 native tests pass locally in normal, Address Sanitizer and Thread Sanitizer builds. The first full native run identified two changed fenced-error types; preserving canonical storage errors fixes those regressions, and all three subsequent native runs pass. The normal driver is restored and passes streaming, Unicode, tools, checkpoints, restore and repeated-close smoke checks. The public Release consumer passes with the injected host store. No CI was triggered.
 
+## Host-provided queue delivery
+
+`FxSessionQueue.enqueue` publishes an `FxSessionWakeup` containing only the agent name and session ID. Input is durably stored before publishing. Publishing failure preserves that input and its original error; a same-ID retry or `resume()` can publish it again. These are separate operations, not an atomic transaction across storage and a queue. The host must arrange recovery when the sender exits between them.
+
+`FxAgent.deliver` uses the existing durable worker and storage leases. `.complete` allows acknowledgement; `.retry(after:)` and thrown errors require retaining the message. Competing owners return a retry, and duplicate delivery after completion sends no model request. Waiter cancellation leaves active execution running. Agent close waits for active deliveries without draining other externally queued inputs. One policy budget covers all inputs in an external delivery. As in the upstream contract, zero reserve yields at safe boundaries and does not actively cut off a step.
+
+Nine native queue tests cover separate sending and executing owners, secret-free wakeups, duplicate delivery, independent delivery waiters and cancellation, lease contention across database connections, publishing failure followed by resume or same-ID retry, storage failure with original-error identity and successful redelivery, targeted queued cancellation, cooperative yields, whole-delivery budgets and quiet-request cutoff. The independent Release consumer implements the public queue protocol with Foundation HTTP. A local HTTP broker retains its message until explicit acknowledgement, and the consumer verifies publishing, a separate worker, acknowledgement and duplicate suppression. This fixture does not qualify a cloud queue service, distributed queue lease metadata or broker crash recovery. Full upstream queue scenarios remain pending.
+
+Local qualification for this batch: all 260 native tests pass in normal, Address Sanitizer and Thread Sanitizer builds. The independent public Release consumer passes, including the HTTP queue acknowledgement check. The final normal conformance run passes 90/90 entries, including actual-driver runtime smoke and both worker termination fixtures. An intermediate run failed the original one-millisecond yield case after changing zero-reserve cutoff semantics; restoring the upstream behavior fixes that regression, with the original assertion retained. This does not resolve the previously documented intermittent cancellation failure. The normal driver is restored. No CI was triggered.
+
 ## Required remaining gates
 
 - Full classified upstream test coverage and full durable agent/session behavior. Both sign-in helper files now pass locally; live-provider authorization remains unverified.
-- External queue delivery and storage integrations, intake deadlines, durability barriers under slow storage, and systematic termination across all effect boundaries.
+- Complete upstream queue scenarios and remote storage/queue service integrations, intake deadlines, durability barriers under slow storage, and systematic termination across all effect boundaries.
 - Instrumentation of the native core and concurrency stress tests, including broader cancellation stress during preparation and storage. The focused preparation tests do not qualify blocked synchronous storage or every host callback.
 - Runtime proof for x86_64 and final consumer validation against the release artifact.
 - Available-credential real-model integration and final local checks on macOS arm64.

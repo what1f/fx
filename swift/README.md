@@ -369,12 +369,28 @@ let policy = try FxDeliveryPolicy(maximumDuration: .seconds(60), reserve: .secon
 let agent = try FxAgent(configuration: configuration, store: store, deliveryPolicy: policy)
 ```
 
-The worker asks the core to yield at a safe boundary when the reserve begins. It saves a snapshot, releases ownership, and continues the same turn in another local delivery. If a request or tool remains active, it hands off before the deadline, leaving half the reserve, up to two seconds, for cleanup. Each delivery allows at least one model request. A zero reserve disables this active cutoff. The policy defaults to no time limit when omitted.
+The worker asks the core to yield at a safe boundary when the reserve begins. It saves a snapshot, releases ownership, and continues the same turn in another local delivery. If a request or tool remains active, it hands off before the deadline, leaving half the reserve, up to two seconds, for cleanup. A zero-duration policy permits one safe step before yielding. A zero reserve disables the active cutoff. The policy defaults to no time limit when omitted.
 
-The durable event sequence includes `.yielded` and `.resumed`, with one final `.ended` for the whole turn. Safe tools can resume with their original execution IDs; ambiguous writes remain stopped. After three consecutive deadline cutoffs at the same step, a tool is no longer rerun, or a stalled model turn is cancelled. Counts survive reopening the store and reset when the core advances to another step. Active cutoffs emit `.sessionDeadline` observations. Host transports and tools must cooperate with cancellation. This policy continues work locally; it does not provide an external queue or serverless delivery adapter.
+The durable event sequence includes `.yielded` and `.resumed`, with one final `.ended` for the whole turn. Safe tools can resume with their original execution IDs; ambiguous writes remain stopped. After three consecutive deadline cutoffs at the same step, a tool is no longer rerun, or a stalled model turn is cancelled. Counts survive reopening the store and reset when the core advances to another step. Active cutoffs emit `.sessionDeadline` observations. Host transports and tools must cooperate with cancellation. Without a queue, the agent schedules the next delivery locally.
+
+To publish work to an external queue, implement `FxSessionQueue` and pass it as `queue:` to both the sending agent and the worker. Each wakeup contains only the agent name and session ID. Both agents must use the same durable store. The host owns queue transport and routes messages to the matching agent.
+
+```swift
+let worker = try FxAgent(configuration: configuration, name: "assistant",
+                         store: store, deliveryPolicy: policy, queue: queue)
+let outcome = try await worker.deliver(wakeup)
+switch outcome {
+case .complete: break // Acknowledge the queue message.
+case .retry(let delay): break // Retain it and redeliver after this delay.
+}
+```
+
+Here, `queue` is your `FxSessionQueue` implementation, and `wakeup` is the decoded queue message. `enqueue` must return when the queue accepts the message, without waiting for execution. `prompt`, `steer`, and `resume` wait for publishing after durable acceptance. If publishing fails, the saved input remains: retry its original ID or call `resume`. Acceptance and publishing are separate operations, so a process failure between them requires host recovery of pending work.
+
+A delivery policy covers the entire external delivery, including queued inputs. A busy owner returns `.retry`; duplicate messages for finished work return `.complete`. Retain and redeliver messages when `deliver` throws. Cancelling its awaiting task leaves durable execution running. In queue mode, `close()` waits for active deliveries and leaves other accepted inputs in storage for a later worker. The SDK does not implement a cloud queue client.
 
 When the active cutoff expires while the engine is opening, the worker cancels preparation, waits for cleanup, and stops with `FxSessionError.preparationTimedOut`. The accepted input remains pending without a final result. Fix the underlying service, then call `session.resume()` to retry its original ID. The worker does not retry preparation automatically; `agent.close()` reports the failure if it remains unresolved. HTTP clients, credential callbacks, and asynchronous persistence loads must cooperate with cancellation. A callback that ignores cancellation delays cleanup and the timeout result.
 
 Call `try await session.checkpoint()` to export the conversation, including stored images, without changing the session or taking ownership from its worker. Export reads a consistent stored snapshot and sends no model request. While a worker runs, the export includes only progress already stored. Pass the bytes as `checkpoint:` to a new `FxAgent` to seed new sessions. Existing stored sessions retain their own history. Exporting an unused session creates no stored data.
 
-The agent/session surface is still partial. External scheduling and storage adapters and full upstream durable-session qualification remain pending. Complete upstream custom-provider, Codex, and Grok test files have local proof. The session store's host event format is Swift-specific; core journal and checkpoint interoperability is a separate tested contract.
+The agent/session surface is still partial. Remote service integrations, generic durable execution, and full upstream durable-session qualification remain pending. Complete upstream custom-provider, Codex, and Grok test files have local proof. The session store's host event format is Swift-specific; core journal and checkpoint interoperability is a separate tested contract.

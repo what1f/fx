@@ -8,6 +8,9 @@ public actor FxAgent {
     private let initialCheckpoint: Data?
     private let checkpointAfterBytes: Int?
     private let deliveryPolicy: FxDeliveryPolicy?
+    private let queue: (any FxSessionQueue)?
+    private var deliveries: [String: AsyncResult<FxDeliveryOutcome>] = [:]
+    private typealias Deadlines = (yield: Date, stop: ContinuousClock.Instant?)
     private var workers: [String: Task<Void, Never>] = [:]
     private var failures: [String: any Error] = [:]
     private struct ControlCheck {
@@ -19,7 +22,7 @@ public actor FxAgent {
     private var intakes = 0
     private var closed = false
 
-    public init(configuration: FxConfiguration, name: String = "default", store: any FxSessionStorage, checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024, deliveryPolicy: FxDeliveryPolicy? = nil) throws {
+    public init(configuration: FxConfiguration, name: String = "default", store: any FxSessionStorage, checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024, deliveryPolicy: FxDeliveryPolicy? = nil, queue: (any FxSessionQueue)? = nil) throws {
         try configuration.validateInstructions()
         guard validSessionIdentifier(name), name.utf8.count <= 64,
               let first = name.utf8.first, (48...57).contains(first) || (65...90).contains(first) || (97...122).contains(first) else { throw FxError.invalidInput("Invalid agent name") }
@@ -28,6 +31,7 @@ public actor FxAgent {
         if let checkpointAfterBytes, checkpointAfterBytes < 0 { throw FxError.invalidInput("Checkpoint interval must not be negative") }
         self.checkpointAfterBytes = checkpointAfterBytes
         self.deliveryPolicy = deliveryPolicy
+        self.queue = queue
         self.name = name
         self.store = store
     }
@@ -64,7 +68,7 @@ public actor FxAgent {
         }
         try Task.checkCancellation()
         let repeated = try await store.accept(session: session, agent: name, id: id, content: content, options: options, checkpoint: initialCheckpoint, steering: steering, deferringImageLimits: configuration.prepareImage != nil)
-        kick(session)
+        try await schedule(session)
         if steering { await synchronizeControls(session) }
         return FxSessionTurn(id: id, sessionID: session, isRepeated: repeated, eventCursor: 0, agent: self)
     }
@@ -77,7 +81,7 @@ public actor FxAgent {
         do { point = try await store.resumePoint(session: session, agent: name) }
         catch FxSessionError.notFound { return nil }
         guard let point else { return nil }
-        kick(session)
+        try await schedule(session)
         return FxSessionTurn(id: point.id, sessionID: session, isRepeated: false, eventCursor: point.cursor, agent: self)
     }
 
@@ -121,6 +125,9 @@ public actor FxAgent {
 
     func cancel(_ session: String, id: String? = nil) async throws {
         try await store.cancel(session: session, agent: name, id: id)
+        if let queue, try await store.hasWork(session: session, agent: name) {
+            try await queue.enqueue(FxSessionWakeup(agent: name, sessionID: session))
+        }
         if id == nil || controlChecks[session]?.inputID == id { await synchronizeControls(session) }
     }
 
@@ -138,42 +145,90 @@ public actor FxAgent {
         for waiter in checks.waiters { waiter.resume() }
     }
 
+    private func schedule(_ session: String) async throws {
+        if let queue { try await queue.enqueue(FxSessionWakeup(agent: name, sessionID: session)) }
+        else { kick(session) }
+    }
+
+    /// Runs one queue delivery. A retry result or thrown error must not acknowledge the message.
+    /// Cancelling this waiter leaves durable work running; close() waits for active deliveries.
+    public func deliver(_ wakeup: FxSessionWakeup, policy: FxDeliveryPolicy? = nil) async throws -> FxDeliveryOutcome {
+        guard !closed else { throw FxError.closed }
+        guard queue != nil else { throw FxError.invalidInput("Agent has no delivery queue") }
+        guard wakeup.agent == name else { throw FxSessionError.wrongAgent }
+        guard validSessionIdentifier(wakeup.sessionID) else { throw FxError.invalidInput("Invalid session ID") }
+        try Task.checkCancellation()
+        let session = wakeup.sessionID
+        if let delivery = deliveries[session] { return try await delivery.wait() }
+        let completion = AsyncResult<FxDeliveryOutcome>()
+        deliveries[session] = completion
+        failures[session] = nil
+        let deadlines = (policy ?? deliveryPolicy)?.deadlines()
+        workers[session] = Task {
+            let result = await self.run(session, external: true, deadlines: deadlines)
+            await completion.resolve(result)
+        }
+        return try await completion.wait()
+    }
+
     private func kick(_ session: String) {
         guard workers[session] == nil else { return }
         failures[session] = nil
-        workers[session] = Task { await self.run(session) }
+        workers[session] = Task { _ = await self.run(session) }
     }
 
-    private func run(_ session: String) async {
+    private func run(_ session: String, external: Bool = false, deadlines: Deadlines? = nil) async -> Result<FxDeliveryOutcome, any Error> {
+        let result: Result<FxDeliveryOutcome, any Error>
         do {
-            // Another process may be draining the same inbox. Keep watching until it
-            // finishes or releases ownership, including the intake/idle-release race.
-            while try await store.hasWork(session: session, agent: name) {
-                guard let lease = try await store.claim(session: session, agent: name) else {
-                    try await Task.sleep(for: .milliseconds(20))
-                    continue
-                }
-                do {
-                    while let input = try await store.next(lease) {
-                        if try await execute(input, lease: lease) { break }
-                    }
-                    try await store.release(lease)
-                } catch {
-                    try? await store.release(lease)
-                    throw error
-                }
-            }
-        } catch { failures[session] = (error as? SessionStorageFailure)?.cause ?? error }
+            result = .success(try await drain(session, external: external, deadlines: deadlines))
+        } catch {
+            let cause = (error as? SessionStorageFailure)?.cause ?? error
+            failures[session] = cause
+            result = .failure(cause)
+        }
         workers[session] = nil
-        // Acceptance can interleave with the final empty-inbox read.
-        if failures[session] == nil {
+        deliveries.removeValue(forKey: session)
+        // Local intake can interleave with the final empty-inbox read. External
+        // intake publishes its own wakeup and never starts another delivery here.
+        if !external, failures[session] == nil {
             do { if try await store.hasWork(session: session, agent: name) { kick(session) } }
             catch { failures[session] = error }
         }
+        return result
     }
 
-    private func execute(_ input: FxSessionInput, lease: FxSessionLease) async throws -> Bool {
-        let deadlines = deliveryPolicy?.deadlines()
+    private func drain(_ session: String, external: Bool, deadlines: Deadlines?) async throws -> FxDeliveryOutcome {
+        while true {
+            let pending: Bool
+            do { pending = try await store.hasWork(session: session, agent: name) }
+            catch FxSessionError.notFound { return .complete }
+            guard pending else { return .complete }
+            if external, let stop = deadlines?.stop, ContinuousClock.now >= stop { return .retry(after: .zero) }
+            guard let lease = try await store.claim(session: session, agent: name) else {
+                if external { return .retry(after: .seconds(1)) }
+                try await Task.sleep(for: .milliseconds(20))
+                continue
+            }
+            do {
+                var started = false
+                while let input = try await store.next(lease) {
+                    if external, started, let yield = deadlines?.yield, Date() >= yield { break }
+                    started = true
+                    if try await execute(input, lease: lease, deadlines: deadlines) { break }
+                }
+                try await store.release(lease)
+            } catch {
+                try? await store.release(lease)
+                throw error
+            }
+            if external {
+                return try await store.hasWork(session: session, agent: name) ? .retry(after: .zero) : .complete
+            }
+        }
+    }
+
+    private func execute(_ input: FxSessionInput, lease: FxSessionLease, deadlines suppliedDeadlines: Deadlines? = nil) async throws -> Bool {
+        let deadlines = suppliedDeadlines ?? deliveryPolicy?.deadlines()
         try await store.start(lease, input: input)
         if input.cancelRequested && !input.wasStarted {
             try await finish(input, lease: lease, reason: .cancelled)
@@ -334,7 +389,7 @@ public actor FxAgent {
             usage: usage, error: error, epoch: lease.epoch, isRepeated: false)) }
     }
 
-    /// Stops intake, then waits for accepted work. The store remains open.
+    /// Stops intake and waits for active work. Queued inputs remain in the store for delivery.
     public func close() async throws {
         closed = true
         while intakes > 0 || !workers.isEmpty {

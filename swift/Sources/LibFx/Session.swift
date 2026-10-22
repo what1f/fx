@@ -8,7 +8,8 @@ public struct FxSession: Sendable, Identifiable {
     public func prompt(_ text: String, id: String = UUID().uuidString) async throws -> FxSessionTurn {
         try await prompt([.text(text)], id: id)
     }
-    /// Returns after the input has been durably accepted.
+    /// Returns after durable acceptance and, when configured, queue publishing.
+    /// Publishing failure leaves the input saved; retry its ID or call resume().
     public func prompt(_ content: [FxPromptContent], id: String = UUID().uuidString) async throws -> FxSessionTurn {
         try await agent.accept(session: self.id, options: options, content: content, id: id)
     }
@@ -19,7 +20,7 @@ public struct FxSession: Sendable, Identifiable {
     public func steer(_ text: String, id: String = UUID().uuidString) async throws -> FxSteeringReceipt {
         try await steer([.text(text)], id: id)
     }
-    /// Returns after durable acceptance. Images run as a new turn.
+    /// Returns after durable acceptance and queue publishing. Images run as a new turn.
     public func steer(_ content: [FxPromptContent], id: String = UUID().uuidString) async throws -> FxSteeringReceipt {
         _ = try await agent.accept(session: self.id, options: options, content: content, id: id, steering: true)
         return FxSteeringReceipt(id: id)

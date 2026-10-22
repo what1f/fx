@@ -15,7 +15,34 @@ node - "$task_tmp" <<'JS' &
 const http = require('node:http');
 const fs = require('node:fs');
 const directory = process.argv[2];
+const queue = [];
+const queueState = { published: [], acknowledged: [] };
+const saveQueue = () => fs.writeFileSync(`${directory}/queue-state.json`, JSON.stringify(queueState));
 const server = http.createServer((request, response) => {
+    if (request.url === '/queue' && request.method === 'POST') {
+        let body = '';
+        request.setEncoding('utf8');
+        request.on('data', chunk => { body += chunk; });
+        request.on('end', () => {
+            const wakeup = JSON.parse(body);
+            const delivery = { id: String(queueState.published.length + 1), wakeup };
+            queue.push(delivery); queueState.published.push(wakeup); saveQueue();
+            response.writeHead(202); response.end();
+        });
+        return;
+    }
+    if (request.url === '/queue' && request.method === 'GET') {
+        response.writeHead(queue.length ? 200 : 404, {'content-type': 'application/json'});
+        response.end(queue.length ? JSON.stringify(queue[0]) : '');
+        return;
+    }
+    if (request.url.startsWith('/queue/') && request.method === 'DELETE') {
+        const id = request.url.slice('/queue/'.length);
+        if (queue[0]?.id !== id) { response.writeHead(409); response.end(); return; }
+        queue.shift(); queueState.acknowledged.push(id); saveQueue();
+        response.writeHead(204); response.end();
+        return;
+    }
     if (request.url === '/mcp') {
         let body = '';
         request.setEncoding('utf8');
@@ -73,6 +100,37 @@ import Foundation
 import LibFx
 import LibFxMCP
 import MCP
+struct ConsumerQueue: FxSessionQueue {
+    struct Delivery: Decodable { let id: String; let wakeup: FxSessionWakeup }
+    let endpoint: URL
+    private let client = FxURLSessionHTTPClient()
+
+    func enqueue(_ wakeup: FxSessionWakeup) async throws {
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.httpBody = try JSONEncoder().encode(wakeup)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let response = try await client.send(request)
+        for try await _ in response.body {}
+        guard response.statusCode == 202 else { throw FxError.transport("Queue rejected message") }
+    }
+    func take() async throws -> Delivery? {
+        let response = try await client.send(URLRequest(url: endpoint))
+        var data = Data()
+        for try await chunk in response.body { data.append(chunk) }
+        if response.statusCode == 404 { return nil }
+        guard response.statusCode == 200 else { throw FxError.transport("Queue read failed") }
+        return try JSONDecoder().decode(Delivery.self, from: data)
+    }
+    func acknowledge(_ delivery: Delivery) async throws {
+        var request = URLRequest(url: endpoint.appendingPathComponent(delivery.id))
+        request.httpMethod = "DELETE"
+        let response = try await client.send(request)
+        for try await _ in response.body {}
+        guard response.statusCode == 204 else { throw FxError.transport("Queue acknowledgement failed") }
+    }
+}
+
 final class TransportEvents: @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: [FxTransportEvent] = []
@@ -432,6 +490,26 @@ struct SubscriptionHTTP: FxHTTPClient {
         }
         try await subscribed.close()
         let port = ProcessInfo.processInfo.environment["LIBFX_PROVIDER_PORT"]!
+        let queue = ConsumerQueue(endpoint: URL(string: "http://127.0.0.1:\(port)/queue")!)
+        let queuedStore = try FxSessionStore(url: directory.appendingPathComponent("queue.sqlite"))
+        let publisher = try FxAgent(configuration: FxConfiguration(apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()),
+                                    store: queuedStore, queue: queue)
+        let queuedSession = try await publisher.session(id: "queue-consumer")
+        let queuedTurn = try await queuedSession.prompt("queued consumer", id: "queue-input")
+        try await publisher.close()
+        guard let message = try await queue.take(), message.wakeup == FxSessionWakeup(agent: "default", sessionID: queuedSession.id) else {
+            throw FxError.protocolViolation("Missing queued input")
+        }
+        let queueWorker = try FxAgent(configuration: FxConfiguration(apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()),
+                                      store: queuedStore, queue: queue)
+        guard try await queueWorker.deliver(message.wakeup) == .complete,
+              try await queuedTurn.result.stopReason == .endTurn else { throw FxError.protocolViolation("Queued execution failed") }
+        try await queue.acknowledge(message)
+        guard try await queue.take() == nil, try await queueWorker.deliver(message.wakeup) == .complete else {
+            throw FxError.protocolViolation("Queue redelivery failed")
+        }
+        try await queueWorker.close()
+        try await queuedStore.close()
         let mcp = try await FxMCPAdapter.connect(transport: HTTPClientTransport(endpoint: URL(string: "http://127.0.0.1:\(port)/mcp")!, streaming: false),
             prefix: "mcp_", resources: ["memory://consumer"], prompts: [.init(name: "review")])
         guard mcp.tools.map(\.name) == ["mcp_echo"], mcp.instructions.contains("MCP_RESOURCE"), mcp.instructions.contains("MCP_PROMPT") else {
@@ -488,10 +566,14 @@ struct SubscriptionHTTP: FxHTTPClient {
 SWIFT
 LIBFX_PROVIDER_PORT="$provider_port" LIBFX_SWIFT_PACKAGE="$repo_root/swift" swift run --package-path "$task_tmp" -c release Consumer
 
-node - "$task_tmp/requests.jsonl" <<'JS'
+node - "$task_tmp/requests.jsonl" "$task_tmp/queue-state.json" <<'JS'
 const assert = require('node:assert/strict');
 const requests = require('node:fs').readFileSync(process.argv[2], 'utf8').trim().split('\n').map(JSON.parse);
 assert.deepEqual(requests.map(request => request.url), ['/v1/chat/completions', '/redirect/chat/completions', '/token']);
 assert.ok(requests.slice(0, 2).every(request => request.auth === 'Bearer consumer-provider-key'));
 console.log('Foundation HTTP consumer and credential redirect isolation passed');
+const queue = JSON.parse(require('node:fs').readFileSync(process.argv[3], 'utf8'));
+assert.deepEqual(queue.published, [{ agent: 'default', sessionID: 'queue-consumer' }]);
+assert.deepEqual(queue.acknowledged, ['1']);
+console.log('Foundation HTTP queue publish, delivery and acknowledgement passed');
 JS
