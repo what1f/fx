@@ -339,6 +339,10 @@ private actor ValidationStore: FxPersistence {
     let tool = FxTool(name: "inspect", description: "Inspect", inputSchema: .object(["type": .string("object")]), isIdempotent: false) { _, context in
         await capture.record(context)
         let scope = try #require(context.observation)
+        let answer = await scope.wait(FxWaitRequest(kind: .approval, prompt: "Continue?"), resolution: { $0 }) {
+            FxWaitResolution(answers: ["approve"])
+        }
+        #expect(answer.outcome == .accepted && answer.answers == ["approve"])
         let child = try await FxEngine.open(configuration: FxConfiguration(
             apiKey: "test", model: "swift/test", httpClient: SessionHTTP(), observation: scope.childOptions()))
         let turn = try await child.prompt("child", id: "child-turn")
@@ -361,6 +365,12 @@ private actor ValidationStore: FxPersistence {
     let parentStart = try #require(observed.events.first { $0.kind == .toolStarted && $0.sessionID == context.sessionID })
     #expect(scope.scope.sessionID == context.sessionID && scope.scope.turnID == parentStart.turnID)
     #expect(scope.callID == "call-1")
+    let waits = observed.events.filter { $0.kind == .waitStarted || $0.kind == .waitEnded }
+    #expect(waits.map(\.kind) == [.waitStarted, .waitEnded])
+    #expect(waits.first?.data["requestId"] == waits.last?.data["requestId"])
+    #expect(waits.first?.data["callId"] == .string("call-1"))
+    #expect(waits.last?.data["outcome"] == .string("accepted") && waits.last?.data["answers"] == nil)
+    #expect(waits.allSatisfy { $0.sessionID == parentStart.sessionID && $0.turnID == parentStart.turnID && $0.executionID == parentStart.executionID })
     let children = observed.events.filter { $0.sessionID != "logical-parent" }
     #expect(children.contains { $0.kind == .turnStarted })
     #expect(children.contains { $0.kind == .turnEnded })

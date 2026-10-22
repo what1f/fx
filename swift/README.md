@@ -214,7 +214,11 @@ Callbacks run synchronously. Concurrent tools can deliver callbacks from differe
 
 When observation is enabled, a host tool receives `context.observation`. Pass its `childOptions()` to a child engine's `FxConfiguration.observation` to retain the root session and parent session, turn, and call identifiers. Existing native descendant ancestry is preserved. Durable tool context uses the caller's message ID as `context.turnID`; observation scopes retain the runtime turn ID used by the parent events.
 
-Use `context.observation?.mcp(server:tool:correlationID:isError:operation:)` to observe an MCP effect owned by your host. The optional `LibFxMCP` module applies this helper automatically. It calls the effect once and preserves its result or error even when an observer throws. Cancellation or tool completion ends open spans once, and a retained scope emits no new operations after the tool ends. Input-wait helpers and the full upstream hooks suite remain pending.
+Use `context.observation?.mcp(server:tool:correlationID:isError:operation:)` to observe an MCP effect owned by your host. The optional `LibFxMCP` module applies this helper automatically. It calls the effect once and preserves its result or error even when an observer throws. Cancellation or tool completion ends open spans once, and a retained scope emits no new operations after the tool ends. The full upstream hooks suite remains pending.
+
+Use `observation.wait(_:resolution:failure:operation:)` to wrap your existing input callback. `FxWaitRequest` describes an approval, question, MCP form, or MCP URL wait. Map your callback's result to `FxWaitResolution` with `resolution:`; the original result is returned unchanged. Use `failure:` to classify host-specific timeout errors. Thrown errors retain their original identity, and cancellation ends the span once without replacing a late answer.
+
+Wait content is omitted by default. With content capture enabled, each start or end event shares a 64 KiB UTF-8 text budget. Questions, options per question, and answers each retain at most 128 entries. `contentTruncated` reports omitted content or entries. These limits affect observations only; the input callback and caller retain their full values.
 
 ## Persist a conversation
 

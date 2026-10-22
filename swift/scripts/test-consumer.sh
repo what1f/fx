@@ -164,8 +164,12 @@ struct SubscriptionHTTP: FxHTTPClient {
         let models = try await FxModel.available(apiKey: "consumer-test-key", httpClient: MockHTTP())
         guard models.map(\.id) == ["swift/consumer"] else { throw FxModelCatalogError.malformedResponse }
         let toolInput = JSONValue.object(["content": .string(String(repeating: "x", count: 128 * 1024))])
-        let tool = FxTool(name: "probe", description: "Probe", inputSchema: .object(["type": .string("object")]), isIdempotent: true) { input, _ in
-            guard input == toolInput else { throw FxError.protocolViolation("Incomplete tool arguments") }
+        let waitEvents = Observations()
+        let tool = FxTool(name: "probe", description: "Probe", inputSchema: .object(["type": .string("object")]), isIdempotent: true) { input, context in
+            guard input == toolInput, let observation = context.observation else { throw FxError.protocolViolation("Incomplete tool context") }
+            let returned = await observation.wait(FxWaitRequest(kind: .approval, prompt: "Continue?"),
+                resolution: { _ in FxWaitResolution(answers: ["approve"]) }) { input }
+            guard returned == input else { throw FxError.protocolViolation("Changed effect result") }
             return "received"
         }
         let skillFile = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
@@ -174,7 +178,8 @@ struct SubscriptionHTTP: FxHTTPClient {
         let skills = try FxSkills([try await FxSkill.load(from: skillFile,
             resources: [.init(uri: "memory://consumer", text: "RESOURCE_CONSUMER")], tools: [tool])])
         let toolEngine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "consumer-test-key", model: "swift/consumer",
-            instructions: skills.instructions, tools: skills.tools, httpClient: ToolInputHTTP(input: toolInput)))
+            instructions: skills.instructions, tools: skills.tools, httpClient: ToolInputHTTP(input: toolInput),
+            observation: FxObservationOptions(captureContent: true, onEvent: waitEvents.record)))
         let toolTurn = try await toolEngine.prompt("probe")
         var previews = 0
         for try await event in toolTurn {
@@ -187,6 +192,13 @@ struct SubscriptionHTTP: FxHTTPClient {
             throw FxError.protocolViolation("Missing tool preview")
         }
         try await toolEngine.close()
+        let waits = waitEvents.values.filter { $0.kind == .waitStarted || $0.kind == .waitEnded }
+        guard waits.map(\.kind) == [.waitStarted, .waitEnded], waits[0].data["callId"] == .string("consumer-call"),
+              waits[0].data["requestId"] == waits[1].data["requestId"], waits[0].data["prompt"] == .string("Continue?"),
+              waits[1].data["outcome"] == .string("accepted"), waits[1].data["answers"] == .array([.string("approve")]),
+              waits.allSatisfy({ $0.sessionID == toolEngine.sessionID && $0.turnID == toolTurn.id && $0.contentCaptured }) else {
+            throw FxError.protocolViolation("Unexpected input wait observations")
+        }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try FxSQLitePersistence(url: directory.appendingPathComponent("conversation.sqlite"))

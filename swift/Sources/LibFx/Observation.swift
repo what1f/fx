@@ -70,7 +70,7 @@ public struct FxObservation: Sendable, Codable, Equatable {
     }
 
     init(scope: Self, kind: Kind? = nil, data: JSONValue? = nil, parent: FxObservationParent? = nil,
-         timestamp: Date? = nil, captureContent: Bool? = nil) {
+         timestamp: Date? = nil, captureContent: Bool? = nil, contentTruncated: Bool? = nil) {
         version = scope.version
         self.kind = kind ?? scope.kind
         sessionID = scope.sessionID
@@ -86,7 +86,7 @@ public struct FxObservation: Sendable, Codable, Equatable {
         stepIndex = scope.stepIndex
         self.timestamp = timestamp ?? scope.timestamp
         contentCaptured = captureContent ?? scope.contentCaptured
-        contentTruncated = kind == nil ? scope.contentTruncated : false
+        self.contentTruncated = contentTruncated ?? (kind == nil ? scope.contentTruncated : false)
         self.data = data ?? scope.data
     }
 }
