@@ -13,13 +13,15 @@ export async function resolve(specifier, context, nextResolve) {
 
 export async function load(url, context, nextLoad) {
   const result = await nextLoad(url, context);
-  if (url.endsWith('/sdk/tests/test-agent-images.mjs') && process.env.LIBFX_SWIFT_IMAGE_PHASE === 'preparation') {
+  if (url.endsWith('/sdk/tests/test-agent-images.mjs') && ['preparation', 'checkpoints'].includes(process.env.LIBFX_SWIFT_IMAGE_PHASE)) {
     const source = result.source.toString();
-    const boundary = '// A proxy that refuses the catalog request leaves image support unknown, so';
+    const checkpoints = process.env.LIBFX_SWIFT_IMAGE_PHASE === 'checkpoints';
+    const boundary = checkpoints ? '// SDK-side limits reject synchronously with typed errors naming the bound,' : '// A proxy that refuses the catalog request leaves image support unknown, so';
     if (source.split(boundary).length !== 2) throw new Error('Upstream image fixture changed; review preparation selection');
-    // Keep every assertion in the complete input/preparation section. The rest
+    // Keep every assertion in the selected complete sections. The rest
     // of this owner remains pending in inventory.json.
-    return { ...result, source: source.slice(0, source.indexOf(boundary)) + '\nconsole.log(`${backend} image input and preparation section passed`);\n' };
+    const label = checkpoints ? 'image input, preparation and checkpoint sections passed' : 'image input and preparation section passed';
+    return { ...result, source: source.slice(0, source.indexOf(boundary)) + '\nconsole.log(`${backend} ' + label + '`);\n' };
   }
   if (url.endsWith('/sdk/tests/test-checkpoint.mjs')) {
     const source = result.source.toString();

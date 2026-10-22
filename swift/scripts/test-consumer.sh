@@ -241,6 +241,15 @@ struct SubscriptionHTTP: FxHTTPClient {
         let imageEngine = try await FxEngine.open(configuration: imageConfig, persistence: imagePersistence)
         let picture = try await imageEngine.prompt([.image(FxImage(data: Data(repeating: 0, count: 5 * 1024 * 1024), format: .png))])
         guard try await picture.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
+        let expectedImageCheckpoint = try await imageEngine.checkpoint()
+        try await withThrowingTaskGroup(of: Data.self) { group in
+            for _ in 0..<16 { group.addTask { try await imageEngine.checkpoint() } }
+            for try await data in group {
+                guard data == expectedImageCheckpoint else {
+                    throw FxError.protocolViolation("Concurrent consumer checkpoints differ")
+                }
+            }
+        }
         try await imageEngine.close()
         try await imageStore.close()
         let reopenedImages = try FxSQLitePersistence(url: imageURL)

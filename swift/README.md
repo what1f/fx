@@ -291,6 +291,8 @@ New follow-ups run in queue order after the active turn, or start immediately wh
 
 For an idle engine, `checkpoint()` returns opaque bytes that another Swift or JavaScript engine can restore. Provide either checkpoint bytes or a persistence store at creation.
 
+Concurrent `checkpoint()` calls run in order. Each queued call checks that the engine is still idle before exporting. A prompt started during an export waits for that export before sending its request; queued exports then fail with `FxError.busy` while the prompt is active. Cancelling a queued export leaves the other calls intact. Closing rejects pending exports. Explicit restore checkpoints must be nonempty and no larger than 4 MiB.
+
 With a store conforming to `FxCheckpointPersistence`, call `saveCheckpoint()` to save a journal snapshot through the last committed cursor. The store may then prune the covered journal prefix. Closing waits for a snapshot save already in progress. Journal snapshots differ from the export returned by `checkpoint()`; let the SDK create them.
 
 The core can defer a snapshot while queued inputs remain unplaced or the session exceeds snapshot bounds. This leaves the journal intact. Automatic saving tries again after a later turn.

@@ -34,6 +34,9 @@ public actor FxEngine {
     private var promptDispatch: PromptDispatch?
     private var imagePreparation: Task<PreparedPrompt, any Error>?
     private var checkpointing = false
+    private var checkpointOwner: UUID?
+    private var checkpointWaiters: [(id: UUID, continuation: CheckedContinuation<Void, any Error>)] = []
+    private var checkpointBarrier: PromptDispatch?
     private var checkpointSaveTask: Task<Void, any Error>?
     private var closingTask: Task<Void, any Error>?
 
@@ -86,6 +89,12 @@ public actor FxEngine {
         if let sessionID, !validSessionIdentifier(sessionID) { throw FxError.invalidInput("Invalid session ID") }
         guard checkpoint == nil || persistence == nil else {
             throw FxError.invalidInput("Use a checkpoint or a persistence store, not both")
+        }
+        if let checkpoint {
+            guard !checkpoint.isEmpty else { throw FxError.invalidInput("Checkpoint must not be empty") }
+            guard checkpoint.count <= 4 * 1024 * 1024 else {
+                throw FxError.invalidInput("Checkpoint exceeds the 4194304 byte limit")
+            }
         }
         if let bytes = configuration.checkpointAfterBytes, bytes < 0 {
             throw FxError.invalidInput("Checkpoint interval must not be negative")
@@ -297,7 +306,7 @@ public actor FxEngine {
 
     @discardableResult
     private func startNextFollowUp(held: Bool = false) -> FxTurn? {
-        guard !closed, !handedOff, journalFailure == nil, turnID == nil, !cancelling, !checkpointing else { return nil }
+        guard !closed, !handedOff, journalFailure == nil, turnID == nil, !cancelling, !checkpointing, checkpointOwner == nil else { return nil }
         while let index = followUps.firstIndex(where: { $0.held == held }) {
             guard followUps[index].ready else { return nil }
             let entry = followUps.remove(at: index)
@@ -335,6 +344,7 @@ public actor FxEngine {
     }
 
     var completedTurnID: String? { lastCompletedTurnID }
+    var queuedCheckpointCount: Int { checkpointWaiters.count }
 
     public var recoveryState: FxRecoveryState? { recovery }
     package var hasHandedOffForConformance: Bool { handedOff }
@@ -393,6 +403,7 @@ public actor FxEngine {
             metadata["inputAccepted"] = .bool(followUp.acceptedInCore)
         }
         let prepared = try PreparedPrompt(content, allowEmpty: resuming, deferringImageLimits: prepareImage != nil)
+        let precedingCheckpoint = checkpointBarrier
         let id = UUID()
         turnID = id
         publicTurnID = publicID
@@ -417,6 +428,7 @@ public actor FxEngine {
         }
         let task = Task {
             do {
+                _ = await precedingCheckpoint?.wait()
                 await transport.beginTurn()
                 guard !closed else { throw FxError.closed }
                 var ready = prepared
@@ -749,15 +761,45 @@ public actor FxEngine {
     }
 
     public func checkpoint() async throws -> Data {
+        try Task.checkCancellation()
+        guard !closed else { throw FxError.closed }
+        let owner = UUID()
+        if checkpointOwner != nil {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    checkpointWaiters.append((owner, continuation))
+                }
+            } onCancel: { Task { await self.cancelCheckpointWaiter(owner) } }
+        } else { checkpointOwner = owner }
+        defer { finishCheckpoint(owner) }
+        try Task.checkCancellation()
         guard !closed else { throw FxError.closed }
         guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
-        checkpointing = true
-        defer { checkpointing = false; startNextFollowUp() }
+        checkpointBarrier = PromptDispatch()
         let reply = try await rpc.request("libfx/checkpoint", .object(["sessionId": .string(sessionID), "checkpointMeta": checkpointMetadata.value]))
         guard let id = reply["checkpointAttachment"]?.integer, let attachmentID = UInt32(exactly: id) else {
             throw FxError.protocolViolation("Invalid checkpoint attachment")
         }
         return try await transport.takeAttachment(id: attachmentID)
+    }
+
+    private func cancelCheckpointWaiter(_ id: UUID) {
+        guard let index = checkpointWaiters.firstIndex(where: { $0.id == id }) else { return }
+        checkpointWaiters.remove(at: index).continuation.resume(throwing: CancellationError())
+    }
+
+    private func finishCheckpoint(_ id: UUID) {
+        guard checkpointOwner == id else { return }
+        if let barrier = checkpointBarrier { Task { await barrier.resolve(sent: true) } }
+        checkpointBarrier = nil
+        if checkpointWaiters.isEmpty {
+            checkpointOwner = nil
+            startNextFollowUp()
+        } else {
+            let next = checkpointWaiters.removeFirst()
+            checkpointOwner = next.id
+            next.continuation.resume()
+        }
     }
 
     public func flushPersistence() async throws { try await journal?.check() }
@@ -783,7 +825,7 @@ public actor FxEngine {
     private func storeCheckpoint(finishing id: UUID?) async throws {
         guard !closed else { throw FxError.closed }
         guard !handedOff else { throw FxError.handedOff }
-        guard turnID == id, !cancelling, !checkpointing else { throw FxError.busy }
+        guard turnID == id, !cancelling, !checkpointing, checkpointOwner == nil else { throw FxError.busy }
         guard let journal else { throw FxError.invalidInput("Persistence store is required") }
         checkpointing = true
         defer { checkpointing = false; checkpointSaveTask = nil; startNextFollowUp() }
@@ -810,6 +852,8 @@ public actor FxEngine {
     public func close() async throws {
         if let closingTask { try await closingTask.value; return }
         closed = true
+        for waiter in checkpointWaiters { waiter.continuation.resume(throwing: FxError.closed) }
+        checkpointWaiters.removeAll()
         let preparation = imagePreparation
         failFollowUps(FxError.closed)
         if let turnID { finish(turn: turnID, error: FxError.closed) }

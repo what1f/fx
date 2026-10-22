@@ -102,11 +102,21 @@ actor Driver: FxHTTPClient, FxPersistence {
                 fields["category"] = .string(message == "Reasoning effort must not exceed 64 bytes" ? "range" : "type")
             }
             if case FxError.noActiveTurn = error { fields["message"] = .string("no prompt is running") }
+            if case FxError.busy = error, value["op"] == .string("checkpoint") {
+                fields["message"] = .string("cannot checkpoint while a prompt is active")
+            }
             if case FxSessionError.messageIDInUse = error {
                 fields["data"] = .object(["code": .string("FX_MESSAGE_ID_IN_USE")])
             }
             if let catalogError = error as? FxModelCatalogError {
                 fields["message"] = .string(catalogError.localizedDescription)
+                if case .malformedResponse = catalogError, let catalog = value["options"]?["modelCatalog"] {
+                    if case .array = catalog["data"] ?? catalog {
+                        fields["message"] = .string("Each modelCatalog entry needs a string id")
+                    } else {
+                        fields["message"] = .string("modelCatalog must be an array or a catalog response")
+                    }
+                }
                 switch catalogError {
                 case .invalidAPIKey, .malformedResponse: fields["category"] = .string("type")
                 case .byteLimit, .entryLimit: fields["category"] = .string("range")
@@ -760,6 +770,8 @@ actor Driver: FxHTTPClient, FxPersistence {
 
     private func javascriptMessage(_ message: String) -> String {
         switch message {
+        case "Checkpoint must not be empty": return "Invalid or non-fresh libfx checkpoint"
+        case "Checkpoint exceeds the 4194304 byte limit": return "libfx checkpoint is too large"
         case "Prompt image exceeds the size limit": return "image exceeds the per-image libfx limit"
         case "Image preparation must return nonempty bytes": return "resizeImage must return non-empty bytes and a mimeType"
         case "Invalid provider name": return "provider.name must be 1 to 64 letters, digits, underscores or hyphens, starting with a letter"

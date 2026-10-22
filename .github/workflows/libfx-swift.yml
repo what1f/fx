@@ -69,7 +69,7 @@ jobs:
           node swift/Tests/Conformance/journal-admission.mjs turn-identity
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-checkpoint.mjs native native
           node swift/Tests/Conformance/persistence-errors.mjs
-          LIBFX_SWIFT_IMAGE_PHASE=preparation node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-images.mjs native
+          LIBFX_SWIFT_IMAGE_PHASE=checkpoints node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-images.mjs native
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-tool-contract.mjs native
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native
       - name: Check Swift concurrency with Thread Sanitizer
@@ -97,6 +97,6 @@ jobs:
           node swift/Tests/Conformance/journal-admission.mjs turn-identity
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-checkpoint.mjs native native
           node swift/Tests/Conformance/persistence-errors.mjs
-          LIBFX_SWIFT_IMAGE_PHASE=preparation node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-images.mjs native
+          LIBFX_SWIFT_IMAGE_PHASE=checkpoints node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-images.mjs native
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-tool-contract.mjs native
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native
