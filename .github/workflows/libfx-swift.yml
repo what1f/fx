@@ -70,6 +70,8 @@ jobs:
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-checkpoint.mjs native native
           node swift/Tests/Conformance/persistence-errors.mjs
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-images.mjs native
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-instruction-limits.mjs native
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-native-core-image-framing.mjs
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-tool-contract.mjs native
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native
       - name: Check Swift concurrency with Thread Sanitizer
@@ -98,5 +100,7 @@ jobs:
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-checkpoint.mjs native native
           node swift/Tests/Conformance/persistence-errors.mjs
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-agent-images.mjs native
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-instruction-limits.mjs native
+          node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-native-core-image-framing.mjs
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-tool-contract.mjs native
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native

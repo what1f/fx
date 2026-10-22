@@ -6,6 +6,12 @@ public struct FxConfiguration: Sendable {
         _ = try PreparedPrompt(content, deferringImageLimits: prepareImage != nil)
     }
 
+    package func validateInstructions() throws {
+        guard instructions.utf8.count <= 65536 else {
+            throw FxError.invalidInput("Instructions exceed the 65536 byte limit")
+        }
+    }
+
     @_spi(Conformance) public var wireObserver: (@Sendable (FxWireDirection, JSONValue) async -> Void)?
     public var provider: FxProvider
     public var model: FxModel

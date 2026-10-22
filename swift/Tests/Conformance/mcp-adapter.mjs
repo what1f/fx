@@ -9,10 +9,11 @@ export async function createMcpAdapter(client, options, driver) {
   const child = spawn(driver, [], { stdio: ['pipe', 'pipe', 'pipe'] });
   const lines = createInterface({ input: child.stdout });
   const pending = new Map(), remoteCalls = new Map(), observations = new Map(), cancelledRequests = new Set();
-  let nextID = 1, stderr = '', closePromise;
+  let nextID = 1, stderr = '', closePromise, spawnFailure;
   child.stderr.on('data', data => { stderr += data; });
-  const exited = new Promise(resolve => child.once('exit', resolve));
+  const exited = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
   function request(op, args = {}) {
+    if (child.stdin.writableEnded || child.stdin.destroyed) return Promise.reject(new Error('MCP driver input is closed'));
     const id = nextID++;
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
@@ -21,8 +22,13 @@ export async function createMcpAdapter(client, options, driver) {
       });
     });
   }
-  child.on('exit', code => {
-    for (const waiter of pending.values()) waiter.reject(new Error(`MCP driver exited (${code}): ${stderr}`));
+  child.on('close', (code, signal) => {
+    for (const waiter of pending.values()) waiter.reject(new Error(`MCP driver exited: ${code ?? signal}${stderr ? `\n${stderr}` : ''}`));
+    pending.clear();
+  });
+  child.on('error', error => {
+    spawnFailure = error;
+    for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
   });
   child.stdin.on('error', error => {
@@ -31,8 +37,9 @@ export async function createMcpAdapter(client, options, driver) {
   });
   async function finish() {
     child.stdin.end();
-    const code = await exited;
+    const { code, signal } = await exited;
     lines.close();
+    if (spawnFailure) throw spawnFailure;
     // The official client warns when this fixture deliberately sends a late
     // response after cancellation. Allow only that warning for a request whose
     // cancellation crossed this transport; sanitizer and other output still fail.
@@ -41,7 +48,7 @@ export async function createMcpAdapter(client, options, driver) {
       const late = /^\S+ warning libfx\.conformance\.mcp: id=([A-Za-z0-9-]+) \[MCP\] Attempted to handle response for already removed request$/.exec(line);
       return !late || !cancelledRequests.has(late[1]);
     });
-    if (code !== 0 || unexpected.length) throw new Error(`MCP driver exited (${code}): ${stderr}`);
+    if (code !== 0 || signal || unexpected.length) throw new Error(`MCP driver exited: ${code ?? signal}${stderr ? `\n${stderr}` : ''}`);
   }
   lines.on('line', line => {
     const value = JSON.parse(line);
@@ -73,9 +80,16 @@ export async function createMcpAdapter(client, options, driver) {
             // only its protocol envelope; tool behavior still belongs to Swift.
             return { protocolVersion: message.params.protocolVersion, capabilities: { tools: {} },
               serverInfo: { name: options.serverName ?? 'fixture-client', version: 'fixture' } };
-          case 'tools/list': return client.listTools(message.params);
+          case 'tools/list': return Promise.resolve(client.listTools(message.params)).then(result =>
+            Array.isArray(result) ? { tools: result } : result);
           case 'tools/call': return client.callTool(message.params, undefined, { signal: controller.signal });
-          case 'resources/read': return client.readResource(message.params);
+          case 'resources/read': return Promise.resolve(client.readResource(message.params)).then(result => ({
+            ...result,
+            // The lightweight JS client fixture can omit the URI that the
+            // protocol requires. Preserve its content and requested identity.
+            contents: result.contents.map(content => content.uri === undefined
+              ? { ...content, uri: message.params.uri } : content),
+          }));
           case 'prompts/get': return Promise.resolve(client.getPrompt(message.params)).then(result => ({
             ...result,
             // The stdio fixture returns a content array. MCP uses one content
@@ -92,7 +106,7 @@ export async function createMcpAdapter(client, options, driver) {
     }
     const waiter = pending.get(value.id);
     pending.delete(value.id);
-    if (value.error) waiter?.reject(new Error(value.error.message));
+    if (value.error) waiter?.reject(new (value.error.category === 'range' ? RangeError : Error)(value.error.message));
     else waiter?.resolve(value.result);
   });
   try {

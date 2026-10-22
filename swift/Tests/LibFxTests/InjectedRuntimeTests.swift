@@ -83,6 +83,44 @@ private actor RuntimeContexts {
     func record(_ value: FxToolContext) { values.append(value) }
 }
 
+@Test func instructionLimitsUseUTF8BeforeAnyRuntimeFrames() async throws {
+    for instructions in [String(repeating: "x", count: 65536), String(repeating: "é", count: 32768)] {
+        let runtime = HookRuntime()
+        let engine = try await FxEngine.openForConformance(
+            configuration: FxConfiguration(apiKey: "fixture", instructions: instructions), transport: runtime)
+        #expect(await runtime.writes > 0)
+        try await engine.close()
+    }
+    for instructions in [String(repeating: "x", count: 65537), String(repeating: "é", count: 32769)] {
+        let runtime = HookRuntime()
+        do {
+            let engine = try await FxEngine.openForConformance(
+                configuration: FxConfiguration(apiKey: "fixture", instructions: instructions), transport: runtime)
+            try await engine.close()
+            Issue.record("Oversized instructions reached the runtime")
+        } catch { #expect(error as? FxError == .invalidInput("Instructions exceed the 65536 byte limit")) }
+        #expect(await runtime.writes == 0)
+        #expect(await runtime.closed)
+    }
+}
+
+@Test func agentInstructionsValidateBeforeCreatingViews() async throws {
+    let store = try FxSessionStore()
+    let oversized = String(repeating: "é", count: 32769)
+    #expect(throws: FxError.invalidInput("Instructions exceed the 65536 byte limit")) {
+        try FxAgent(configuration: FxConfiguration(apiKey: "fixture", instructions: oversized), store: store)
+    }
+    let agent = try FxAgent(configuration: FxConfiguration(apiKey: "fixture"), store: store)
+    await #expect(throws: FxError.invalidInput("Instructions exceed the 65536 byte limit")) {
+        try await agent.session(id: "instructions", options: .init(instructions: oversized))
+    }
+    let session = try await agent.session(id: "instructions", options: .init(instructions: String(repeating: "é", count: 32768)))
+    #expect(session.id == "instructions")
+    await #expect(throws: FxSessionError.notFound) { try await store.snapshot(session: "instructions", agent: "default") }
+    try await agent.close()
+    try await store.close()
+}
+
 private actor PreparationFailureProbe {
     private(set) var started = false
     private(set) var finished = false
@@ -142,9 +180,22 @@ func steeringDuringImagePreparationHasCountAndByteBounds(byteBound: Bool) async 
     while await engine.pendingSteeringCount < count { await Task.yield() }
     do { _ = try await turn.steer("overflow", id: "overflow"); Issue.record("Steering queue exceeded its limit") }
     catch { #expect(error as? FxError == .steeringQueueFull) }
+    receipts[0].cancel()
+    do { _ = try await receipts[0].value; Issue.record("Cancelled steering task was accepted") }
+    catch { #expect(error is CancellationError) }
+    #expect(await engine.pendingSteeringCount == count - 1)
+    let replacement = Task { try await turn.steer(text, id: "replacement") }
+    while await engine.pendingSteeringCount < count { await Task.yield() }
+    let alreadyCancelled = Task {
+        withUnsafeCurrentTask { $0?.cancel() }
+        return try await turn.steer("cancelled", id: "already-cancelled")
+    }
+    do { _ = try await alreadyCancelled.value; Issue.record("Already cancelled steering task was accepted") }
+    catch { #expect(error is CancellationError) }
+    #expect(await engine.pendingSteeringCount == count)
     await turn.cancel()
     #expect(try await turn.result.stopReason == .cancelled)
-    for receipt in receipts {
+    for receipt in Array(receipts.dropFirst()) + [replacement] {
         do { _ = try await receipt.value; Issue.record("Cancelled preparation accepted steering") }
         catch { #expect(error as? FxError == .noActiveTurn) }
     }

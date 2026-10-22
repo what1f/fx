@@ -7,6 +7,12 @@ const checks = [
   { name: 'upstream/test-agent-images', expected: 'native agent image prompts passed', args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-agent-images.mjs', 'native',
   ] },
+  { name: 'upstream/test-instruction-limits', expected: 'native instruction limits passed', args: [
+    '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-instruction-limits.mjs', 'native',
+  ] },
+  { name: 'upstream/test-native-core-image-framing', expected: 'native image framing passed:', args: [
+    '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-native-core-image-framing.mjs',
+  ] },
   { name: 'upstream/test-hooks', args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-hooks.mjs', 'native',
   ] },

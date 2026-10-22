@@ -135,11 +135,14 @@ actor Driver: FxHTTPClient, FxPersistence {
     }
 
     private func persistenceErrorFields(_ error: any Error) -> [String: JSONValue] {
+        if case FxMCPError.instructionsTooLarge = error {
+            return ["message": .string("MCP instructions exceed the 65536 byte limit"), "category": .string("range")]
+        }
         if let relayed = error as? RelayedImagePreparationError {
             return ["imagePreparationFailure": .string(relayed.token)]
         }
         if case FxError.invalidInput(let message) = error {
-            let range = ["Reasoning effort must not exceed 64 bytes", "Prompt image exceeds the size limit", "Prompt images exceed the count or size limit", "Prompt exceeds frame limit", "Prompt accepts at most 8 images", "Image reference exceeds the 512 byte limit"].contains(message)
+            let range = ["Instructions exceed the 65536 byte limit", "Reasoning effort must not exceed 64 bytes", "Prompt image exceeds the size limit", "Prompt images exceed the count or size limit", "Prompt exceeds frame limit", "Prompt accepts at most 8 images", "Image reference exceeds the 512 byte limit"].contains(message)
             return ["message": .string(javascriptMessage(message)), "category": .string(range ? "range" : "type")]
         }
         if let relayed = error as? RelayedPersistenceError {
@@ -629,6 +632,10 @@ actor Driver: FxHTTPClient, FxPersistence {
         case "withdraw":
             guard let token = value["turnToken"]?.string, let turn = turns[token] else { return .string(FxWithdrawal.alreadyPlaced.rawValue) }
             return .string(try await turn.withdraw(value["inputID"]?.string ?? "").rawValue)
+        case "validateInstructions":
+            let configuration = FxConfiguration(apiKey: "", instructions: value["instructions"]?.string ?? "")
+            try configuration.validateInstructions()
+            return .null
         case "validatePrompt":
             guard case .array(let blocks) = value["blocks"] else { throw FxError.invalidInput("Invalid prompt descriptors") }
             let descriptors = try blocks.map { block -> PromptInputDescriptor in
@@ -1168,6 +1175,10 @@ actor Driver: FxHTTPClient, FxPersistence {
                             resources: $0.resources ?? [])
                 })
                 FileHandle.standardOutput.write(try JSONEncoder().encode(["instructions": skills.instructions]))
+            } catch FxSkillError.instructionsTooLarge {
+                DriverOutput.emit(.object(["error": .object([
+                    "category": .string("range"), "message": .string("Skill instructions exceed the 65536 byte limit"),
+                ])]))
             } catch {
                 FileHandle.standardError.write(Data("Skill configuration failed: \(error)\n".utf8))
                 exit(1)

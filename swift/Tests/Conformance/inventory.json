@@ -215,7 +215,7 @@
       "upstream": "sdk/tests/test-instruction-limits.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete upstream native file with original assertions through Swift; 65536-byte engine, skill and MCP bounds, including framing and rejection before runtime factory; bridge supplies omitted MCP protocol envelopes and closes its added foreign adapter"
     },
     {
       "upstream": "sdk/tests/test-journal.mjs",
@@ -305,7 +305,7 @@
       "upstream": "sdk/tests/test-native-core-image-framing.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "status": "passed: complete unchanged upstream file through the Swift C ABI backend; 7 MiB tool images survive framing, provider request overflow evicts only older images with a notice, and image-free overflow fails before host fetch"
     },
     {
       "upstream": "sdk/tests/test-native-core-misuse.mjs",

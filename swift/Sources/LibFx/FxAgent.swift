@@ -20,6 +20,7 @@ public actor FxAgent {
     private var closed = false
 
     public init(configuration: FxConfiguration, name: String = "default", store: FxSessionStore, checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024, deliveryPolicy: FxDeliveryPolicy? = nil) throws {
+        try configuration.validateInstructions()
         guard validSessionIdentifier(name), name.utf8.count <= 64,
               let first = name.utf8.first, (48...57).contains(first) || (65...90).contains(first) || (97...122).contains(first) else { throw FxError.invalidInput("Invalid agent name") }
         self.configuration = configuration
@@ -34,6 +35,7 @@ public actor FxAgent {
     /// Creates a view. Data is stored when the first input is accepted.
     public func session(id: String = UUID().uuidString, options: FxSessionOptions = .init()) throws -> FxSession {
         guard !closed else { throw FxError.closed }
+        try configured(for: options).validateInstructions()
         guard validSessionIdentifier(id) else { throw FxError.invalidInput("Invalid session ID") }
         return FxSession(id: id, options: options, agent: self)
     }

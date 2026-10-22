@@ -3,7 +3,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { createFxEngine } from './adapter.mjs';
+import { createFxEngine, createMcpAdapter } from './adapter.mjs';
 
 // This tests the conformance runner's failure detection, not SDK behavior.
 const directory = await mkdtemp(join(tmpdir(), 'libfx-driver-lifecycle-'));
@@ -20,6 +20,7 @@ lines.on('line', line => {
   let result = null;
   if (op === 'open' || op === 'openAgent') result = { sessionId: 'fixture', resumable: false, runningCalls: [] };
   if (op === 'observationOpen') result = { scope: {}, parent: {}, captureContent: false };
+  if (op === 'mcpOpen') result = { instructions: '', tools: [] };
   process.stdout.write(JSON.stringify({ id, result }) + '\\n');
 });
 lines.on('close', () => {
@@ -36,7 +37,7 @@ lines.on('close', () => {
 });
 `, { mode: 0o755 });
   process.env.LIBFX_SWIFT_DRIVER = driver;
-  for (const surface of ['engine', 'agent', 'observation', 'inspect', 'models']) {
+  for (const surface of ['engine', 'agent', 'observation', 'inspect', 'models', 'mcp']) {
     for (const mode of ['success', 'exit', 'signal', 'stderr', 'late-stderr']) {
       process.env.LIBFX_FIXTURE_TERMINATION = mode;
       if (surface === 'engine') {
@@ -63,16 +64,20 @@ lines.on('close', () => {
         const options = surface === 'agent' ? { __agent: true } : surface === 'inspect' ? { __inspect: true }
           : surface === 'models' ? { __listModels: true } : surface === 'observation'
             ? { hooks: { onEvent() {} }, __observationFixture: { scope: {}, callID: 'call', signal: new AbortController().signal } } : {};
-        const engine = await createFxEngine(options);
+        const engine = surface === 'mcp' ? await createMcpAdapter({}) : await createFxEngine(options);
         if (surface !== 'inspect' && surface !== 'models') await engine.close();
       };
       if (mode === 'success') await exercise();
-      else await assert.rejects(exercise(), { message: mode === 'exit' ? /^Swift driver exited: 17$/
-        : mode === 'signal' ? /^Swift driver exited: SIGTERM$/ : /^Swift driver exited: 0\nfixture diagnostic\n$/ });
+      else {
+        const prefix = surface === 'mcp' ? 'MCP' : 'Swift';
+        const detail = mode === 'exit' ? '17' : mode === 'signal' ? 'SIGTERM' : '0\nfixture diagnostic\n';
+        await assert.rejects(exercise(), { message: `${prefix} driver exited: ${detail}` });
+      }
     }
   }
   process.env.LIBFX_SWIFT_DRIVER = join(directory, 'missing');
   await assert.rejects(createFxEngine(), /ENOENT|closed|EPIPE/);
+  await assert.rejects(createMcpAdapter({}), /ENOENT|closed|EPIPE/);
   console.log('Conformance driver lifecycle passed: all surfaces detect abnormal exit, signals and drained stderr; SDK close acknowledges cleanup before driver exit; failed spawn settles');
 } finally {
   for (const [key, value] of [['LIBFX_SWIFT_DRIVER', saved.driver], ['LIBFX_FIXTURE_TERMINATION', saved.mode]]) {

@@ -100,6 +100,7 @@ public actor FxEngine {
 
     private static func open(configuration: FxConfiguration, sessionID: String?, checkpoint: Data?, persistence: (any FxPersistence)?, transport injectedTransport: (any EngineTransport)?) async throws -> FxEngine {
         try Task.checkCancellation()
+        try configuration.validateInstructions()
         if let sessionID, !validSessionIdentifier(sessionID) { throw FxError.invalidInput("Invalid session ID") }
         guard checkpoint == nil || persistence == nil else {
             throw FxError.invalidInput("Use a checkpoint or a persistence store, not both")
@@ -747,6 +748,7 @@ public actor FxEngine {
     }
 
     private func steer(turn id: UUID, text: String, inputID: String) async throws -> FxSteeringReceipt {
+        try Task.checkCancellation()
         guard !closed else { throw FxError.closed }
         guard isActive(id) else { throw FxError.noActiveTurn }
         guard !text.isEmpty, text.utf8.count <= 64 * 1024 else { throw FxError.invalidInput("Steering text must contain 1–65536 UTF-8 bytes") }
@@ -765,7 +767,7 @@ public actor FxEngine {
                 else { pendingSteering[id] = (pending.count - 1, pending.bytes - text.utf8.count) }
             }
         }
-        let sent = await dispatch?.wait()
+        let sent = try await dispatch?.waitUnlessCancelled()
         if sent != true, let failedPrompt, failedPrompt.id == id { throw failedPrompt.error }
         guard sent == true, isActive(id) else { throw FxError.noActiveTurn }
         _ = try await rpc.request("libfx/steer", .object([

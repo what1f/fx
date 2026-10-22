@@ -15,7 +15,7 @@ const defaultDriver = process.env.LIBFX_SWIFT_DRIVER || join(execFileSync('swift
   'build', '--package-path', fileURLToPath(new URL('../..', import.meta.url)), '--show-bin-path',
 ], { encoding: 'utf8' }).trim(), 'FxSwiftDriver');
 
-export function createMcpAdapter(client, options = {}) { return bridgeMcpAdapter(client, options, defaultDriver); }
+export function createMcpAdapter(client, options = {}) { return bridgeMcpAdapter(client, options, process.env.LIBFX_SWIFT_DRIVER || defaultDriver); }
 
 // A fixture scope still uses Swift's child-options and input-wait implementation.
 export async function toolObservation(scope, callID, hooks, emit, signal) {
@@ -28,7 +28,9 @@ export function createSkillsAdapter(records) {
   const encoded = execFileSync(defaultDriver, ['skills'], {
     input: JSON.stringify(records), encoding: 'utf8', maxBuffer: 1024 * 1024,
   });
-  return { ...JSON.parse(encoded), tools: records.flatMap(record => record.tools ?? []) };
+  const result = JSON.parse(encoded);
+  if (result.error) throw new RangeError(result.error.message);
+  return { ...result, tools: records.flatMap(record => record.tools ?? []) };
 }
 
 export async function loadSkillFile(path, options = {}) {
@@ -542,6 +544,13 @@ export async function createFxEngine(options = {}) {
           try { await request('close'); } finally { await finish(); }
         },
       };
+    }
+    if (configuration.instructions !== undefined) {
+      if (Array.isArray(configuration.instructions) && configuration.instructions.every(value => typeof value === 'string')) {
+        configuration.instructions = configuration.instructions.filter(Boolean).join('\n\n');
+      }
+      if (typeof configuration.instructions !== 'string') throw new TypeError('instructions must be a string or an array of strings');
+      await request('validateInstructions', { instructions: configuration.instructions });
     }
     if (runtimeFactory) {
       fixtureRuntime = await runtimeFactory({ ...options,
