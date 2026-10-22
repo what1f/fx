@@ -158,7 +158,7 @@ public actor FxAgent {
                    isIdempotent: tool.isIdempotent, writes: tool.writes) { value, context in
                 try await store.checkLease(lease)
                 let context = FxToolContext(executionID: context.executionID, sessionID: lease.sessionID,
-                                            turnID: input.id, context: input.options.context)
+                                            turnID: input.id, context: input.options.context, observation: context.observation)
                 return try await tool.execute(value, context)
             }
         }

@@ -195,13 +195,21 @@ private func waitForRequest(_ method: String, on transport: FixtureTransport) as
 
 private actor MCPModelHTTP: FxHTTPClient {
     private(set) var posts = 0
+    let toolName: String
+    init(toolName: String = "mcp_echo") { self.toolName = toolName }
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         let payload: String
         if request.httpMethod == "GET" {
             payload = #"{"data":[{"id":"swift/mcp","type":"language","tags":["tool-use"]}]}"#
         } else {
             posts += 1
-            payload = "data: {\"type\":\"tool-call\",\"toolCallId\":\"mcp-call\",\"toolName\":\"mcp_echo\",\"input\":{\"value\":\"hello\"}}\n\ndata: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"tool-calls\",\"raw\":\"tool-calls\"}}\n\ndata: [DONE]\n\n"
+            payload = "data: {\"type\":\"tool-call\",\"toolCallId\":\"mcp-call\",\"toolName\":\"\(toolName)\",\"input\":{\"value\":\"hello\"}}\n\ndata: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"tool-calls\",\"raw\":\"tool-calls\"}}\n\ndata: [DONE]\n\n"
+        }
+        if posts > 1 {
+            return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream {
+                $0.yield(Data("data: {\"type\":\"text-delta\",\"delta\":\"done\"}\n\ndata: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\",\"raw\":\"stop\"}}\n\ndata: [DONE]\n\n".utf8))
+                $0.finish()
+            })
         }
         return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { $0.yield(Data(payload.utf8)); $0.finish() })
     }
@@ -211,7 +219,9 @@ private actor MCPModelHTTP: FxHTTPClient {
     let transport = FixtureTransport(holdCalls: true)
     let mcp = try await FxMCPAdapter.connect(transport: transport, prefix: "mcp_")
     let http = MCPModelHTTP()
-    let engine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "test", model: "swift/mcp", tools: mcp.tools, httpClient: http))
+    let events = MCPObservations()
+    let engine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "test", model: "swift/mcp", tools: mcp.tools, httpClient: http,
+        observation: FxObservationOptions(onEvent: events.record)))
     let turn = try await engine.prompt("Use MCP")
     let reader = Task { for try await _ in turn {} }
     try await waitForRequest("tools/call", on: transport)
@@ -219,8 +229,61 @@ private actor MCPModelHTTP: FxHTTPClient {
     #expect(try await turn.result.stopReason == .cancelled)
     _ = await reader.result
     try await waitForRequest("notifications/cancelled", on: transport)
+    let spans = events.events.filter { [.mcpStarted, .mcpEnded].contains($0.kind) }
+    #expect(spans.map(\.kind) == [.mcpStarted, .mcpEnded])
+    #expect(spans.last?.data["status"] == .string("cancelled"))
+    #expect(spans.first?.data["operationId"] == spans.last?.data["operationId"])
     #expect(await http.posts == 1)
     try await engine.close()
     await mcp.close()
     #expect(await transport.disconnects == 1)
+}
+
+private final class MCPObservations: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [FxObservation] = []
+    var events: [FxObservation] { lock.withLock { stored } }
+    func record(_ event: FxObservation) { lock.withLock { stored.append(event) } }
+}
+
+@Test func nativeMCPSpansRetainServerToolAndCorrelationIdentity() async throws {
+    for isError in [false, true] {
+        let transport = FixtureTransport(catalog: [FixtureTransport.tool("remote.echo")], result: .object([
+            "content": .array([.object(["type": .string("text"), "text": .string("private-response")])]),
+            "isError": .bool(isError),
+        ]))
+        let mcp = try await FxMCPAdapter.connect(transport: transport, prefix: "mcp_", propagateCorrelation: true,
+                                                serverName: isError ? "named-server" : nil)
+        let events = MCPObservations()
+        let parent = try FxObservationParent(rootSessionID: "root", sessionID: "parent", turnID: "parent-turn", callID: "parent-call")
+        let engine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "test", model: "swift/mcp", tools: mcp.tools,
+            httpClient: MCPModelHTTP(toolName: "mcp_remote_echo"),
+            observation: FxObservationOptions(parent: parent, onEvent: events.record)))
+        let turn = try await engine.prompt("Use MCP")
+        for try await _ in turn {}
+        #expect(try await turn.result.stopReason == .endTurn)
+        try await engine.close()
+        await mcp.close()
+        let spans = events.events.filter { [.mcpStarted, .mcpRequest, .mcpEnded].contains($0.kind) }
+        #expect(spans.map(\.kind) == [.mcpStarted, .mcpRequest, .mcpEnded])
+        let start = try #require(spans.first), end = try #require(spans.last)
+        #expect(start.data["server"] == .string(isError ? "named-server" : "fixture"))
+        #expect(start.data["tool"] == .string("remote.echo"))
+        #expect(start.data["callId"] == .string("mcp-call"))
+        #expect(start.data["operationId"] == end.data["operationId"])
+        #expect(end.data["status"] == .string(isError ? "failure" : "success"))
+        let nativeStart = try #require(events.events.first { $0.kind == .toolStarted })
+        #expect(start.executionID == nativeStart.executionID)
+        #expect(start.turnID == nativeStart.turnID)
+        #expect(spans.allSatisfy { $0.rootSessionID == "root" && $0.parentSessionID == "parent" && $0.parentCallID == "parent-call" && $0.parentTurnID == "parent-turn" })
+        let calls = await transport.calls()
+        #expect(calls.count == 1)
+        let correlation = try #require(calls.first?["params"]?["_meta"]?["libfx/correlationId"]?.string)
+        #expect(UUID(uuidString: correlation) != nil && correlation == correlation.lowercased())
+        #expect(spans[1].data["requestId"] == .string(correlation))
+        #expect(!String(decoding: try JSONEncoder().encode(spans), as: UTF8.self).contains("private-response"))
+        let positions = events.events.map(\.kind)
+        #expect(try #require(positions.firstIndex(of: .toolStarted)) < #require(positions.firstIndex(of: .mcpStarted)))
+        #expect(try #require(positions.firstIndex(of: .mcpEnded)) < #require(positions.firstIndex(of: .toolEnded)))
+    }
 }

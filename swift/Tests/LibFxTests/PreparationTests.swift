@@ -89,7 +89,23 @@ private actor PreparationCredentials {
         try await agent.close()
         let entries = try await store.entries(session: "s", agent: "default", after: 0)
         #expect(entries.filter { if case .started = $0.event { return true }; return false }.count == 1)
-        #expect(entries.filter { if case .resumed = $0.event { return true }; return false }.count == 1)
+        // A delivery can yield before its model call when sanitizer overhead consumes its budget.
+        // Each additional resume must follow a recorded yield for this same accepted input.
+        let transitions = entries.compactMap { entry -> String? in
+            switch entry.event {
+            case .resumed(let id, let sessionID):
+                #expect(id == "original" && sessionID == "s")
+                return "resumed"
+            case .yielded(let id):
+                #expect(id == "original")
+                return "yielded"
+            default: return nil
+            }
+        }
+        #expect(transitions.first == "resumed" && transitions.last == "resumed")
+        for (index, transition) in transitions.enumerated() {
+            #expect(transition == (index.isMultiple(of: 2) ? "resumed" : "yielded"))
+        }
         #expect(entries.filter { if case .ended = $0.event { return true }; return false }.count == 1)
         try await store.close()
     }

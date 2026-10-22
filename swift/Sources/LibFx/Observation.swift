@@ -23,6 +23,8 @@ public struct FxObservation: Sendable, Codable, Equatable {
     public let sessionID: String
     public let rootSessionID: String
     public let parentSessionID: String?
+    public let parentTurnID: String?
+    public let parentCallID: String?
     public let sourceSessionID: String?
     public let workID: String?
     public let turnID: String?
@@ -35,6 +37,7 @@ public struct FxObservation: Sendable, Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case version, kind = "type", sessionID = "sessionId", rootSessionID = "rootSessionId"
+        case parentTurnID = "parentTurnId", parentCallID = "parentCallId"
         case parentSessionID = "parentSessionId", sourceSessionID = "sourceSessionId", workID = "workId"
         case turnID = "turnId", executionID = "executionId", stepIndex, timestamp
         case contentCaptured, contentTruncated, data
@@ -53,6 +56,8 @@ public struct FxObservation: Sendable, Codable, Equatable {
         self.sessionID = sessionID
         self.rootSessionID = sessionID
         self.parentSessionID = nil
+        self.parentTurnID = nil
+        self.parentCallID = nil
         self.sourceSessionID = nil
         self.workID = nil
         self.turnID = nil
@@ -63,25 +68,73 @@ public struct FxObservation: Sendable, Codable, Equatable {
         self.contentTruncated = false
         self.data = data
     }
+
+    init(scope: Self, kind: Kind? = nil, data: JSONValue? = nil, parent: FxObservationParent? = nil,
+         timestamp: Date? = nil, captureContent: Bool? = nil) {
+        version = scope.version
+        self.kind = kind ?? scope.kind
+        sessionID = scope.sessionID
+        rootSessionID = parent?.rootSessionID ?? scope.rootSessionID
+        let isRoot = scope.sessionID == scope.rootSessionID && scope.parentSessionID == nil
+        parentSessionID = isRoot ? parent?.sessionID ?? scope.parentSessionID : scope.parentSessionID
+        parentTurnID = isRoot ? parent?.turnID ?? scope.parentTurnID : scope.parentTurnID
+        parentCallID = isRoot ? parent?.callID ?? scope.parentCallID : scope.parentCallID
+        sourceSessionID = scope.sourceSessionID
+        workID = scope.workID
+        turnID = scope.turnID
+        executionID = scope.executionID
+        stepIndex = scope.stepIndex
+        self.timestamp = timestamp ?? scope.timestamp
+        contentCaptured = captureContent ?? scope.contentCaptured
+        contentTruncated = kind == nil ? scope.contentTruncated : false
+        self.data = data ?? scope.data
+    }
+}
+
+/// The owning tool call for observations from a child engine.
+public struct FxObservationParent: Sendable, Equatable {
+    public let rootSessionID: String
+    public let sessionID: String
+    public let turnID: String
+    public let callID: String
+
+    public init(rootSessionID: String, sessionID: String, turnID: String, callID: String) throws {
+        guard [rootSessionID, sessionID, turnID, callID].allSatisfy({ !$0.isEmpty && $0.utf8.count <= 1024 }) else {
+            throw FxError.invalidInput("Observation identities must contain 1–1024 UTF-8 bytes")
+        }
+        self.rootSessionID = rootSessionID
+        self.sessionID = sessionID
+        self.turnID = turnID
+        self.callID = callID
+    }
 }
 
 public struct FxObservationOptions: Sendable {
     public var captureContent: Bool
-    /// Called in event order. Keep this callback short; it runs before the next event is handled.
+    public var parent: FxObservationParent?
+    /// Called synchronously. Concurrent tools may deliver events from different tasks.
+    /// Keep this callback short. Events within each operation retain their order.
     public let onEvent: @Sendable (FxObservation) throws -> Void
     public let onError: @Sendable (any Error) -> Void
 
     public init(
         captureContent: Bool = false,
+        parent: FxObservationParent? = nil,
         onEvent: @escaping @Sendable (FxObservation) throws -> Void,
         onError: @escaping @Sendable (any Error) -> Void = { _ in }
     ) {
         self.captureContent = captureContent
+        self.parent = parent
         self.onEvent = onEvent
         self.onError = onError
     }
 
+    func project(_ event: FxObservation) -> FxObservation {
+        guard let parent else { return event }
+        return FxObservation(scope: event, parent: parent)
+    }
+
     func deliver(_ event: FxObservation) {
-        do { try onEvent(event) } catch { onError(error) }
+        do { try onEvent(project(event)) } catch { onError(error) }
     }
 }

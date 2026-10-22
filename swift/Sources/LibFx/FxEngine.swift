@@ -22,6 +22,7 @@ public actor FxEngine {
     private var publicTurnID: String?
     private var output: AsyncThrowingStream<FxEvent, any Error>.Continuation?
     private var toolTasks: [String: Task<Void, Never>] = [:]
+    private var toolObservations: [String: FxToolObservation] = [:]
     private var toolNames: [String: String] = [:]
     private var closed = false
     private var handedOff = false
@@ -445,7 +446,22 @@ public actor FxEngine {
                     fields["data"] = .object(data)
                     params = .object(fields)
                 }
-                observation.deliver(try FxObservation(raw: params))
+                let event = observation.project(try FxObservation(raw: params))
+                if event.sessionID == sessionID, let callID = event.data["call"]?["callId"]?.string {
+                    if event.kind == .toolStarted {
+                        toolObservations[callID]?.invalidate()
+                        toolObservations[callID] = try FxToolObservation(scope: event, callID: callID, options: observation)
+                    } else if event.kind == .toolEnded, toolObservations[callID]?.scope.executionID == event.executionID {
+                        toolObservations.removeValue(forKey: callID)?.invalidate()
+                    }
+                }
+                if event.kind == .turnEnded {
+                    for (id, tool) in toolObservations where tool.scope.executionID == event.executionID {
+                        tool.invalidate()
+                        toolObservations.removeValue(forKey: id)
+                    }
+                }
+                observation.deliver(event)
             } catch { observation.onError(error) }
         } else if message.method == "libfx/journal_append", message.params["sessionId"]?.string == sessionID, let journal {
             guard !handedOff else { return }
@@ -501,7 +517,8 @@ public actor FxEngine {
                 return
             }
             let name = params["name"]?.string ?? ""
-            let context = FxToolContext(executionID: callID, sessionID: sessionID, turnID: publicTurnID)
+            let context = FxToolContext(executionID: callID, sessionID: sessionID, turnID: publicTurnID,
+                                        observation: toolObservations[callID])
             let tool = tools[name]
             toolTasks[callID] = Task { [weak self, rpc] in
                 guard let self, await self.isActive(expectedTurn) else { return }
@@ -518,7 +535,7 @@ public actor FxEngine {
                 }
                 guard !Task.isCancelled, await self.isActive(expectedTurn) else { return }
                 try? await rpc.respond(id: requestID, result: response)
-                await self.removeTool(callID)
+                await self.removeTool(callID, turn: expectedTurn)
             }
         } else if message.method == "session/request_permission", let id = message.id {
             let expectedTurn = turnID
@@ -557,7 +574,16 @@ public actor FxEngine {
     }
 
     private func isActive(_ id: UUID?) -> Bool { id != nil && turnID == id && !closed && !turnCancelled }
-    private func removeTool(_ id: String) { toolTasks.removeValue(forKey: id) }
+    private func removeTool(_ id: String, turn: UUID?) {
+        guard turnID == turn else { return }
+        toolTasks.removeValue(forKey: id)
+        toolObservations.removeValue(forKey: id)?.invalidate()
+    }
+
+    private func invalidateToolObservations() {
+        for observation in toolObservations.values { observation.invalidate() }
+        toolObservations.removeAll()
+    }
 
     private func cancel(turn id: UUID) async {
         guard isActive(id), !cancelling else { return }
@@ -566,6 +592,7 @@ public actor FxEngine {
         defer { cancelling = false; startNextFollowUp() }
         for task in toolTasks.values { task.cancel() }
         toolTasks.removeAll()
+        invalidateToolObservations()
         await permissions.cancel(scope: id)
         guard await promptDispatch?.wait() == true, turnID == id, !closed else { return }
         try? await rpc.notify("session/cancel", .object(["sessionId": .string(sessionID)]))
@@ -618,6 +645,7 @@ public actor FxEngine {
         guard turnID == id else { return }
         for task in toolTasks.values { task.cancel() }
         toolTasks.removeAll()
+        invalidateToolObservations()
         Task { await permissions.cancel(scope: id) }
         if let error { output?.finish(throwing: error) } else { output?.finish() }
         output = nil

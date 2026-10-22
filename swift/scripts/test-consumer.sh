@@ -78,6 +78,12 @@ final class TransportEvents: @unchecked Sendable {
     var values: [FxTransportEvent] { lock.withLock { recorded } }
     func record(_ event: FxTransportEvent) { lock.withLock { recorded.append(event) } }
 }
+final class Observations: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [FxObservation] = []
+    var values: [FxObservation] { lock.withLock { recorded } }
+    func record(_ event: FxObservation) { lock.withLock { recorded.append(event) } }
+}
 struct MockHTTP: FxHTTPClient {
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         let text = request.httpMethod == "GET" ? #"{"data":[{"id":"swift/consumer","type":"language"}]}"# : "data: {\"type\":\"text-delta\",\"delta\":\"consumer ok\"}\n\ndata: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\",\"raw\":\"stop\"}}\n\ndata: [DONE]\n\n"
@@ -102,17 +108,21 @@ struct ProviderSearchHTTP: FxHTTPClient {
 actor ToolInputHTTP: FxHTTPClient {
     private var posts = 0
     let input: JSONValue
-    init(input: JSONValue) { self.input = input }
+    let toolName: String
+    let requiresSkill: Bool
+    init(input: JSONValue, toolName: String = "probe", requiresSkill: Bool = true) {
+        self.input = input; self.toolName = toolName; self.requiresSkill = requiresSkill
+    }
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         if request.httpMethod == "GET" { return try await ProviderSearchHTTP().send(request) }
         let body = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
-        guard body.contains("SKILL_CONSUMER"), body.contains("RESOURCE_CONSUMER") else {
+        guard !requiresSkill || (body.contains("SKILL_CONSUMER") && body.contains("RESOURCE_CONSUMER")) else {
             throw FxError.protocolViolation("Missing skill context")
         }
         posts += 1
         if posts != 1 { return try await MockHTTP().send(request) }
         let call = JSONValue.object(["type": .string("tool-call"), "toolCallId": .string("consumer-call"),
-                                    "toolName": .string("probe"), "input": input])
+                                    "toolName": .string(toolName), "input": input])
         let payload = "data: \(String(decoding: try JSONEncoder().encode(call), as: UTF8.self))\n\ndata: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"tool-calls\",\"raw\":\"tool-calls\"}}\n\ndata: [DONE]\n\n"
         return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { $0.yield(Data(payload.utf8)); $0.finish() })
     }
@@ -306,10 +316,31 @@ struct SubscriptionHTTP: FxHTTPClient {
         guard mcp.tools.map(\.name) == ["mcp_echo"], mcp.instructions.contains("MCP_RESOURCE"), mcp.instructions.contains("MCP_PROMPT") else {
             throw FxError.protocolViolation("Unexpected MCP catalog or context")
         }
-        let mcpResult = try await mcp.tools[0].execute(.object(["value": .string("hello")]),
-            FxToolContext(executionID: "consumer-call", sessionID: "consumer", turnID: "consumer-turn"))
-        guard mcpResult.text == "MCP_CONSUMER:hello", !mcpResult.isError else { throw FxError.protocolViolation("Unexpected MCP result") }
+        let mcpEvents = Observations()
+        let mcpEngine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "consumer-test-key", model: "swift/consumer",
+            instructions: mcp.instructions, tools: mcp.tools,
+            httpClient: ToolInputHTTP(input: .object(["value": .string("hello")]), toolName: "mcp_echo", requiresSkill: false),
+            observation: FxObservationOptions(onEvent: mcpEvents.record)))
+        let mcpTurn = try await mcpEngine.prompt("Use MCP", id: "consumer-mcp-turn")
+        var mcpResults = 0
+        for try await event in mcpTurn {
+            if case .toolFinished("consumer-call", "mcp_echo", let content, false) = event {
+                guard content == "MCP_CONSUMER:hello" else { throw FxError.protocolViolation("Unexpected MCP result") }
+                mcpResults += 1
+            }
+        }
+        guard mcpResults == 1, try await mcpTurn.result.stopReason == .endTurn else { throw FxError.protocolViolation("Missing MCP result") }
+        try await mcpEngine.close()
         await mcp.close()
+        let mcpSpans = mcpEvents.values.filter { $0.kind == .mcpStarted || $0.kind == .mcpEnded }
+        guard mcpSpans.map(\.kind) == [.mcpStarted, .mcpEnded],
+              mcpSpans[0].data["server"] == .string("consumer"), mcpSpans[0].data["tool"] == .string("echo"),
+              mcpSpans[0].data["callId"] == .string("consumer-call"),
+              mcpSpans[0].data["operationId"] == mcpSpans[1].data["operationId"],
+              mcpSpans[1].data["status"] == .string("success"),
+              mcpSpans.allSatisfy({ $0.turnID == "consumer-mcp-turn" && $0.sessionID == mcpEngine.sessionID }) else {
+            throw FxError.protocolViolation("Unexpected MCP observations")
+        }
         for prefix in ["v1", "redirect"] {
             let provider = try FxCustomProvider(name: "local", baseURL: URL(string: "http://127.0.0.1:\(port)/\(prefix)")!,
                                                 models: ["local-model": .init(contextWindow: 32768, maxOutputTokens: 4096)])

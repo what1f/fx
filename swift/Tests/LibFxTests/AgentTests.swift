@@ -332,3 +332,50 @@ private actor ValidationStore: FxPersistence {
     try await agent.close()
     try await store.close()
 }
+
+@Test func durableToolObservationConnectsARealChildEngine() async throws {
+    let capture = SessionToolCapture()
+    let observed = AgentObservationCapture()
+    let tool = FxTool(name: "inspect", description: "Inspect", inputSchema: .object(["type": .string("object")]), isIdempotent: false) { _, context in
+        await capture.record(context)
+        let scope = try #require(context.observation)
+        let child = try await FxEngine.open(configuration: FxConfiguration(
+            apiKey: "test", model: "swift/test", httpClient: SessionHTTP(), observation: scope.childOptions()))
+        let turn = try await child.prompt("child", id: "child-turn")
+        for try await _ in turn {}
+        _ = try await turn.result
+        try await child.close()
+        return FxToolResult(text: "child finished")
+    }
+    let store = try FxSessionStore()
+    let agent = try FxAgent(configuration: FxConfiguration(apiKey: "test", model: "swift/test", tools: [tool],
+        httpClient: SessionToolHTTP(), observation: FxObservationOptions(onEvent: observed.record)), store: store)
+    let session = try await agent.session(id: "logical-parent")
+    let turn = try await session.prompt("Inspect", id: "logical-turn")
+    #expect(try await turn.result.stopReason == .endTurn)
+    try await agent.close()
+    try await store.close()
+    let context = try #require(await capture.values.first)
+    #expect(context.sessionID == "logical-parent" && context.turnID == "logical-turn")
+    let scope = try #require(context.observation)
+    let parentStart = try #require(observed.events.first { $0.kind == .toolStarted && $0.sessionID == context.sessionID })
+    #expect(scope.scope.sessionID == context.sessionID && scope.scope.turnID == parentStart.turnID)
+    #expect(scope.callID == "call-1")
+    let children = observed.events.filter { $0.sessionID != "logical-parent" }
+    #expect(children.contains { $0.kind == .turnStarted })
+    #expect(children.contains { $0.kind == .turnEnded })
+    #expect(children.allSatisfy {
+        $0.rootSessionID == "logical-parent" && $0.parentSessionID == "logical-parent"
+        && $0.parentTurnID == parentStart.turnID && $0.parentCallID == "call-1" && $0.turnID == "child-turn"
+    })
+    let count = observed.events.count
+    #expect(await scope.mcp(tool: "retained-after-close") { "still calls the effect" } == "still calls the effect")
+    #expect(observed.events.count == count)
+}
+
+private final class AgentObservationCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [FxObservation] = []
+    var events: [FxObservation] { lock.withLock { stored } }
+    func record(_ event: FxObservation) { lock.withLock { stored.append(event) } }
+}

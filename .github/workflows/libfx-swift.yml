@@ -32,6 +32,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: Show Swift toolchain
+        run: swift --version
       - name: Build C archive and XCFramework
         run: swift/scripts/build-xcframework.sh
       - name: Test Swift SDK

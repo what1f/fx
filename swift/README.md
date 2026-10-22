@@ -68,7 +68,7 @@ The adapter connects and owns one client. You may pass a fresh `MCP.Client` thro
 
 The catalog accepts up to 64 tools across at most 64 pages. Names are mapped to unique ASCII names of at most 64 characters, while calls use the original server names. Text instructions, including framing, are limited to 64 KiB. Remote idempotency hints do not enable automatic replay. Tool results retain text, structured JSON, supported images, and the server's error flag. Audio is not included in tool results. Cancelling a tool task sends an advisory MCP cancellation; the server may already have performed the effect. Closing disconnects the client, stops pending requests, and prevents later calls. Repeated close calls await the same shutdown.
 
-MCP-specific observation spans and broader parent/tool observation scopes remain pending.
+When engine observation is enabled, MCP calls emit `mcp.start`, optional `mcp.request`, and `mcp.end` events within the owning tool scope. Events retain the original remote tool name and the initialized server name; pass `serverName:` to override the server label. Correlation metadata is separate from the MCP request ID. Cancellation ends the observation once and does not prove that a remote effect was undone.
 
 ## Compose skills
 
@@ -196,7 +196,7 @@ This callback handles core permission requests. Host tool closures remain respon
 
 ## Observe runtime events
 
-Set `FxConfiguration.observation` to receive semantic events in delivery order:
+Set `FxConfiguration.observation` to receive semantic events:
 
 ```swift
 configuration.observation = FxObservationOptions { event in
@@ -210,7 +210,11 @@ configuration.observation = FxObservationOptions { event in
 
 Events have typed kinds, session and execution identifiers, a `Date` timestamp, and event-specific JSON data. Content is omitted by default. Set `captureContent: true` to include bounded prompt, model, and tool content. Treat captured content as conversation data.
 
-Callbacks run synchronously before the next event is handled. Keep them short and send asynchronous work to your own task or actor. An `onEvent` error is sent to `onError` without failing the turn or journal. Journal observations report restores, successful appends, and append failures. Parent observation scopes and tool-local MCP observations remain pending.
+Callbacks run synchronously. Concurrent tools can deliver callbacks from different tasks, with ordering preserved within each observed operation. Keep callbacks short and send asynchronous work to your own task or actor. An `onEvent` error is sent to `onError` without failing the turn or journal. Journal observations report restores, successful appends, and append failures.
+
+When observation is enabled, a host tool receives `context.observation`. Pass its `childOptions()` to a child engine's `FxConfiguration.observation` to retain the root session and parent session, turn, and call identifiers. Existing native descendant ancestry is preserved. Durable tool context uses the caller's message ID as `context.turnID`; observation scopes retain the runtime turn ID used by the parent events.
+
+Use `context.observation?.mcp(server:tool:correlationID:isError:operation:)` to observe an MCP effect owned by your host. The optional `LibFxMCP` module applies this helper automatically. It calls the effect once and preserves its result or error even when an observer throws. Cancellation or tool completion ends open spans once, and a retained scope emits no new operations after the tool ends. Input-wait helpers and the full upstream hooks suite remain pending.
 
 ## Persist a conversation
 

@@ -203,3 +203,48 @@ private actor PausedCheckpointStore: FxCheckpointPersistence {
     #expect(observations.events.last?.kind == .journalRestored)
     #expect(observations.events.last?.data["checkpoint"] == .bool(true))
 }
+
+@Test func observationParentProjectsNativeAndJournalEvents() async throws {
+    let events = Observations()
+    let parent = try FxObservationParent(rootSessionID: "root", sessionID: "parent", turnID: "parent-turn", callID: "parent-call")
+    let engine = try await FxEngine.open(configuration: FxConfiguration(
+        apiKey: "test-key", model: "swift/observe", httpClient: ObservationHTTP(),
+        observation: FxObservationOptions(parent: parent, onEvent: events.record)
+    ), persistence: FxMemoryPersistence())
+    let turn = try await engine.prompt("hello")
+    for try await _ in turn {}
+    _ = try await turn.result
+    try await engine.close()
+    #expect(events.events.contains { $0.kind == .journalCommitted })
+    #expect(events.events.contains { $0.kind == .turnEnded })
+    #expect(events.events.allSatisfy {
+        $0.rootSessionID == "root" && $0.sessionID == engine.sessionID && $0.parentSessionID == "parent"
+        && $0.parentTurnID == "parent-turn" && $0.parentCallID == "parent-call"
+    })
+}
+
+@Test func observationParentPreservesNativeDescendantAncestryAndEncoding() throws {
+    let parent = try FxObservationParent(rootSessionID: "root", sessionID: "host", turnID: "host-turn", callID: "host-call")
+    let native = try FxObservation(raw: .object([
+        "version": .number(1), "type": .string("model.start"), "sessionId": .string("descendant"),
+        "rootSessionId": .string("engine"), "parentSessionId": .string("native-parent"),
+        "parentTurnId": .string("native-turn"), "parentCallId": .string("native-call"),
+        "stepIndex": .number(0), "timestamp": .number(1_790_000_000_000),
+        "contentCaptured": .bool(false), "contentTruncated": .bool(false), "data": .object([:]),
+    ]))
+    let projected = FxObservationOptions(parent: parent, onEvent: { _ in }).project(native)
+    #expect(projected.rootSessionID == "root")
+    #expect(projected.parentSessionID == "native-parent")
+    #expect(projected.parentTurnID == "native-turn")
+    #expect(projected.parentCallID == "native-call")
+    #expect(try JSONDecoder().decode(FxObservation.self, from: JSONEncoder().encode(projected)) == projected)
+    for field in 0..<4 {
+        for invalid in ["", String(repeating: "界", count: 342)] {
+            var values = ["root", "parent", "turn", "call"]
+            values[field] = invalid
+            #expect(throws: FxError.self) {
+                try FxObservationParent(rootSessionID: values[0], sessionID: values[1], turnID: values[2], callID: values[3])
+            }
+        }
+    }
+}

@@ -3,6 +3,7 @@ import LibFx
 import MCP
 
 public enum FxMCPError: Error, Sendable, Equatable {
+    case invalidServerName
     case invalidPrefix
     case invalidCatalog
     case invalidPagination
@@ -29,16 +30,18 @@ public struct FxMCPAdapter: Sendable {
 
     /// Connect using an official MCP transport configured by the host.
     public static func connect(transport: any Transport, client: Client? = nil, prefix: String = "", resources: [String] = [],
-                               prompts: [Prompt] = [], propagateCorrelation: Bool = false) async throws -> FxMCPAdapter {
+                               prompts: [Prompt] = [], propagateCorrelation: Bool = false, serverName: String? = nil) async throws -> FxMCPAdapter {
+        if let serverName, serverName.isEmpty || serverName.utf8.count > 1024 { throw FxMCPError.invalidServerName }
         guard prefix.utf8.allSatisfy(isNameByte) else { throw FxMCPError.invalidPrefix }
         let wrapped = CancellableTransport(transport, logger: await transport.logger)
         let client = client ?? Client(name: "libfx-swift", version: "1")
         let connection = MCPConnection(client: client, transport: wrapped)
         return try await withTaskCancellationHandler { do {
             try Task.checkCancellation()
-            try await client.connect(transport: wrapped)
+            let initialized = try await client.connect(transport: wrapped)
             let adapter = try await build(connection: connection, prefix: prefix, resources: resources,
-                                          prompts: prompts, propagateCorrelation: propagateCorrelation)
+                                          prompts: prompts, propagateCorrelation: propagateCorrelation,
+                                          serverName: serverName ?? initialized.serverInfo.name)
             try Task.checkCancellation()
             return adapter
         } catch {
@@ -54,7 +57,7 @@ public struct FxMCPAdapter: Sendable {
     public func close() async { await connection.close() }
 
     private static func build(connection: MCPConnection, prefix: String, resources: [String],
-                              prompts: [Prompt], propagateCorrelation: Bool) async throws -> FxMCPAdapter {
+                              prompts: [Prompt], propagateCorrelation: Bool, serverName: String) async throws -> FxMCPAdapter {
         var catalog: [Tool] = []
         var cursors: Set<String> = []
         var cursor: String?
@@ -84,13 +87,24 @@ public struct FxMCPAdapter: Sendable {
                 suffix += 1
             }
             return FxTool(name: name, description: tool.description.flatMap { $0.isEmpty ? nil : $0 } ?? "MCP tool",
-                          inputSchema: try convert(tool.inputSchema, to: JSONValue.self), isIdempotent: false) { input, _ in
+                          inputSchema: try convert(tool.inputSchema, to: JSONValue.self), isIdempotent: false) { input, context in
                 guard case .object = input else { throw FxMCPError.invalidArguments }
                 let arguments = try convert(input, to: [String: Value].self)
-                let meta: Metadata? = propagateCorrelation ? try convert(JSONValue.object([
-                    "libfx/correlationId": .string(UUID().uuidString)
-                ]), to: Metadata.self) : nil
-                let result = try await connection.request(CallTool.request(.init(name: tool.name, arguments: arguments, meta: meta)))
+                let correlationID = propagateCorrelation ? UUID().uuidString.lowercased() : nil
+                let meta: Metadata? = try correlationID.map { id in
+                    try convert(JSONValue.object(["libfx/correlationId": .string(id)]), to: Metadata.self)
+                }
+                let request = CallTool.request(.init(name: tool.name, arguments: arguments, meta: meta))
+                let result: CallTool.Result
+                if let observation = context.observation {
+                    let server = !serverName.isEmpty && serverName.utf8.count <= 1024 ? serverName : nil
+                    result = try await observation.mcp(server: server, tool: tool.name, correlationID: correlationID,
+                                                       isError: { $0.isError == true }) {
+                        try await connection.request(request)
+                    }
+                } else {
+                    result = try await connection.request(request)
+                }
                 return try toolResult(result)
             }
         }

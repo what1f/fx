@@ -4,13 +4,13 @@ import { createFxEngine as createSwiftEngine } from './adapter.mjs';
 import { createFxEngine as createJSEngine, createMemoryPersistence } from '../../../sdk/node.js';
 
 const nativeAddon = fileURLToPath(new URL('../../../zig-out/lib/libfx.node', import.meta.url));
-async function exercise(create, captureContent) {
+async function exercise(create, captureContent, parent) {
   const events = [], errors = [], persistence = createMemoryPersistence();
   let requests = 0;
   const engine = await create({
     backend: 'native', nativeAddon, persistence,
     apiKey: 'observation-credential', model: 'fixture/observation', instructions: 'private-instruction',
-    hooks: { captureContent, onEvent: event => events.push(event), onError: error => errors.push(error) },
+    hooks: { captureContent, ...(parent ? { parent } : {}), onEvent: event => events.push(event), onError: error => errors.push(error) },
     tools: [{ name: 'lookup', description: 'Find a value', idempotent: true,
       inputSchema: { type: 'object', properties: { key: { type: 'string' } } },
       async execute({ key }) { if (key === 'beta') throw new Error('private-failure'); return 'private-value'; },
@@ -41,7 +41,12 @@ async function exercise(create, captureContent) {
   for (const event of events) {
     assert.equal(event.version, 1);
     assert.equal(event.sessionId, engine.sessionId);
-    assert.equal(event.rootSessionId, engine.sessionId);
+    assert.equal(event.rootSessionId, parent?.rootSessionId ?? engine.sessionId);
+    if (parent) {
+      assert.equal(event.parentSessionId, parent.sessionId);
+      assert.equal(event.parentTurnId, parent.turnId);
+      assert.equal(event.parentCallId, parent.callId);
+    }
     assert.ok(Number.isSafeInteger(event.timestamp));
   }
   for (const id of ['call-alpha', 'call-beta']) {
@@ -63,7 +68,9 @@ async function exercise(create, captureContent) {
 }
 
 for (const capture of [false, true]) {
-  const reference = await exercise(createJSEngine, capture);
-  assert.deepEqual(await exercise(createSwiftEngine, capture), reference);
+  for (const parent of [undefined, { rootSessionId: 'outer-root', sessionId: 'outer', turnId: 'outer-turn', callId: 'outer-call' }]) {
+    const reference = await exercise(createJSEngine, capture, parent);
+    assert.deepEqual(await exercise(createSwiftEngine, capture, parent), reference);
+  }
 }
-console.log('Observation parity passed: tool causality, scopes, content opt-in, errors and committed cursors');
+console.log('Observation parity passed: tool causality, parent scopes, content opt-in, errors and committed cursors');
