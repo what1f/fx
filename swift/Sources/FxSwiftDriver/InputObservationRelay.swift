@@ -16,6 +16,26 @@ actor InputObservationRelay {
 
     init(emit: @escaping @Sendable (JSONValue) -> Void) { self.emit = emit }
 
+    func openFixture(scope value: JSONValue, callID: String, captureContent: Bool) throws -> JSONValue {
+        guard case .object(var fields) = value else { throw FxError.invalidInput("Invalid observation fixture") }
+        fields["type"] = .string("tool.start")
+        fields["timestamp"] = .number(Date().timeIntervalSince1970 * 1000)
+        fields["contentCaptured"] = .bool(captureContent)
+        fields["contentTruncated"] = .bool(false)
+        fields["version"] = fields["version"] ?? .number(1)
+        fields["data"] = .object(["call": .object(["callId": .string(callID)])])
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        let scope = try decoder.decode(FxObservation.self, from: JSONEncoder().encode(JSONValue.object(fields)))
+        let options = FxObservationOptions(captureContent: captureContent) { event in
+            self.emit(.object(["observation": try encodeObservation(event)]))
+        } onError: { error in
+            self.emit(.object(["observationError": .string(String(describing: error))]))
+        }
+        let observation = try FxToolObservation(scope: scope, callID: callID, options: options)
+        return try register(1, scope: observation) ?? .null
+    }
+
     func register(_ id: Int, scope: FxToolObservation?) throws -> JSONValue? {
         guard !closed, let scope, let parent = scope.childOptions().parent else { return nil }
         scopes[id] = scope
@@ -79,9 +99,15 @@ actor InputObservationRelay {
         for entry in tasks.values where entry.tool == tool { entry.task.cancel() }
     }
 
+    func invalidate(tool: Int) {
+        scopes[tool]?.invalidate()
+        cancel(tool: tool)
+    }
+
     func close() async {
         closed = true
         let running = tasks.values.map(\.task)
+        for scope in scopes.values { scope.invalidate() }
         for task in running { task.cancel() }
         for waiter in waiters.values { waiter.resume(throwing: FxError.closed) }
         waiters.removeAll()

@@ -4,7 +4,7 @@ const adapter = new URL('./adapter.mjs', import.meta.url).href;
 export async function resolve(specifier, context, nextResolve) {
   if (context.parentURL?.includes('/sdk/tests/') && (['../node.js', '../skills.js', '../skills-node.js', '../mcp.js'].includes(specifier) ||
       specifier === '../browser.js' && context.parentURL.endsWith('/test-list-models.mjs') ||
-      specifier === '../fx-sdk.js' && context.parentURL.endsWith('/test-hooks.mjs'))) {
+      ['../fx-sdk.js', '../tool-observation.js'].includes(specifier) && context.parentURL.endsWith('/test-hooks.mjs'))) {
     return { url: adapter, shortCircuit: true };
   }
   return nextResolve(specifier, context);
@@ -25,11 +25,23 @@ export async function load(url, context, nextLoad) {
     runtime = runtime.replace('queueMicrotask(() =>', 'queueMicrotask(async () =>')
       .replace('const emit = (overrides) =>', 'const emit = async (overrides) =>')
       .replace(/^(\s*)handler\(/gm, '$1await handler(')
-      .replace(/^(\s*)emit\(/gm, '$1await emit(');
-    const after = process.env.LIBFX_SWIFT_HOOKS_WITHOUT_STANDALONE === '1'
-      ? source.slice(source.indexOf(end)) : source.slice(source.indexOf(standalone));
-    source = before + runtime + after;
-    if (process.env.LIBFX_SWIFT_HOOKS_WITHOUT_STANDALONE === '1') source += "\nconsole.log('Swift engine/MCP/runtime selection; standalone-helper block excluded');\n";
+      .replace(/^(\s*)emit\(/gm, '$1await emit(')
+      .replace('const outer = toolObservation(', 'const outer = await toolObservation(')
+      .replace('const engine = await createSharedEngine(', 'let engine;\n  try {\n  engine = await createSharedEngine(')
+      .replace('  try {\n    const frame =', '    const frame =')
+      .replace('await engine.close();', 'try { await engine?.close(); } finally { await outer.close(); }');
+    let helper = source.slice(source.indexOf(standalone), source.indexOf(end));
+    if (helper.split('controller.abort();').length !== 2 || helper.split('const observer = toolObservation(').length !== 2) {
+      throw new Error('Upstream standalone hooks fixture changed; review Swift timing adaptation');
+    }
+    // The original synchronous fixture needs an IPC acknowledgement before abort
+    // and before inspecting terminal events. Every original assertion is retained.
+    helper = helper.replace('const observer = toolObservation(', 'const observer = await toolObservation(')
+      .replace('  let calls = 0;', '  try {\n  let calls = 0;')
+      .replace('controller.abort();', 'await observer.waitUntilStarted();\n  controller.abort();\n  await observer.flush();');
+    const closingBrace = helper.lastIndexOf('}');
+    helper = helper.slice(0, closingBrace) + '  } finally { await observer.close(); }\n' + helper.slice(closingBrace);
+    source = before + runtime + helper + source.slice(source.indexOf(end));
     return { ...result, source };
   }
   if (!url.endsWith('/sdk/tests/test-agent-tool-start.mjs')) return result;

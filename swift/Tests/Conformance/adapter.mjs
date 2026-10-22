@@ -16,6 +16,13 @@ const defaultDriver = process.env.LIBFX_SWIFT_DRIVER || join(execFileSync('swift
 
 export function createMcpAdapter(client, options = {}) { return bridgeMcpAdapter(client, options, defaultDriver); }
 
+// A fixture scope still uses Swift's child-options and input-wait implementation.
+export async function toolObservation(scope, callID, hooks, emit, signal) {
+  const observer = await createFxEngine({ hooks: { ...hooks, onEvent: emit },
+    __observationFixture: { scope, callID, signal } });
+  return { ...observer, childHooks() { return { ...hooks, parent: observer.childHooks().parent }; } };
+}
+
 export function createSkillsAdapter(records) {
   const encoded = execFileSync(defaultDriver, ['skills'], {
     input: JSON.stringify(records), encoding: 'utf8', maxBuffer: 1024 * 1024,
@@ -97,8 +104,9 @@ export async function createFxEngine(options = {}) {
   function deliverObservation(event) {
     for (const [id, relay] of toolScopes) {
       const scope = relay.metadata.scope;
-      if (scope.sessionId === event.sessionId && scope.executionId === event.executionId &&
-          (event.type === 'turn.end' || event.type === 'tool.end' && scope.data.call.callId === event.data.call.callId)) {
+      if (scope.sessionId === event.sessionId && (event.type === 'journal.error' && event.data?.fenced === true ||
+          scope.executionId === event.executionId &&
+          (event.type === 'turn.end' || event.type === 'tool.end' && scope.data.call.callId === event.data.call.callId))) {
         relay.invalidate(); toolScopes.delete(id);
       }
     }
@@ -124,6 +132,7 @@ export async function createFxEngine(options = {}) {
         const token = randomUUID(), completed = Promise.withResolvers();
         let settled = false, failed = false, original;
         inputEffects.set(token, async () => {
+          call.onEffectStarted?.();
           try { original = await run(); }
           catch (error) { failed = true; original = error; }
           settled = true;
@@ -361,6 +370,30 @@ export async function createFxEngine(options = {}) {
   });
   const { fetch, nativeAddon, backend, onEvent, tools: _tools, checkpoint, persistence, runtimeFactory, ...configuration } = options;
   try {
+    if (options.__observationFixture) {
+      const { scope, callID, signal } = options.__observationFixture;
+      const metadata = await request('observationOpen', { scope, callID, captureContent: options.hooks.captureContent === true });
+      const started = Promise.withResolvers();
+      const observer = inputObservation({ id: 1, observation: metadata, onEffectStarted: started.resolve });
+      let cancellation = Promise.resolve();
+      const abort = () => {
+        observer[swiftObservationScope].invalidate();
+        cancellation = request('observationCancel');
+        cancellation.catch(reportObservationError);
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+      return { ...observer, waitUntilStarted: () => started.promise, flush: () => cancellation,
+        async close() {
+          if (closed) return;
+          closed = true;
+          signal.removeEventListener('abort', abort);
+          try { await request('close'); } finally { child.stdin.end(); await exited; lines.close(); }
+          const status = await exited;
+          if (status.code !== 0 || stderr) throw new Error(`Swift observation fixture failed: ${status.code ?? status.signal}\n${stderr}`);
+        },
+      };
+    }
     if (runtimeFactory) {
       fixtureRuntime = await runtimeFactory({ ...options,
         hostToolExecutor: (name, input, sessionID, callID) => request('fixtureTool', { name, input, sessionID, callID }),

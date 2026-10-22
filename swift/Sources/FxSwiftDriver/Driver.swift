@@ -124,6 +124,12 @@ actor Driver: FxHTTPClient, FxPersistence {
 
     private func run(_ value: JSONValue) async throws -> JSONValue {
         switch value["op"]?.string {
+        case "observationOpen":
+            return try await inputObservations.openFixture(scope: value["scope"] ?? .null,
+                callID: value["callID"]?.string ?? "", captureContent: value["captureContent"] == .bool(true))
+        case "observationCancel":
+            await inputObservations.invalidate(tool: 1)
+            return .null
         case "fixtureReceive":
             guard let fixtureTransport else { throw FxError.closed }
             try await fixtureTransport.receive(value["message"] ?? .null)
