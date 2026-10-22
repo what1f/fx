@@ -24,6 +24,9 @@ export async function load(url, context, nextLoad) {
     const followUp = 'const next = agent.followUp("then summarize");';
     if (source.split(followUp).length !== 4) throw new Error('Upstream follow-up receipt fixtures changed');
     source = source.replaceAll(followUp, followUp + '\n  await next[Symbol.for("libfx.swift.followUpReceipt")];');
+    const handedOff = 'assert.throws(() => agent.prompt("again"), /handed its session off/);';
+    if (source.split(handedOff).length !== 2) throw new Error('Upstream handoff fixture changed');
+    source = source.replace(handedOff, 'await turn[Symbol.for("libfx.swift.cancellation")]();\n  ' + handedOff);
     if (process.env.LIBFX_SWIFT_JOURNAL_CASES) {
       const names = JSON.parse(process.env.LIBFX_SWIFT_JOURNAL_CASES);
       if (!Array.isArray(names) || names.length === 0 || names.some(name => typeof name !== 'string') || new Set(names).size !== names.length) {

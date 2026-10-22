@@ -1,5 +1,40 @@
 import Foundation
 
+/// A validated Gateway model-list response, preserving provider metadata.
+public struct FxModelCatalog: Sendable, Equatable {
+    let response: Data
+
+    public init(response: Data) throws {
+        guard response.count <= 4 * 1024 * 1024 else { throw FxModelCatalogError.byteLimit }
+        let value: JSONValue
+        do { value = try JSONDecoder().decode(JSONValue.self, from: response) }
+        catch { throw FxModelCatalogError.malformedResponse }
+        guard case .array(let entries) = value["data"] else { throw FxModelCatalogError.malformedResponse }
+        guard entries.count <= 10_000 else { throw FxModelCatalogError.entryLimit }
+        guard entries.allSatisfy({ $0["id"]?.string?.isEmpty == false }) else {
+            throw FxModelCatalogError.malformedResponse
+        }
+        self.response = response
+    }
+}
+
+struct CatalogHTTPClient: FxHTTPClient {
+    let client: any FxHTTPClient
+    let catalog: FxModelCatalog?
+
+    func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        try Task.checkCancellation()
+        if let catalog, request.httpMethod == "GET",
+           request.url?.host == "ai-gateway.vercel.sh", request.url?.path == "/coding-agent/v1/models" {
+            return FxHTTPResponse(statusCode: 200, headers: ["content-type": "application/json"], body: AsyncThrowingStream {
+                $0.yield(catalog.response)
+                $0.finish()
+            })
+        }
+        return try await client.send(request)
+    }
+}
+
 public enum FxModelCatalogError: Error, Sendable, Equatable, LocalizedError {
     case invalidAPIKey
     case httpStatus(Int)

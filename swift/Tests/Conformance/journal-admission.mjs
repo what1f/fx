@@ -32,6 +32,18 @@ const cases = {
     "each turn appends its own events, not the whole history",
     "a slow store receives one opaque record at a time, each naming the cursor before it"
   ],
+  "cancellation": [
+    "a turn handed off mid-tool stays open for the next agent",
+    "a handoff needs persistence and takes no other reason",
+    "a long tool turn stores each step once in its progress, and a crash late in it restores",
+    "a turn that fails ends in the journal and is not resumed",
+    "a follow-up cancelled as its turn starts never runs again",
+    "a cancel during a slow journal's barrier ends the turn as the agent does",
+    "a resumed turn cancelled during a slow journal's barrier is committed once"
+  ],
+  "image-recovery": [
+    "an image prompt after a crashed image turn gets the next image id"
+  ],
   "inputs": [
     "a steer is stored before the model request that carries it",
     "a steer withdrawn before its boundary never reaches the model",

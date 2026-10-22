@@ -112,7 +112,7 @@ public actor FxEngine {
             }
             tools[tool.name] = tool
         }
-        let httpClient = ProviderHTTPClient(client: configuration.httpClient, provider: configuration.provider)
+        let httpClient = ProviderHTTPClient(client: CatalogHTTPClient(client: configuration.httpClient, catalog: configuration.modelCatalog), provider: configuration.provider)
         try Task.checkCancellation()
         let transport: any EngineTransport
         if let injectedTransport { transport = injectedTransport }
@@ -303,6 +303,7 @@ public actor FxEngine {
     var completedTurnID: String? { lastCompletedTurnID }
 
     public var recoveryState: FxRecoveryState? { recovery }
+    package var hasHandedOffForConformance: Bool { handedOff }
     @_spi(Conformance) public var hasResumableWork: Bool { recovery != nil || followUps.contains { $0.held } }
 
     /// Continues an interrupted turn. Unlisted ambiguous calls are not repeated.

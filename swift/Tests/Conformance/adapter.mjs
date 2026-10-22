@@ -312,6 +312,7 @@ export async function createFxEngine(options = {}) {
       if (value.error) {
         let ErrorType = value.error.category === 'type' ? TypeError : value.error.category === 'range' ? RangeError : Error;
         let message = value.error.message;
+        if (message === 'handedOff') message = 'This engine handed its session off';
         if (message === 'Invalid reasoning effort') {
           ErrorType = TypeError;
           message = 'effort must contain 1 to 64 letters, digits, periods, underscores or hyphens';
@@ -581,12 +582,20 @@ export async function createFxEngine(options = {}) {
     resumable = opened.resumable;
     recoveryCalls = opened.runningCalls;
     recoveryTurnID = opened.openTurnId;
+    let handedOff = false;
     function begin(op, args, promptOptions = {}) {
       if (turn) throw new Error('a prompt is already running');
       const turnToken = randomUUID();
       const control = (op, args = {}) => request(op, { ...args, turnToken });
       let ready;
-      const state = createTurn(args => ready.then(() => control('cancel', args)), (input, inputID) => ready.then(() => control('steer', {
+      const state = createTurn(args => {
+        if (args.reason !== undefined && args.reason !== 'handoff') throw new TypeError('reason must be "handoff"');
+        if (args.reason === 'handoff' && !options.persistence && !nativeStore) throw new Error('Handoff needs persistence');
+        return ready.then(() => control('cancel', args)).then(reply => {
+          if (args.reason === 'handoff') handedOff = reply?.handedOff === true;
+          return reply;
+        });
+      }, (input, inputID) => ready.then(() => control('steer', {
         text: Array.isArray(input) ? input.map(block => block.text).join('\n') : input, inputID,
       })), inputID => ready.then(() => control('withdraw', { inputID })));
       turnStates.set(turnToken, state);
@@ -609,6 +618,7 @@ export async function createFxEngine(options = {}) {
     return {
       sessionId: opened.sessionId,
       prompt(text, promptOptions = {}) {
+        if (handedOff) throw new Error('This engine handed its session off');
         if (reportedAppendFailure) throw reportedAppendFailure;
         if (promptOptions.turnId !== undefined && (typeof promptOptions.turnId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(promptOptions.turnId))) {
           throw new TypeError('turnId must be 1 to 128 ASCII letters, digits, periods, underscores or hyphens');
@@ -616,6 +626,7 @@ export async function createFxEngine(options = {}) {
         return begin('prompt', { text }, promptOptions);
       },
       resume(promptOptions = {}) {
+        if (handedOff) throw new Error('This engine handed its session off');
         if (reportedAppendFailure) throw reportedAppendFailure;
         if (promptOptions.onAmbiguous !== undefined && typeof promptOptions.onAmbiguous !== 'function') {
           throw new TypeError('onAmbiguous must be a function');
@@ -692,7 +703,11 @@ function createTurn(cancel, steer, withdraw) {
     fail(error) { if (done) return; done = true; failure = error; rejectResult(error); while (waiters.length) waiters.shift().reject(error); },
     public: {
       result,
-      cancel(options = {}) { return cancel(options).catch(error => state.fail(error)); },
+      cancel(options = {}) {
+        state.cancellation = cancel(options).catch(error => state.fail(error));
+        return state.cancellation;
+      },
+      [Symbol.for('libfx.swift.cancellation')]() { return state.cancellation; },
       steer(input, id = `in_${randomUUID()}`) {
         const receipt = steer(input, id);
         receipt.id = id;
@@ -706,7 +721,7 @@ function createTurn(cancel, steer, withdraw) {
           if (done) return Promise.resolve({ done: true });
           return new Promise((resolve, reject) => waiters.push({ resolve, reject }));
         },
-        return() { void cancel(); return Promise.resolve({ done: true }); },
+        return() { void state.public.cancel(); return Promise.resolve({ done: true }); },
       }; },
     },
   };

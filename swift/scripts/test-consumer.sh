@@ -169,6 +169,13 @@ struct SubscriptionHTTP: FxHTTPClient {
     static func main() async throws {
         let models = try await FxModel.available(apiKey: "consumer-test-key", httpClient: MockHTTP())
         guard models.map(\.id) == ["swift/consumer"] else { throw FxModelCatalogError.malformedResponse }
+        var supplied = FxConfiguration(apiKey: "consumer-test-key",
+            model: FxModel(id: "swift/consumer", reasoningEffort: "high"), httpClient: MockHTTP())
+        supplied.modelCatalog = try FxModelCatalog(response: Data(#"{"data":[{"id":"swift/consumer","type":"language","tags":["reasoning"],"reasoning_options":[{"type":"effort","values":["high"]}]}]}"#.utf8))
+        let catalogEngine = try await FxEngine.open(configuration: supplied)
+        let catalogTurn = try await catalogEngine.prompt("use the supplied catalog")
+        guard try await catalogTurn.result.stopReason == .endTurn else { throw FxModelCatalogError.malformedResponse }
+        try await catalogEngine.close()
         let toolInput = JSONValue.object(["content": .string(String(repeating: "x", count: 128 * 1024))])
         let waitEvents = Observations()
         let tool = FxTool(name: "probe", description: "Probe", inputSchema: .object(["type": .string("object")]), isIdempotent: true) { input, context in

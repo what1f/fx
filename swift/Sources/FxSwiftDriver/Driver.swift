@@ -255,6 +255,10 @@ actor Driver: FxHTTPClient, FxPersistence {
                 apiKey: options["apiKey"]?.string ?? "", model: model,
                 instructions: options["instructions"]?.string ?? "", tools: tools, providerTools: providerTools
             )
+            if let catalog = options["modelCatalog"], catalog != .null {
+                let response = catalog["data"] == nil ? JSONValue.object(["data": catalog]) : catalog
+                config.modelCatalog = try FxModelCatalog(response: JSONEncoder().encode(response))
+            }
             if let name = options["provider"]?["name"]?.string,
                let base = options["provider"]?["baseUrl"]?.string, let url = URL(string: base) {
                 var models: [String: FxCustomProvider.ModelCapabilities] = [:]
@@ -544,7 +548,8 @@ actor Driver: FxHTTPClient, FxPersistence {
                 if value["reason"] == .string("handoff") { try await turn.handoff() }
                 else { await turn.cancel() }
             }
-            return .null
+            let handedOff = await engine?.hasHandedOffForConformance ?? false
+            return .object(["handedOff": .bool(handedOff)])
         case "steer":
             guard let token = value["turnToken"]?.string, let turn = turns[token] else { throw FxError.noActiveTurn }
             let receipt = try await turn.steer(value["text"]?.string ?? "", id: value["inputID"]?.string ?? UUID().uuidString)

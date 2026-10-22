@@ -67,6 +67,9 @@ async function exercise(source, target) {
     assert.ok(request.includes('preserve this pending steer'));
     assert.ok(request.includes('may have partly run'));
     assert.equal(engine.resume(), null);
+    await resumed.cancel({ reason: 'handoff' });
+    const fresh = await drain(engine.prompt('after stale handoff'));
+    assert.equal(fresh.result.stopReason, 'end_turn', 'a finished turn must not hand off the current engine');
     await engine.close();
     return { requests: requests.length, calls, final: result.result.stopReason };
   } finally { await engine?.close(); }

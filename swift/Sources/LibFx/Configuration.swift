@@ -4,6 +4,8 @@ public struct FxConfiguration: Sendable {
     @_spi(Conformance) public var wireObserver: (@Sendable (FxWireDirection, JSONValue) async -> Void)?
     public var provider: FxProvider
     public var model: FxModel
+    /// A supplied Gateway catalog replaces its model-list request.
+    public var modelCatalog: FxModelCatalog?
     public var instructions: String
     public var tools: [FxTool]
     public var providerTools: [FxProviderTool]
@@ -49,6 +51,7 @@ public struct FxConfiguration: Sendable {
     ) {
         self.provider = provider
         self.model = model
+        self.modelCatalog = nil
         self.instructions = instructions
         self.tools = tools
         self.providerTools = providerTools

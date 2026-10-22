@@ -49,5 +49,10 @@ try {
   newController.enqueue(encoder.encode('data: [DONE]\n\n')); newController.close();
   for await (const _ of next) {}
   assert.equal((await next.result).stopReason, 'end_turn');
-  console.log('Turn control passed: withdrawal before placement and stale-turn isolation');
+  const abandoned = engine.prompt('stop reading');
+  for await (const event of abandoned) {
+    if (event.type === 'text_delta') break;
+  }
+  assert.equal((await abandoned.result).stopReason, 'cancelled');
+  console.log('Turn control passed: withdrawal before placement, stale-turn isolation and iterator cancellation');
 } finally { releaseTool(); await engine.close(); }

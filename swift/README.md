@@ -112,6 +112,16 @@ let withdrawal = try await turn.withdraw(receipt.id)
 
 Model discovery does not create an engine. Steering joins the current turn at a safe boundary and carries an ID in the user-message event. A withdrawal returns `.withdrawn` if the model has not received that input, or `.alreadyPlaced` otherwise. With persistence, these operations wait for their journal records. Controls on an old turn cannot change a newer turn.
 
+To use a saved Gateway model-list response, set a catalog before opening the engine:
+
+```swift
+var configuration = FxConfiguration(apiKey: key, model: "provider/model")
+configuration.modelCatalog = try FxModelCatalog(response: savedCatalogData)
+let engine = try await FxEngine.open(configuration: configuration)
+```
+
+The response must be a JSON object with a `data` array of entries with nonempty string IDs. The catalog preserves provider metadata, including vision and reasoning capabilities, and accepts at most 10,000 entries and 4 MiB. It replaces the Gateway model-list GET request; other requests use the configured HTTP client.
+
 ## Use a custom provider
 
 Use an OpenAI Chat Completions service through `FxProvider.custom`:

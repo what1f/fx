@@ -52,12 +52,16 @@ jobs:
           node swift/Tests/Conformance/mcp-observation.mjs
           node swift/Tests/Conformance/input-observation.mjs
           node swift/Tests/Conformance/tool-observation.mjs
+          node swift/Tests/Conformance/turn-control.mjs
+          node swift/Tests/Conformance/handoff.mjs
           node swift/Tests/Conformance/journal-admission.mjs
           node swift/Tests/Conformance/journal-admission.mjs recovery
           node swift/Tests/Conformance/journal-admission.mjs continuation
           node swift/Tests/Conformance/journal-admission.mjs failures
           node swift/Tests/Conformance/journal-admission.mjs inputs
           node swift/Tests/Conformance/journal-admission.mjs versions
+          node swift/Tests/Conformance/journal-admission.mjs cancellation
+          node swift/Tests/Conformance/journal-admission.mjs image-recovery
           node swift/Tests/Conformance/persistence-errors.mjs
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-tool-contract.mjs native
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native
@@ -69,12 +73,16 @@ jobs:
           node swift/Tests/Conformance/mcp-observation.mjs
           node swift/Tests/Conformance/input-observation.mjs
           node swift/Tests/Conformance/tool-observation.mjs
+          node swift/Tests/Conformance/turn-control.mjs
+          node swift/Tests/Conformance/handoff.mjs
           node swift/Tests/Conformance/journal-admission.mjs
           node swift/Tests/Conformance/journal-admission.mjs recovery
           node swift/Tests/Conformance/journal-admission.mjs continuation
           node swift/Tests/Conformance/journal-admission.mjs failures
           node swift/Tests/Conformance/journal-admission.mjs inputs
           node swift/Tests/Conformance/journal-admission.mjs versions
+          node swift/Tests/Conformance/journal-admission.mjs cancellation
+          node swift/Tests/Conformance/journal-admission.mjs image-recovery
           node swift/Tests/Conformance/persistence-errors.mjs
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-tool-contract.mjs native
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native
