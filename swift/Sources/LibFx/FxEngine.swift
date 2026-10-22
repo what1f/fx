@@ -154,6 +154,7 @@ public actor FxEngine {
             }
             let journal = persistence.map { JournalWriter(store: $0, head: loaded?.head, lastSequence: loaded?.lastSequence ?? 0, tailBytes: loaded?.tailBytes ?? 0) }
             let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes, checkpointMetadata: checkpointMetadata, onPermission: configuration.onPermission, onLifecycleEvent: configuration.onLifecycleEvent)
+            await journal?.setHandler { [weak engine] result in await engine?.journalSettled(result) }
             await rpc.setHandler { [weak engine] message in await engine?.handle(message) }
             if let checkpoint {
                 try await transport.putAttachment(checkpoint, id: 1)
@@ -494,32 +495,7 @@ public actor FxEngine {
             } catch { observation.onError(error) }
         } else if message.method == "libfx/journal_append", message.params["sessionId"]?.string == sessionID, let journal {
             guard !handedOff, journalFailure == nil else { return }
-            do {
-                let events = message.params["events"] ?? .null
-                try await journal.append(events, barrier: message.params["barrier"] == .bool(true))
-                if case .array(let batch) = events, !batch.isEmpty {
-                    for event in batch where event["type"] == .string("input_accepted") {
-                        if let id = event["data"]?["id"]?.string, let receipt = followUpAcceptances.removeValue(forKey: id) {
-                            await receipt.acceptance.resolve(.success(()))
-                        }
-                    }
-                    let cursor = await journal.head
-                    observation?.deliver(FxObservation(journal: .journalCommitted, sessionID: sessionID, data: .object([
-                        "cursor": cursor.map(JSONValue.string) ?? .null,
-                        "firstSeq": batch.first?["seq"] ?? .null, "lastSeq": batch.last?["seq"] ?? .null,
-                        "eventCount": .number(Double(batch.count)),
-                    ])))
-                }
-            } catch {
-                guard journalFailure == nil else { return }
-                journalFailure = error
-                failFollowUps(error)
-                observation?.deliver(FxObservation(journal: .journalError, sessionID: sessionID, data: .object([
-                    "error": .string(String(describing: type(of: error))),
-                    "fenced": .bool((error as? FxPersistenceError) == .fenced),
-                ])))
-                if let turnID { await cancel(turn: turnID) }
-            }
+            await journal.enqueue(message.params["events"] ?? .null, barrier: message.params["barrier"] == .bool(true))
         } else if message.method == "libfx/journal_flush", let id = message.id {
             do {
                 try await journal?.check()
@@ -554,7 +530,7 @@ public actor FxEngine {
                 guard let self, await self.isActive(expectedTurn) else { return }
                 let response: JSONValue
                 do {
-                    try await self.journal?.check()
+                    try await self.journal?.checkFailure()
                     try Task.checkCancellation()
                     guard let tool else { throw FxError.invalidInput("Unknown tool") }
                     let value = try await tool.execute(params["input"] ?? .null, context)
@@ -575,6 +551,31 @@ public actor FxEngine {
             }
         } else if let id = message.id {
             try? await rpc.respond(id: id, error: .protocolViolation("Unsupported host request: \(message.method)"))
+        }
+    }
+
+    private func journalSettled(_ result: Result<JournalWriter.Commit, any Error>) async {
+        switch result {
+        case .success(let commit):
+            for event in commit.events where event["type"] == .string("input_accepted") {
+                if let id = event["data"]?["id"]?.string, let receipt = followUpAcceptances.removeValue(forKey: id) {
+                    await receipt.acceptance.resolve(.success(()))
+                }
+            }
+            observation?.deliver(FxObservation(journal: .journalCommitted, sessionID: sessionID, data: .object([
+                "cursor": .string(commit.cursor),
+                "firstSeq": commit.events.first?["seq"] ?? .null, "lastSeq": commit.events.last?["seq"] ?? .null,
+                "eventCount": .number(Double(commit.events.count)),
+            ])))
+        case .failure(let error):
+            guard journalFailure == nil else { return }
+            journalFailure = error
+            failFollowUps(error)
+            observation?.deliver(FxObservation(journal: .journalError, sessionID: sessionID, data: .object([
+                "error": .string(String(describing: type(of: error))),
+                "fenced": .bool((error as? FxPersistenceError) == .fenced),
+            ])))
+            if let turnID { await cancel(turn: turnID) }
         }
     }
 

@@ -149,12 +149,21 @@ struct LoadedJournal: Sendable {
     }
 }
 
-/// The RPC reader awaits each append, so tool admission cannot pass its durability barrier.
+/// Serializes storage while the RPC reader continues admitting replay-safe work.
 actor JournalWriter {
+    struct Commit: Sendable {
+        let events: [JSONValue]
+        let cursor: String
+    }
+
     private let store: any FxPersistence
     private let writerID = UUID().uuidString
     private(set) var head: String?
-    private var tail: Task<Void, any Error>?
+    private var worker: Task<Void, Never>?
+    private var pending: [JSONValue] = []
+    private var pendingBarrier = false
+    private var failure: (any Error)?
+    private var handler: (@Sendable (Result<Commit, any Error>) async -> Void)?
     private var lastSequence: UInt64
     private var bytesSinceCheckpoint: Int
 
@@ -163,29 +172,65 @@ actor JournalWriter {
         self.bytesSinceCheckpoint = tailBytes
     }
 
-    func append(_ events: JSONValue, barrier: Bool) async throws {
-        guard case .array(let batch) = events, !batch.isEmpty else { return }
-        let previous = tail
-        let task = Task {
-            try await previous?.value
-            let data = try JSONEncoder().encode(JSONValue.object([
-                "format": .string("libfx-journal-v1"), "events": .array(batch),
-            ]))
-            let first = batch.first?["seq"]?.integer ?? 0
-            let waits = batch.contains { ["input_accepted", "input_withdrawn", "turn_committed", "turn_progress_cleared", "turn_yielded"].contains($0["type"]?.string ?? "") }
-            let cursor = try await store.append(expected: head, idempotencyKey: "\(writerID):\(first)", data: data, barrier: barrier || waits)
-            guard !cursor.isEmpty, cursor.utf8.count <= 1024 else { throw FxPersistenceError.invalidCursor }
-            head = cursor
-            bytesSinceCheckpoint += data.count
-            if let seq = batch.last?["seq"]?.integer, let sequence = UInt64(exactly: seq) {
-                lastSequence = sequence
-            }
-        }
-        tail = task
-        try await task.value
+    func setHandler(_ handler: @escaping @Sendable (Result<Commit, any Error>) async -> Void) {
+        self.handler = handler
     }
 
-    func check() async throws { try await tail?.value }
+    func enqueue(_ events: JSONValue, barrier: Bool) {
+        guard failure == nil, case .array(let batch) = events, !batch.isEmpty else { return }
+        pending.append(contentsOf: batch)
+        let waits = batch.contains { ["input_accepted", "input_withdrawn", "turn_committed", "turn_progress_cleared", "turn_yielded"].contains($0["type"]?.string ?? "") }
+        pendingBarrier = pendingBarrier || barrier || waits
+        // Configuration accompanies the first progress rather than a separate write.
+        if batch.allSatisfy({ $0["type"] == .string("session_config") }) { return }
+        startWorker()
+    }
+
+    private func startWorker() {
+        guard worker == nil, !pending.isEmpty, failure == nil else { return }
+        worker = Task { await drain() }
+    }
+
+    private func drain() async {
+        while !pending.isEmpty {
+            let batch = pending, barrier = pendingBarrier
+            pending = []
+            pendingBarrier = false
+            do {
+                let data = try JSONEncoder().encode(JSONValue.object([
+                    "format": .string("libfx-journal-v1"), "events": .array(batch),
+                ]))
+                let first = batch.first?["seq"]?.integer ?? 0
+                let cursor = try await store.append(expected: head, idempotencyKey: "\(writerID):\(first)", data: data, barrier: barrier)
+                guard !cursor.isEmpty, cursor.utf8.count <= 1024 else { throw FxPersistenceError.invalidCursor }
+                head = cursor
+                bytesSinceCheckpoint += data.count
+                if let seq = batch.last?["seq"]?.integer, let sequence = UInt64(exactly: seq) {
+                    lastSequence = sequence
+                }
+                await handler?(.success(Commit(events: batch, cursor: cursor)))
+            } catch {
+                failure = error
+                pending = []
+                await handler?(.failure(error))
+                break
+            }
+        }
+        worker = nil
+    }
+
+    func checkFailure() throws {
+        if let failure { throw failure }
+    }
+
+    func check() async throws {
+        while !pending.isEmpty || worker != nil {
+            if !pending.isEmpty { pendingBarrier = true }
+            startWorker()
+            await worker?.value
+        }
+        try checkFailure()
+    }
 
     func shouldCheckpoint(afterBytes limit: Int) -> Bool {
         store is any FxCheckpointPersistence && bytesSinceCheckpoint > 0 && bytesSinceCheckpoint >= limit

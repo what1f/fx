@@ -12,6 +12,29 @@ export async function resolve(specifier, context, nextResolve) {
 
 export async function load(url, context, nextLoad) {
   const result = await nextLoad(url, context);
+  if (url.endsWith('/sdk/tests/test-journal.mjs')) {
+    let source = result.source.toString();
+    const asset = 'const wasm = await readFile(resolve(scriptDir, "../../zig-out/bin/fx-core.wasm"));';
+    const loop = 'for (const { name, body } of cases) {';
+    if ([asset, loop].some(marker => source.split(marker).length !== 2)) throw new Error('Upstream journal fixture changed; review test ownership');
+    source = source.replace(asset,
+      'const wasm = sourceBackend === "wasm" || targetBackend === "wasm" ? await readFile(resolve(scriptDir, "../../zig-out/bin/fx-core.wasm")) : undefined;');
+    if (process.env.LIBFX_SWIFT_JOURNAL_CASES) {
+      const names = JSON.parse(process.env.LIBFX_SWIFT_JOURNAL_CASES);
+      if (!Array.isArray(names) || names.length === 0 || names.some(name => typeof name !== 'string') || new Set(names).size !== names.length) {
+        throw new Error('Journal selection must contain distinct test names');
+      }
+      source = source.replace(loop, `const selectedNames = ${JSON.stringify(names)};
+  const selectedCases = selectedNames.map(name => {
+    const matches = cases.filter(test => test.name === name);
+    assert.equal(matches.length, 1, 'Each selected journal case must still exist exactly once: ' + name);
+    return matches[0];
+  });
+  for (const { name, body } of selectedCases) {`)
+        .replace('console.log(`journal integration passed:', 'console.log("selected journal cases passed: " + selectedCases.length);\n  console.log(`journal integration passed:');
+    }
+    return { ...result, source };
+  }
   if (url.endsWith('/sdk/tests/test-tool-contract.mjs')) {
     const source = result.source.toString();
     const asset = 'const wasm = await readFile(resolve(scriptDir, "../../zig-out/bin/fx-core.wasm"));';

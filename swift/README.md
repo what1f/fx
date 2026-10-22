@@ -232,7 +232,7 @@ Wait content is omitted by default. With content capture enabled, each start or 
 
 ## Persist a conversation
 
-Pass a store conforming to `FxPersistence` when opening the engine. Its records are opaque bytes. The store must reject a stale expected cursor and honor durability barriers. `FxSQLitePersistence` stores one conversation per local database file using the system SQLite library. Separate connections use transactions to reject stale writers. Close the store after its engines close.
+Pass a store conforming to `FxPersistence` when opening the engine. Its records are opaque bytes. The store must reject a stale expected cursor and honor durability barriers. Appends run in order and combine events received while a write is pending. Replay-safe read-only tools can start before a non-barrier append completes. Effectful tools wait for their intent to be stored. Turn completion and `flushPersistence()` wait for pending writes and commit notifications. `FxSQLitePersistence` stores one conversation per local database file using the system SQLite library. Separate connections use transactions to reject stale writers. Close the store after its engines close.
 
 ```swift
 let store = try FxSQLitePersistence(url: databaseURL)

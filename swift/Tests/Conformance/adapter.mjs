@@ -7,8 +7,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createMcpAdapter as bridgeMcpAdapter } from './mcp-adapter.mjs';
 import { swiftObservationScope } from './observation-scope.mjs';
-// Host-owned opaque byte storage fixture; the engine and journal protocol remain in Swift.
-export { createMemoryPersistence } from '../../../sdk/fx-sdk.js';
+// Host-owned byte storage and JavaScript error identities; engine behavior remains in Swift.
+export { createMemoryPersistence, FxFencedError, FxJournalVersionError } from '../../../sdk/fx-sdk.js';
 
 const defaultDriver = process.env.LIBFX_SWIFT_DRIVER || join(execFileSync('swift', [
   'build', '--package-path', fileURLToPath(new URL('../..', import.meta.url)), '--show-bin-path',
