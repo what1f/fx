@@ -3,7 +3,7 @@ import Foundation
 /// Owns workers for durable conversations. The caller owns the session store.
 public actor FxAgent {
     public nonisolated let name: String
-    let store: FxSessionStore
+    let store: any FxSessionStorage
     private let configuration: FxConfiguration
     private let initialCheckpoint: Data?
     private let checkpointAfterBytes: Int?
@@ -19,7 +19,7 @@ public actor FxAgent {
     private var intakes = 0
     private var closed = false
 
-    public init(configuration: FxConfiguration, name: String = "default", store: FxSessionStore, checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024, deliveryPolicy: FxDeliveryPolicy? = nil) throws {
+    public init(configuration: FxConfiguration, name: String = "default", store: any FxSessionStorage, checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024, deliveryPolicy: FxDeliveryPolicy? = nil) throws {
         try configuration.validateInstructions()
         guard validSessionIdentifier(name), name.utf8.count <= 64,
               let first = name.utf8.first, (48...57).contains(first) || (65...90).contains(first) || (97...122).contains(first) else { throw FxError.invalidInput("Invalid agent name") }
@@ -42,6 +42,13 @@ public actor FxAgent {
 
     func accept(session: String, options: FxSessionOptions, content: [FxPromptContent], id: String, steering: Bool = false) async throws -> FxSessionTurn {
         guard !closed else { throw FxError.closed }
+        guard validSessionIdentifier(id) else { throw FxError.invalidInput("Invalid session or message ID") }
+        _ = try PreparedPrompt(content, deferringImageLimits: configuration.prepareImage != nil)
+        guard try JSONEncoder().encode(options).count <= 1024 * 1024 else { throw FxError.invalidInput("Session settings exceed the size limit") }
+        if steering, content.allSatisfy({ if case .text = $0 { return true }; return false }) {
+            let text = content.compactMap { if case .text(let text) = $0 { return text }; return nil }.joined(separator: "\n")
+            guard text.utf8.count <= 64 * 1024 else { throw FxError.invalidInput("Steering text exceeds the size limit") }
+        }
         intakes += 1
         defer { intakes -= 1 }
         try Task.checkCancellation()
@@ -156,7 +163,7 @@ public actor FxAgent {
                     throw error
                 }
             }
-        } catch { failures[session] = error }
+        } catch { failures[session] = (error as? SessionStorageFailure)?.cause ?? error }
         workers[session] = nil
         // Acceptance can interleave with the final empty-inbox read.
         if failures[session] == nil {
@@ -165,7 +172,7 @@ public actor FxAgent {
         }
     }
 
-    private func execute(_ input: SessionInput, lease: SessionLease) async throws -> Bool {
+    private func execute(_ input: FxSessionInput, lease: FxSessionLease) async throws -> Bool {
         let deadlines = deliveryPolicy?.deadlines()
         try await store.start(lease, input: input)
         if input.cancelRequested && !input.wasStarted {
@@ -209,7 +216,8 @@ public actor FxAgent {
         do {
             engine = try await openSessionEngine(configuration: config, sessionID: lease.sessionID,
                                                  persistence: SessionPersistence(store: store, lease: lease), deadline: deadlines?.stop)
-        } catch let error as FxSessionError { throw error }
+        } catch let error as SessionStorageFailure { throw error }
+        catch let error as FxSessionError { throw error }
         catch let error as FxPersistenceError { throw error }
         catch let error as FxSQLiteError { throw error }
         catch FxError.invalidInput(let message) {
@@ -224,7 +232,7 @@ public actor FxAgent {
             defer { finishControlChecks(lease.sessionID) }
             let turnID = sessionCoreInputID(input.id)
             let recovery = await engine.recoveryState
-            let spent = try await store.deliveryCutoffs(lease, id: input.id) >= 3
+            let spent = try await sessionStorageOperation { try await store.deliveryCutoffs(lease, id: input.id) } >= 3
             let turn: FxTurn
             if let recovery {
                 guard input.wasStarted, recovery.turnID == turnID else { throw FxPersistenceError.invalidJournal }
@@ -249,19 +257,19 @@ public actor FxAgent {
                         let waiters = controlChecks[lease.sessionID]?.waiters ?? []
                         controlChecks[lease.sessionID]?.waiters.removeAll()
                         defer { for waiter in waiters { waiter.resume() } }
-                        if try await store.cancelled(lease, id: input.id) {
+                        if try await sessionStorageOperation({ try await store.cancelled(lease, id: input.id) }) {
                             await turn.cancel()
                             return false
                         }
                         if let stop = deadlines?.stop, ContinuousClock.now >= stop {
-                            let cutoffs = try await store.cutOffDelivery(lease, id: input.id)
+                            let cutoffs = try await sessionStorageOperation { try await store.cutOffDelivery(lease, id: input.id) }
                             await self.configuration.onLifecycleEvent?(.deliveryDeadline(sessionID: lease.sessionID, epoch: Int64(lease.epoch), cutoffs: cutoffs))
                             self.configuration.observation?.deliver(FxObservation(journal: .sessionDeadline, sessionID: lease.sessionID,
                                 data: .object(["epoch": .number(Double(lease.epoch)), "cutoffs": .number(Double(cutoffs))])))
                             try await turn.handoff()
                             return true
                         }
-                        let steering = try await store.steering(lease, owner: input.id)
+                        let steering = try await sessionStorageOperation { try await store.steering(lease, owner: input.id) }
                         if !ending {
                             for steer in steering.pending {
                                 do { _ = try await turn.steer(steer.text, id: sessionCoreInputID(steer.id)) }
@@ -291,15 +299,15 @@ public actor FxAgent {
                 for try await event in turn {
                     var event = event
                     if case .userMessage(let text, let id?) = event {
-                        event = .userMessage(text, id: try await store.publicInputID(id, session: lease.sessionID) ?? id)
+                        event = .userMessage(text, id: try await sessionStorageOperation { try await store.publicInputID(id, session: lease.sessionID) } ?? id)
                     }
-                    try await store.appendEvent(lease, .update(id: input.id, event))
+                    try await sessionStorageOperation { try await store.appendEvent(lease, .update(id: input.id, event)) }
                 }
                 let result = try await turn.result
                 controls.cancel()
                 let interrupted = try await controls.value
                 if result.stopReason == .yielded || interrupted && result.stopReason == .cancelled {
-                    try await store.appendEvent(lease, .yielded(id: input.id))
+                    try await sessionStorageOperation { try await store.appendEvent(lease, .yielded(id: input.id)) }
                     if !interrupted { try await engine.saveCheckpoint() }
                     try await engine.close()
                     return true
@@ -314,16 +322,16 @@ public actor FxAgent {
             try await engine.close()
         } catch {
             try? await engine.close()
-            if error is FxPersistenceError || error is FxSQLiteError { throw error }
+            if error is SessionStorageFailure || error is FxPersistenceError || error is FxSQLiteError { throw error }
             try await finish(input, lease: lease, reason: .error, error: "Conversation failed")
         }
         return false
     }
 
-    private func finish(_ input: SessionInput, lease: SessionLease, reason: FxTurnResult.StopReason,
+    private func finish(_ input: FxSessionInput, lease: FxSessionLease, reason: FxTurnResult.StopReason,
                         usage: FxUsage? = nil, error: String? = nil) async throws {
-        try await store.finish(lease, id: input.id, result: FxSessionResult(id: input.id, stopReason: reason,
-            usage: usage, error: error, epoch: lease.epoch, isRepeated: false))
+        try await sessionStorageOperation { try await store.finish(lease, id: input.id, result: FxSessionResult(id: input.id, stopReason: reason,
+            usage: usage, error: error, epoch: lease.epoch, isRepeated: false)) }
     }
 
     /// Stops intake, then waits for accepted work. The store remains open.

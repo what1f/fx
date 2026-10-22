@@ -1,9 +1,10 @@
 import Foundation
 import CSQLite
 
-struct SessionSteer: Sendable {
-    let id: String
-    let text: String
+public struct FxSessionSteeringInput: Sendable {
+    public let id: String
+    public let text: String
+    public init(id: String, text: String) { self.id = id; self.text = text }
 }
 
 extension FxSessionStore {
@@ -19,15 +20,15 @@ extension FxSessionStore {
         }
     }
 
-    func steering(_ lease: SessionLease, owner: String) throws -> (pending: [SessionSteer], ends: Bool) {
+    public func steering(_ lease: FxSessionLease, owner: String) throws -> (pending: [FxSessionSteeringInput], ends: Bool) {
         try database.transaction(mode: "DEFERRED") {
             try checkLease(lease)
             let pending = try database.statement("SELECT id,content FROM fx_inputs WHERE session=? AND target=? AND accepted=0 AND result IS NULL ORDER BY sequence", [.text(lease.sessionID), .text(owner)]) { statement in
-                var result: [SessionSteer] = []
+                var result: [FxSessionSteeringInput] = []
                 while try database.step(statement) {
                     let content = try JSONDecoder().decode([FxPromptContent].self, from: database.bytes(statement, column: 1))
                     let text = content.compactMap { if case .text(let text) = $0 { return text }; return nil }.joined(separator: "\n")
-                    result.append(SessionSteer(id: database.text(statement, column: 0), text: text))
+                    result.append(FxSessionSteeringInput(id: database.text(statement, column: 0), text: text))
                 }
                 return result
             }
@@ -41,25 +42,22 @@ extension FxSessionStore {
 
     // Called inside the transaction that appends the core journal. A crash can
     // never preserve acceptance without also preserving its routing state.
-    func recordSteering(_ data: Data, session: String) throws {
-        guard let record = try? JSONDecoder().decode(JSONValue.self, from: data),
-              case .array(let events) = record["events"] else { throw FxPersistenceError.invalidJournal }
-        for event in events {
-            try recordDeliveryProgress(event, session: session)
-            if event["type"] == .string("input_accepted"), let id = event["data"]?["id"]?.string {
+    func applyJournalMarks(_ data: Data, session: String) throws {
+        for mark in try FxSessionJournalMark.decode(data) {
+            switch mark {
+            case .accepted(let id):
                 try database.execute("UPDATE fx_inputs SET accepted=1 WHERE session=? AND core_id=? AND kind='steer'", [.text(session), .text(id)])
-            } else if event["type"] == .string("input_withdrawn"), let id = event["data"]?["id"]?.string {
+            case .withdrawn(let id):
                 try database.execute("UPDATE fx_inputs SET target=NULL,accepted=0,placed=0 WHERE session=? AND core_id=? AND kind='steer' AND result IS NULL", [.text(session), .text(id)])
-            }
-            if case .array(let inputs) = event["inputs"] {
-                for case .string(let id) in inputs {
-                    try database.execute("UPDATE fx_inputs SET accepted=1,placed=1 WHERE session=? AND core_id=? AND kind='steer'", [.text(session), .text(id)])
-                }
+            case .placed(let id):
+                try database.execute("UPDATE fx_inputs SET accepted=1,placed=1 WHERE session=? AND core_id=? AND kind='steer'", [.text(session), .text(id)])
+            case .progress(let token):
+                try database.execute("UPDATE fx_inputs SET step=? WHERE session=? AND target IS NULL AND started=1 AND result IS NULL", [.text(token), .text(session)])
             }
         }
     }
 
-    func finishSteering(_ lease: SessionLease, owner: String, result: FxSessionResult) throws {
+    func finishSteering(_ lease: FxSessionLease, owner: String, result: FxSessionResult) throws {
         let joined = try database.statement("SELECT id FROM fx_inputs WHERE session=? AND target=? AND accepted=1 AND result IS NULL", [.text(lease.sessionID), .text(owner)]) { statement in
             var ids: [String] = []
             while try database.step(statement) { ids.append(database.text(statement, column: 0)) }
@@ -98,7 +96,7 @@ extension FxSessionStore {
         }
     }
 
-    func publicInputID(_ coreID: String, session: String) throws -> String? {
+    public func publicInputID(_ coreID: String, session: String) throws -> String? {
         try database.statement("SELECT id FROM fx_inputs WHERE session=? AND core_id=?", [.text(session), .text(coreID)]) { statement in
             try database.step(statement) ? database.text(statement, column: 0) : nil
         }

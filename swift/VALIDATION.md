@@ -271,6 +271,18 @@ Local qualification for this batch: all 247 native tests pass normally and under
 
 The combined normal conformance run passed 89/90 entries. Its session-cancellation selection once returned `cancelled` for the queued next turn, where the original assertion requires `end_turn`. That unchanged selection then passed 100 consecutive normal runs and twenty Address Sanitizer runs. These repetitions do not explain the combined-run failure or establish a fix for it; session-cancellation qualification remains open. An earlier image selection timed out while an incorrectly parallel native test run exhausted runtime slots; it passes in the subsequent combined run. No deadlines were increased and no assertions were removed.
 
+## Host-provided durable storage
+
+`FxAgent` now accepts `any FxSessionStorage`; the existing SQLite actor implements that protocol. The host owns connection setup and closing. Intake, leases, journal writes, event publication, steering and delivery cutoff accounting use the same agent execution path for either implementation. The contract specifies atomic acceptance, ownership fencing, expected-head checks, idempotent writes, ordered event cursors and durable acknowledgement. Asynchronous requirements and `Sendable` values follow Swift's [concurrency model](https://docs.swift.org/swift-book/LanguageGuide/Concurrency.html).
+
+The storage value types have public initializers. `FxSessionInput.runtimeID(for:)` supplies the stable identity used by journal marks, and `FxSessionJournalMark.decode(_:)` translates current core records into ordered acceptance, withdrawal, placement and progress changes. SQLite uses that decoder too. A host store must commit these changes atomically with the record, rather than maintain a second parser for the runtime format. SDK intake validation runs before invoking the host store.
+
+Four native tests exercise a host-provided implementation using only public imports. They verify execution, reopening and message-ID deduplication; invalid input rejected before any storage call; ordered mark decoding; and failures during journal loading, journal appending, output publication and result storage. Both the result waiter and agent close retain the original host error object, with accepted input available to a later owner. Failure classification preserves the existing typed persistence and fencing errors. The independent Release consumer compiles the same host implementation outside the package and runs its durable session through it.
+
+The host fixture forwards to SQLite. This proves the injectable public contract and failure handling, not an external database service's transactions, distributed lease liveness or crash behavior. Remote storage integrations, external queue delivery and the generic execution interface remain required work. The latest combined normal conformance run passes 90/90 entries, including the previously failing session-cancellation selection; this passing run does not explain that earlier failure.
+
+All 251 native tests pass locally in normal, Address Sanitizer and Thread Sanitizer builds. The first full native run identified two changed fenced-error types; preserving canonical storage errors fixes those regressions, and all three subsequent native runs pass. The normal driver is restored and passes streaming, Unicode, tools, checkpoints, restore and repeated-close smoke checks. The public Release consumer passes with the injected host store. No CI was triggered.
+
 ## Required remaining gates
 
 - Full classified upstream test coverage and full durable agent/session behavior. Both sign-in helper files now pass locally; live-provider authorization remains unverified.

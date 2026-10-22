@@ -216,7 +216,7 @@ import CSQLite
     private func location() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("sessions.sqlite")
     }
-    private func completed(_ id: String, _ lease: SessionLease) -> FxSessionResult {
+    private func completed(_ id: String, _ lease: FxSessionLease) -> FxSessionResult {
         FxSessionResult(id: id, stopReason: .endTurn, usage: nil, error: nil, epoch: lease.epoch, isRepeated: false)
     }
 }

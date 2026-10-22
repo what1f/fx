@@ -36,6 +36,12 @@ public struct FxSessionResult: Sendable, Codable, Equatable {
     public let error: String?
     public let epoch: Int64
     public let isRepeated: Bool
+
+    public init(id: String, stopReason: FxTurnResult.StopReason, usage: FxUsage? = nil, error: String? = nil,
+                epoch: Int64, isRepeated: Bool = false) {
+        self.id = id; self.stopReason = stopReason; self.usage = usage; self.error = error
+        self.epoch = epoch; self.isRepeated = isRepeated
+    }
 }
 
 public enum FxSessionEvent: Sendable, Codable, Equatable {
@@ -50,39 +56,51 @@ public struct FxSessionEntry: Sendable, Codable, Equatable {
     public let cursor: Int64
     public let epoch: Int64
     public let event: FxSessionEvent
+    public init(cursor: Int64, epoch: Int64, event: FxSessionEvent) {
+        self.cursor = cursor; self.epoch = epoch; self.event = event
+    }
 }
 
-struct SessionInput: Sendable, Codable {
-    let id: String
-    let content: [FxPromptContent]
-    let options: FxSessionOptions
-    let wasStarted: Bool
-    let cancelRequested: Bool
+public struct FxSessionInput: Sendable, Codable {
+    public let id: String
+    public let content: [FxPromptContent]
+    public let options: FxSessionOptions
+    public let wasStarted: Bool
+    public let cancelRequested: Bool
+    /// Stable identity used by journal placement marks for a public input ID.
+    public static func runtimeID(for id: String) -> String { sessionCoreInputID(id) }
+    public init(id: String, content: [FxPromptContent], options: FxSessionOptions, wasStarted: Bool, cancelRequested: Bool) {
+        self.id = id; self.content = content; self.options = options
+        self.wasStarted = wasStarted; self.cancelRequested = cancelRequested
+    }
 }
 
-struct SessionLease: Sendable, Equatable {
-    let sessionID: String
-    let owner: String
-    let epoch: Int64
+public struct FxSessionLease: Sendable, Equatable, Codable {
+    public let sessionID: String
+    public let owner: String
+    public let epoch: Int64
+    public init(sessionID: String, owner: String, epoch: Int64) {
+        self.sessionID = sessionID; self.owner = owner; self.epoch = epoch
+    }
 }
 
 struct SessionPersistence: FxCheckpointPersistence, FxImagePersistence {
-    let store: FxSessionStore
-    let lease: SessionLease
-    func load() async throws -> FxPersistenceSnapshot { try await store.loadJournal(lease) }
+    let store: any FxSessionStorage
+    let lease: FxSessionLease
+    func load() async throws -> FxPersistenceSnapshot { try await sessionStorageOperation { try await store.loadJournal(lease) } }
     func append(expected: String?, idempotencyKey: String, data: Data, barrier: Bool) async throws -> String {
-        try await store.appendJournal(lease, expected: expected, key: idempotencyKey, data: data)
+        try await sessionStorageOperation { try await store.appendJournal(lease, expected: expected, key: idempotencyKey, data: data, barrier: barrier) }
     }
-    func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) async throws { try await store.saveJournalCheckpoint(lease, checkpoint) }
-    func storeImage(_ data: Data, named name: String) async throws { try await store.storeImage(data, named: name, lease: lease) }
+    func saveCheckpoint(_ checkpoint: FxStoredCheckpoint) async throws { try await sessionStorageOperation { try await store.saveJournalCheckpoint(lease, checkpoint) } }
+    func storeImage(_ data: Data, named name: String) async throws { try await sessionStorageOperation { try await store.storeImage(data, named: name, lease: lease) } }
     func loadImage(named name: String) async throws -> Data? {
-        try await store.loadImage(named: name, lease: lease)
+        try await sessionStorageOperation { try await store.loadImage(named: name, lease: lease) }
     }
 }
 
 struct ReadOnlySessionPersistence: FxImagePersistence {
     let snapshot: FxPersistenceSnapshot
-    let store: FxSessionStore
+    let store: any FxSessionStorage
     let session: String
     let agent: String
     func load() async throws -> FxPersistenceSnapshot { snapshot }

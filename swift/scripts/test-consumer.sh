@@ -55,6 +55,7 @@ done
 [[ -f "$task_tmp/port" ]]
 provider_port="$(cat "$task_tmp/port")"
 mkdir -p "$task_tmp/Sources/Consumer"
+cp "$repo_root/swift/Tests/LibFxTests/SessionStorageProxy.swift" "$task_tmp/Sources/Consumer/SessionStorageProxy.swift"
 cat > "$task_tmp/Package.swift" <<'SWIFT'
 // swift-tools-version: 6.2
 import PackageDescription
@@ -359,8 +360,9 @@ struct SubscriptionHTTP: FxHTTPClient {
         guard try await search.result.stopReason == .endTurn else { throw FxPersistenceError.invalidJournal }
         try await searching.close()
         let sessions = try FxSessionStore(url: directory.appendingPathComponent("sessions.sqlite"))
+        let hostStorage = SessionStorageProxy(sessions)
         let agent = try FxAgent(configuration: FxConfiguration(
-            apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()), store: sessions, checkpointAfterBytes: 0,
+            apiKey: "consumer-test-key", model: "swift/consumer", httpClient: MockHTTP()), store: hostStorage, checkpointAfterBytes: 0,
             deliveryPolicy: FxDeliveryPolicy(maximumDuration: .seconds(30), reserve: .seconds(5)))
         let session = try await agent.session(id: "consumer-session")
         let durable = try await session.prompt("hello", id: "durable-message")

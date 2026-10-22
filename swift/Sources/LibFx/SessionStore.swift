@@ -8,10 +8,10 @@ import Glibc
 #endif
 
 /// Durable intake, event history, and core journals. A nil URL keeps all data in memory.
-public actor FxSessionStore {
+public actor FxSessionStore: FxSessionStorage {
     let database: SQLiteDatabase
     private let lockDirectory: URL?
-    private struct HeldLease { let lease: SessionLease; let descriptor: Int32? }
+    private struct HeldLease { let lease: FxSessionLease; let descriptor: Int32? }
     private var held: [String: HeldLease] = [:]
 
     public init(url: URL? = nil) throws {
@@ -75,7 +75,7 @@ public actor FxSessionStore {
         try database.close()
     }
 
-    func accept(session: String, agent: String, id: String, content: [FxPromptContent], options: FxSessionOptions, checkpoint: Data? = nil, steering: Bool = false, deferringImageLimits: Bool = false) throws -> Bool {
+    public func accept(session: String, agent: String, id: String, content: [FxPromptContent], options: FxSessionOptions, checkpoint: Data? = nil, steering: Bool = false, deferringImageLimits: Bool = false) throws -> Bool {
         guard validSessionIdentifier(session), validSessionIdentifier(id) else { throw FxError.invalidInput("Invalid session or message ID") }
         _ = try PreparedPrompt(content, deferringImageLimits: deferringImageLimits)
         let data = try JSONEncoder().encode(content), settings = try JSONEncoder().encode(options)
@@ -120,7 +120,7 @@ public actor FxSessionStore {
         }
     }
 
-    func resumePoint(session: String, agent: String) throws -> (id: String, cursor: Int64)? {
+    public func resumePoint(session: String, agent: String) throws -> (id: String, cursor: Int64)? {
         try database.transaction(mode: "DEFERRED") {
             guard let id = try pendingID(session: session, agent: agent) else { return nil }
             return try database.statement("SELECT COALESCE(MAX(cursor),0) FROM fx_session_events WHERE session=?", [.text(session)]) { statement in
@@ -130,12 +130,12 @@ public actor FxSessionStore {
         }
     }
 
-    func hasWork(session: String, agent: String) throws -> Bool {
+    public func hasWork(session: String, agent: String) throws -> Bool {
         try checkAgent(session, agent: agent)
         return try database.statement("SELECT 1 FROM fx_inputs WHERE session=? AND result IS NULL LIMIT 1", [.text(session)]) { try database.step($0) }
     }
 
-    func claim(session: String, agent: String) throws -> SessionLease? {
+    public func claim(session: String, agent: String) throws -> FxSessionLease? {
         try checkAgent(session, agent: agent)
         guard held[session] == nil else { return nil }
         var descriptor: Int32?
@@ -159,7 +159,7 @@ public actor FxSessionStore {
                     return sqlite3_column_int64(statement, 0)
                 }
                 guard epoch < Int64.max else { throw FxPersistenceError.sizeLimit }
-                let lease = SessionLease(sessionID: session, owner: UUID().uuidString, epoch: epoch + 1)
+                let lease = FxSessionLease(sessionID: session, owner: UUID().uuidString, epoch: epoch + 1)
                 try database.execute("UPDATE fx_sessions SET epoch=?, owner=? WHERE id=?", [.integer(lease.epoch), .text(lease.owner), .text(session)])
                 return lease
             }
@@ -171,13 +171,13 @@ public actor FxSessionStore {
         }
     }
 
-    func release(_ lease: SessionLease) throws {
+    public func release(_ lease: FxSessionLease) throws {
         guard held[lease.sessionID]?.lease == lease else { return }
         defer { if let descriptor = held.removeValue(forKey: lease.sessionID)?.descriptor { closeDescriptor(descriptor) } }
         try database.execute("UPDATE fx_sessions SET owner=NULL WHERE id=? AND owner=? AND epoch=?", [.text(lease.sessionID), .text(lease.owner), .integer(lease.epoch)])
     }
 
-    func checkLease(_ lease: SessionLease) throws {
+    public func checkLease(_ lease: FxSessionLease) throws {
         let valid = try database.statement("SELECT 1 FROM fx_sessions WHERE id=? AND owner=? AND epoch=?", [.text(lease.sessionID), .text(lease.owner), .integer(lease.epoch)]) { try database.step($0) }
         guard valid else { throw FxPersistenceError.fenced }
     }
@@ -193,12 +193,12 @@ public actor FxSessionStore {
         }
     }
 
-    func next(_ lease: SessionLease) throws -> SessionInput? {
+    public func next(_ lease: FxSessionLease) throws -> FxSessionInput? {
         try database.transaction {
             try checkLease(lease)
             return try database.statement("SELECT id,content,options,started,cancelled FROM fx_inputs WHERE session=? AND result IS NULL AND target IS NULL ORDER BY sequence LIMIT 1", [.text(lease.sessionID)]) { statement in
                 guard try database.step(statement) else { return nil }
-                return SessionInput(id: database.text(statement, column: 0),
+                return FxSessionInput(id: database.text(statement, column: 0),
                     content: try JSONDecoder().decode([FxPromptContent].self, from: database.bytes(statement, column: 1)),
                     options: try JSONDecoder().decode(FxSessionOptions.self, from: database.bytes(statement, column: 2)),
                     wasStarted: sqlite3_column_int(statement, 3) != 0, cancelRequested: sqlite3_column_int(statement, 4) != 0)
@@ -206,7 +206,7 @@ public actor FxSessionStore {
         }
     }
 
-    func start(_ lease: SessionLease, input: SessionInput) throws {
+    public func start(_ lease: FxSessionLease, input: FxSessionInput) throws {
         try database.transaction {
             try checkLease(lease)
             try database.execute("UPDATE fx_inputs SET started=1 WHERE session=? AND id=?", [.text(lease.sessionID), .text(input.id)])
@@ -214,18 +214,18 @@ public actor FxSessionStore {
         }
     }
 
-    func appendEvent(_ lease: SessionLease, _ event: FxSessionEvent) throws {
+    public func appendEvent(_ lease: FxSessionLease, _ event: FxSessionEvent) throws {
         try database.transaction {
             try checkLease(lease)
             try insertEvent(lease, event)
         }
     }
 
-    private func insertEvent(_ lease: SessionLease, _ event: FxSessionEvent) throws {
+    private func insertEvent(_ lease: FxSessionLease, _ event: FxSessionEvent) throws {
         try database.execute("INSERT INTO fx_session_events(session,epoch,data) VALUES (?,?,?)", [.text(lease.sessionID), .integer(lease.epoch), .blob(try JSONEncoder().encode(event))])
     }
 
-    func finish(_ lease: SessionLease, id: String, result: FxSessionResult) throws {
+    public func finish(_ lease: FxSessionLease, id: String, result: FxSessionResult) throws {
         try database.transaction {
             try checkLease(lease)
             guard result.id == id, result.epoch == lease.epoch, !result.isRepeated else { throw FxPersistenceError.invalidJournal }
@@ -240,7 +240,7 @@ public actor FxSessionStore {
         }
     }
 
-    func cancel(session: String, agent: String, id: String? = nil) throws {
+    public func cancel(session: String, agent: String, id: String? = nil) throws {
         try database.transaction {
             try checkAgent(session, agent: agent)
             if let id {
@@ -251,7 +251,7 @@ public actor FxSessionStore {
         }
     }
 
-    func cancelled(_ lease: SessionLease, id: String) throws -> Bool {
+    public func cancelled(_ lease: FxSessionLease, id: String) throws -> Bool {
         try checkLease(lease)
         return try database.statement("SELECT cancelled FROM fx_inputs WHERE session=? AND id=?", [.text(lease.sessionID), .text(id)]) { statement in
             guard try database.step(statement) else { throw FxSessionError.notFound }
@@ -259,7 +259,7 @@ public actor FxSessionStore {
         }
     }
 
-    func result(session: String, agent: String, id: String) throws -> FxSessionResult? {
+    public func result(session: String, agent: String, id: String) throws -> FxSessionResult? {
         try checkAgent(session, agent: agent)
         return try database.statement("SELECT result FROM fx_inputs WHERE session=? AND id=?", [.text(session), .text(id)]) { statement in
             guard try database.step(statement) else { throw FxSessionError.notFound }
@@ -268,7 +268,7 @@ public actor FxSessionStore {
         }
     }
 
-    func entries(session: String, agent: String, after cursor: Int64) throws -> [FxSessionEntry] {
+    public func entries(session: String, agent: String, after cursor: Int64) throws -> [FxSessionEntry] {
         guard cursor >= 0 else { throw FxSessionError.invalidCursor }
         try checkAgent(session, agent: agent)
         return try database.statement("SELECT cursor,epoch,data FROM fx_session_events WHERE session=? AND cursor>? ORDER BY cursor LIMIT 128", [.text(session), .integer(cursor)]) { statement in
@@ -311,14 +311,14 @@ public actor FxSessionStore {
         }
     }
 
-    func snapshot(session: String, agent: String) throws -> FxPersistenceSnapshot {
+    public func snapshot(session: String, agent: String) throws -> FxPersistenceSnapshot {
         try database.transaction(mode: "DEFERRED") {
             try checkAgent(session, agent: agent)
             return try readJournal(session)
         }
     }
 
-    func storeImage(_ data: Data, named name: String, lease: SessionLease) throws {
+    public func storeImage(_ data: Data, named name: String, lease: FxSessionLease) throws {
         try Task.checkCancellation()
         guard PersistedImages.name(for: data) == name else { throw FxError.invalidInput("Image name does not match its bytes") }
         try database.transaction {
@@ -328,7 +328,7 @@ public actor FxSessionStore {
         }
     }
 
-    func loadImage(named name: String, session: String, agent: String) throws -> Data? {
+    public func loadImage(named name: String, session: String, agent: String) throws -> Data? {
         try Task.checkCancellation()
         return try database.transaction(mode: "DEFERRED") {
             try checkAgent(session, agent: agent)
@@ -336,7 +336,7 @@ public actor FxSessionStore {
         }
     }
 
-    func loadImage(named name: String, lease: SessionLease) throws -> Data? {
+    public func loadImage(named name: String, lease: FxSessionLease) throws -> Data? {
         try Task.checkCancellation()
         return try database.transaction(mode: "DEFERRED") {
             try checkLease(lease)
@@ -350,7 +350,7 @@ public actor FxSessionStore {
         }
     }
 
-    func loadJournal(_ lease: SessionLease) throws -> FxPersistenceSnapshot {
+    public func loadJournal(_ lease: FxSessionLease) throws -> FxPersistenceSnapshot {
         try database.transaction(mode: "DEFERRED") {
             try checkLease(lease)
             return try readJournal(lease.sessionID)
@@ -369,7 +369,7 @@ public actor FxSessionStore {
         return FxPersistenceSnapshot(checkpoint: state.checkpoint, journal: records, head: state.head == 0 ? nil : String(state.head))
     }
 
-    func appendJournal(_ lease: SessionLease, expected: String?, key: String, data: Data) throws -> String {
+    public func appendJournal(_ lease: FxSessionLease, expected: String?, key: String, data: Data, barrier: Bool = true) throws -> String {
         try database.transaction {
             try checkLease(lease)
             let digest = Data(SHA256.hash(data: data))
@@ -383,14 +383,14 @@ public actor FxSessionStore {
             guard state.head < Int64.max else { throw FxPersistenceError.sizeLimit }
             let cursor = state.head + 1
             try database.execute("INSERT INTO fx_session_records VALUES (?,?,?)", [.text(lease.sessionID), .integer(cursor), .blob(data)])
-            try recordSteering(data, session: lease.sessionID)
+            try applyJournalMarks(data, session: lease.sessionID)
             try database.execute("INSERT INTO fx_session_writes VALUES (?,?,?,?)", [.text(lease.sessionID), .text(key), .integer(cursor), .blob(digest)])
             try database.execute("UPDATE fx_sessions SET head=? WHERE id=?", [.integer(cursor), .text(lease.sessionID)])
             return String(cursor)
         }
     }
 
-    func saveJournalCheckpoint(_ lease: SessionLease, _ checkpoint: FxStoredCheckpoint) throws {
+    public func saveJournalCheckpoint(_ lease: FxSessionLease, _ checkpoint: FxStoredCheckpoint) throws {
         try database.transaction {
             try checkLease(lease)
             let state = try journalState(lease.sessionID)
