@@ -228,6 +228,9 @@ public actor FxEngine {
                             throw FxPersistenceError.missingImage(name)
                         }
                         try Task.checkCancellation()
+                        guard PersistedImages.name(for: bytes) == name else {
+                            throw FxPersistenceError.corruptImage(name)
+                        }
                         try await transport.putAttachment(bytes, id: 1)
                         _ = try await rpc.request("libfx/journal_images", .object([
                             "sessionId": .string(id), "images": .array([.object(["name": .string(name), "attachment": .number(1)])]),

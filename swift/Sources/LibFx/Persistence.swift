@@ -52,6 +52,7 @@ public enum FxPersistenceError: Error, Sendable, Equatable {
     case sizeLimit
     case invalidCursor
     case missingImage(String)
+    case corruptImage(String)
 }
 
 /// An in-memory store for tests and conversations that do not survive process exit.
