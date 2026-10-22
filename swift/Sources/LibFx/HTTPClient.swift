@@ -35,6 +35,8 @@ public struct FxHTTPResponse: Sendable {
 public struct FxURLSessionHTTPClient: FxHTTPClient {
     private let session: URLSession
 
+    var usesSharedSession: Bool { session === URLSession.shared }
+
     public init(session: URLSession = .shared) { self.session = session }
 
     public func send(_ request: URLRequest) async throws -> FxHTTPResponse {

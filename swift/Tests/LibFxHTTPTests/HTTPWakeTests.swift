@@ -199,7 +199,7 @@ struct HTTPWakeTests {
         #expect(
             try await post(handler, store: "missing", agent: "support", session: "private", input: "accepted").response.status
                 == .internalServerError)
-        await #expect(throws: FxAgentRoutingError.duplicateName("support")) {
+        await #expect(throws: FxAgentAdmissionError.incompatibleConfiguration(name: "support")) {
             _ = try await acmeRouter.makeAgent(configuration: configuration(senderHTTP), name: "support", queue: queue)
         }
         try await ours.close()

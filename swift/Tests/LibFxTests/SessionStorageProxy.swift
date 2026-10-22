@@ -5,6 +5,7 @@ final class SessionStorageTestFailure: Error {}
 
 // Public imports only: the independent consumer compiles this same host implementation.
 actor SessionStorageProxy: FxSessionStorage {
+    nonisolated var agentAdmission: FxAgentAdmission { base.agentAdmission }
     let base: FxSessionStore
     private var failure: (String, any Error, remaining: Int, count: Int)?
     private(set) var calls: [String] = []

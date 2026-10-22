@@ -9,6 +9,7 @@ import Glibc
 
 /// Durable intake, event history, and core journals. A nil URL keeps all data in memory.
 public actor FxSessionStore: FxQueueSessionStorage {
+    public nonisolated let agentAdmission: FxAgentAdmission
     let database: SQLiteDatabase
     public nonisolated let leasePolicy: FxSessionLeasePolicy?
     public nonisolated let queueSource: String?
@@ -20,11 +21,12 @@ public actor FxSessionStore: FxQueueSessionStorage {
     /// Timed ownership is opt-in and fixed when a database is created.
     /// Its backend clock is the shared host's wall clock; the agent uses a
     /// separate monotonic clock to stop local authority conservatively.
-    public init(url: URL? = nil, leasePolicy: FxSessionLeasePolicy? = nil, queueSource: String? = nil) throws {
-        try self.init(url: url, leasePolicy: leasePolicy, queueSource: queueSource, leaseNow: { Date() })
+    public init(url: URL? = nil, leasePolicy: FxSessionLeasePolicy? = nil, queueSource: String? = nil, agentAdmission: FxAgentAdmission = FxAgentAdmission()) throws {
+        try self.init(url: url, leasePolicy: leasePolicy, queueSource: queueSource, leaseNow: { Date() }, agentAdmission: agentAdmission)
     }
 
-    init(url: URL? = nil, leasePolicy: FxSessionLeasePolicy?, queueSource: String? = nil, leaseNow: @escaping @Sendable () -> Date) throws {
+    init(url: URL? = nil, leasePolicy: FxSessionLeasePolicy?, queueSource: String? = nil, leaseNow: @escaping @Sendable () -> Date, agentAdmission: FxAgentAdmission = FxAgentAdmission()) throws {
+        self.agentAdmission = agentAdmission
         if let queueSource {
             guard leasePolicy != nil, !queueSource.isEmpty, queueSource.utf8.count <= 256,
                   !queueSource.utf8.contains(0) else { throw FxError.invalidInput("Queue ownership requires a timed lease and a valid source") }

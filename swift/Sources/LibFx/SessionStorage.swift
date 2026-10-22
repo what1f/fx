@@ -7,6 +7,8 @@ import Foundation
 /// to one agent; accessing it with another name must throw `FxSessionError.wrongAgent`.
 /// Implementations must cooperate with task cancellation.
 public protocol FxSessionStorage: Sendable {
+    /// One stable domain per logical store. Proxies forward their underlying store's domain.
+    var agentAdmission: FxAgentAdmission { get }
     /// The immutable first-input owner, or nil before the session exists.
     func owner(session: String) async throws -> String?
     /// Checkpoint bytes, when supplied, are already in the harness snapshot format.

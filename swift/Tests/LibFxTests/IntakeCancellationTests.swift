@@ -4,6 +4,7 @@ import Testing
 
 // The held operation is accept, not the worker's lease-scoped image store.
 private actor IntakeStorage: FxSessionStorage {
+    nonisolated var agentAdmission: FxAgentAdmission { base.agentAdmission }
     let base: FxSessionStore
     let afterCommit: Bool
     let entered = AsyncResult<Void>()

@@ -32,6 +32,7 @@ public actor FxAgent {
     }
     private var controlChecks: [String: ControlCheck] = [:]
     private var intakes = 0
+    private var registration: AgentRegistration?
     private var closed = false
     private var router: FxAgentRouter?
 
@@ -44,11 +45,11 @@ public actor FxAgent {
         return try await router.agent(named: owner)
     }
 
-    public init(configuration: FxConfiguration, name: String = "default", store: any FxSessionStorage, checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024, deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil, queueAuthority: FxQueueDeliveryAuthority? = nil) throws {
+    public init(configuration: FxConfiguration, name: String = "default", store: any FxSessionStorage, checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024, deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil, queueAuthority: FxQueueDeliveryAuthority? = nil, compatibilityID: String? = nil) throws {
         try configuration.validateInstructions()
         try self.init(harness: KernelSessionHarness(configuration: configuration), name: name, store: store,
                   checkpoint: checkpoint, checkpointAfterBytes: checkpointAfterBytes,
-                  deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy, queue: queue, queueAuthority: queueAuthority, onLifecycleEvent: { event in
+                  deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy, queue: queue, queueAuthority: queueAuthority, compatibilityID: compatibilityID, onLifecycleEvent: { event in
             await configuration.onLifecycleEvent?(event)
             if case .deliveryDeadline(let sessionID, let epoch, let cutoffs) = event {
                 configuration.observation?.deliver(FxObservation(journal: .sessionDeadline, sessionID: sessionID,
@@ -57,10 +58,12 @@ public actor FxAgent {
         })
     }
 
+    /// A custom harness can create one live instance without a compatibility ID.
+    /// Replicas require the same explicit ID and matching known options.
     public init(harness: any FxSessionHarness, name: String = "default", store: any FxSessionStorage,
                 checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024,
                 deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil,
-                queueAuthority: FxQueueDeliveryAuthority? = nil,
+                queueAuthority: FxQueueDeliveryAuthority? = nil, compatibilityID: String? = nil,
                 onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil) throws {
         guard validSessionIdentifier(name), name.utf8.count <= 64,
               let first = name.utf8.first, (48...57).contains(first) || (65...90).contains(first) || (97...122).contains(first) else { throw FxError.invalidInput("Invalid agent name") }
@@ -81,6 +84,10 @@ public actor FxAgent {
         self.queueAuthority = queueAuthority
         self.name = name
         self.store = store
+        let definition = try AgentDefinition(harness: harness, compatibilityID: compatibilityID,
+            checkpoint: checkpoint, checkpointAfterBytes: checkpointAfterBytes,
+            deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy, hasQueue: queue != nil, queueAuthority: queueAuthority)
+        registration = try store.agentAdmission.register(name: name, definition: definition)
     }
 
     /// Creates a view. Data is stored when the first input is accepted.
@@ -732,6 +739,8 @@ public actor FxAgent {
             for task in pending { await task.value }
             if intakes > 0 { try await Task.sleep(for: .milliseconds(1)) }
         }
+        registration?.release()
+        registration = nil
         await router?.remove(self)
         if let error = failures.values.first { throw error }
         if let cleanupFailure { throw cleanupFailure }

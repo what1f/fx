@@ -133,7 +133,7 @@ private actor RoutingQueue: FxSessionQueue {
         let sender = try await router.makeAgent(harness: RoutedCalculation(name: "sender", trace: trace, rejectsInput: true), name: "sender", queue: queue)
         let view = try await owner.session(id: "queued-routing")
         let first = try await view.submit(input, id: "one")
-        await #expect(throws: FxAgentRoutingError.duplicateName("owner")) { try await router.makeAgent(harness: CalculationHarness(), name: "owner") }
+        await #expect(throws: FxAgentAdmissionError.incompatibleConfiguration(name: "owner")) { try await router.makeAgent(harness: CalculationHarness(), name: "owner") }
         try await owner.close()
         let foreign = try await sender.session(id: view.id)
         await #expect(throws: FxAgentRoutingError.unavailableAgent("owner")) { try await foreign.submit(input, id: "two") }

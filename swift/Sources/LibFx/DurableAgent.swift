@@ -6,14 +6,17 @@ public struct FxDurableAgent<Input: Codable & Sendable, Update: Codable & Sendab
     public var name: String { agent.name }
     init(agent: FxAgent) { self.agent = agent }
 
+    /// Use the same compatibility ID only for equivalent harness behavior and
+    /// checkpoint formats. Without an ID, a second live copy is refused.
     public init<Harness: FxDurableHarness>(harness: Harness, name: String = "default", store: any FxSessionStorage,
         checkpoint: Data? = nil, checkpointAfterBytes: Int? = 64 * 1024,
         deliveryPolicy: FxDeliveryPolicy? = nil, openingRetryPolicy: FxOpeningRetryPolicy? = nil, queue: (any FxSessionQueue)? = nil, queueAuthority: FxQueueDeliveryAuthority? = nil,
+        compatibilityID: String? = nil,
         onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil
     ) throws where Harness.Input == Input, Harness.Update == Update {
         agent = try FxAgent(harness: DurableHarnessAdapter(harness: harness), name: name, store: store,
             checkpoint: checkpoint, checkpointAfterBytes: checkpointAfterBytes, deliveryPolicy: deliveryPolicy, openingRetryPolicy: openingRetryPolicy,
-            queue: queue, queueAuthority: queueAuthority, onLifecycleEvent: onLifecycleEvent)
+            queue: queue, queueAuthority: queueAuthority, compatibilityID: compatibilityID, onLifecycleEvent: onLifecycleEvent)
     }
 
     public func session(id: String = UUID().uuidString, options: FxSessionOptions = .init()) async throws -> FxDurableSession<Input, Update> {
