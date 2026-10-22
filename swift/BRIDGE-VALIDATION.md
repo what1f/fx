@@ -57,6 +57,8 @@ C ABI smoke passed: initialize, session creation, repeated teardown, invalid opt
 
 ## Remaining proof
 
-- Run Swift lifecycle and concurrency tests against the final archive.
-- Run sanitizers, real-model integration, and exact-commit CI before declaring release readiness.
-- The attempted `test-journal.mjs native native` run stopped before executing assertions because it unconditionally loads the absent `fx-core.wasm` fixture. Build the Wasm artifact before running that suite.
+The initial journal attempt required an unused Wasm fixture. The conformance loader now skips that asset for native-to-native runs, and the complete 77-case journal owner passes locally through Swift. The original assertions remain in place. Current native lifecycle and concurrency tests also pass in normal, Address Sanitizer and Thread Sanitizer builds; see `VALIDATION.md` and `MIGRATION.md` for their scope.
+
+The normal conformance runner streams output so CI records the time of each completed case. It preserves the 60-second process deadline, reports exit status, signal and timeout diagnostics, and saves results after each file. CI uploads the results even when a later check fails. These diagnostics help distinguish an aggregate deadline from a stalled case; they do not establish that either caused an earlier failure.
+
+Real-model integration and exact-final-commit CI remain required before release readiness. Local passes do not resolve the observed CI journal deadline failure.

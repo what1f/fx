@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -67,15 +67,24 @@ const checks = [
   })),
 ];
 const results = [];
-for (const check of checks) {
-  const started = Date.now();
-  const child = spawnSync(process.execPath, check.args, { cwd: root, env: { ...process.env, ...check.env }, encoding: 'utf8', timeout: 60_000 });
-  const passed = child.status === 0 && (!check.expected || child.stdout?.includes(check.expected));
-  results.push({ name: check.name, passed, elapsedMs: Date.now() - started,
-    stdout: child.stdout ?? '', stderr: child.stderr ?? '', error: child.error?.message });
-  process.stdout.write(`${passed ? 'PASS' : 'FAIL'} ${check.name}\n${child.stdout ?? ''}${child.stderr ?? ''}`);
-}
 const output = new URL('../../.build/conformance-results.json', import.meta.url);
 mkdirSync(new URL('.', output), { recursive: true });
-writeFileSync(output, JSON.stringify({ node: process.version, platform: process.platform, arch: process.arch, results }, null, 2) + '\n');
+for (const check of checks) {
+  const started = Date.now();
+  process.stdout.write(`START ${check.name}\n`);
+  const child = spawn(process.execPath, check.args, { cwd: root, env: { ...process.env, ...check.env }, timeout: 60_000 });
+  let stdout = '', stderr = '', error;
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', chunk => { stdout += chunk; process.stdout.write(chunk); });
+  child.stderr.on('data', chunk => { stderr += chunk; process.stderr.write(chunk); });
+  child.on('error', failure => { error = failure.message; });
+  const { status, signal } = await new Promise(resolve => child.on('close', (status, signal) => resolve({ status, signal })));
+  if (child.killed && signal === 'SIGTERM') error ??= 'Conformance process exceeded its 60000 ms deadline';
+  const passed = status === 0 && (!check.expected || stdout.includes(check.expected));
+  results.push({ name: check.name, passed, elapsedMs: Date.now() - started,
+    stdout, stderr, status, signal, error });
+  process.stdout.write(`${passed ? 'PASS' : 'FAIL'} ${check.name} (${Date.now() - started} ms; status=${status}; signal=${signal ?? 'none'})${error ? ': ' + error : ''}\n`);
+  writeFileSync(output, JSON.stringify({ node: process.version, platform: process.platform, arch: process.arch, results }, null, 2) + '\n');
+}
 if (results.some(result => !result.passed)) process.exitCode = 1;
