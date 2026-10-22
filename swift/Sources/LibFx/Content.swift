@@ -43,6 +43,8 @@ public struct FxImage: Sendable, Equatable, Codable {
 public enum FxPromptContent: Sendable, Equatable, Codable {
     case text(String)
     case image(FxImage)
+    /// Encoded input for a custom durable harness. The Zig conversation engine rejects it.
+    case payload(Data)
 }
 
 /// A tool's response, including optional images and an explicit failure flag.

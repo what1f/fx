@@ -28,6 +28,7 @@ struct PreparedPrompt: Sendable {
         var images: [Data] = []
         for (index, block) in content.enumerated() {
             switch block {
+            case .payload: throw FxError.invalidInput("Use a custom durable harness for data inputs")
             case .text(let text): blocks.append(.object(["type": .string("text"), "text": .string(text)]))
             case .image(let image):
                 var fields = image.fields

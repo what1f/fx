@@ -33,14 +33,41 @@ public struct FxSessionResult: Sendable, Codable, Equatable {
     public let id: String
     public let stopReason: FxTurnResult.StopReason
     public let usage: FxUsage?
-    public let error: String?
+    public let failure: FxSessionFailure?
+    public var error: String? { failure?.message }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, stopReason, usage, epoch, isRepeated
+        case failure = "error"
+    }
     public let epoch: Int64
     public let isRepeated: Bool
 
     public init(id: String, stopReason: FxTurnResult.StopReason, usage: FxUsage? = nil, error: String? = nil,
                 epoch: Int64, isRepeated: Bool = false) {
-        self.id = id; self.stopReason = stopReason; self.usage = usage; self.error = error
+        self.id = id; self.stopReason = stopReason; self.usage = usage; self.failure = error.map { FxSessionFailure(message: $0) }
         self.epoch = epoch; self.isRepeated = isRepeated
+    }
+
+    public init(id: String, stopReason: FxTurnResult.StopReason, usage: FxUsage? = nil, failure: FxSessionFailure?,
+                epoch: Int64, isRepeated: Bool = false) {
+        self.id = id; self.stopReason = stopReason; self.usage = usage; self.failure = failure
+        self.epoch = epoch; self.isRepeated = isRepeated
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        stopReason = try values.decode(FxTurnResult.StopReason.self, forKey: .stopReason)
+        usage = try values.decodeIfPresent(FxUsage.self, forKey: .usage)
+        epoch = try values.decode(Int64.self, forKey: .epoch)
+        isRepeated = try values.decode(Bool.self, forKey: .isRepeated)
+        // Native databases previously stored only the failure message.
+        if let message = try? values.decode(String.self, forKey: .failure) {
+            failure = FxSessionFailure(message: message)
+        } else {
+            failure = try values.decodeIfPresent(FxSessionFailure.self, forKey: .failure)
+        }
     }
 }
 

@@ -84,6 +84,7 @@ provider_port="$(cat "$task_tmp/port")"
 mkdir -p "$task_tmp/Sources/Consumer"
 cp "$repo_root/swift/Tests/LibFxTests/SessionStorageProxy.swift" "$task_tmp/Sources/Consumer/SessionStorageProxy.swift"
 cp "$repo_root/swift/Tests/LibFxTests/ScriptedSessionHarness.swift" "$task_tmp/Sources/Consumer/ScriptedSessionHarness.swift"
+cp "$repo_root/swift/Tests/LibFxTests/CalculationHarness.swift" "$task_tmp/Sources/Consumer/CalculationHarness.swift"
 cat > "$task_tmp/Package.swift" <<'SWIFT'
 // swift-tools-version: 6.2
 import PackageDescription
@@ -130,6 +131,12 @@ struct ConsumerQueue: FxSessionQueue {
         for try await _ in response.body {}
         guard response.statusCode == 204 else { throw FxError.transport("Queue acknowledgement failed") }
     }
+}
+
+actor CalculationQueue: FxSessionQueue {
+    private var wakeups: [FxSessionWakeup] = []
+    func enqueue(_ wakeup: FxSessionWakeup) { wakeups.append(wakeup) }
+    func take() -> FxSessionWakeup? { wakeups.isEmpty ? nil : wakeups.removeFirst() }
 }
 
 final class TransportEvents: @unchecked Sendable {
@@ -591,6 +598,67 @@ struct SubscriptionHTTP: FxHTTPClient {
             throw FxError.protocolViolation("Halted session opened another executor")
         }
         try await recovering.close(); try await harnessStore.close()
+        let calculationURL = directory.appendingPathComponent("calculation.sqlite")
+        let calculationStore = try FxSessionStore(url: calculationURL)
+        let calculationQueue = CalculationQueue()
+        let calculator = try FxDurableAgent<CalculationInput, CalculationUpdate>(
+            harness: CalculationHarness(), store: calculationStore, queue: calculationQueue)
+        let calculationSession = try await calculator.session(id: "typed-consumer")
+        let calculationInput = CalculationInput(values: [3, -2, 7],
+            labels: ["source": "consumer", "title": "界 and owl 🦉"],
+            attachment: Data([0, 1, 127, 128, 255]))
+        let calculation = try await calculationSession.submit(calculationInput, id: "typed-input")
+        guard !calculation.isRepeated else { throw FxPersistenceError.invalidJournal }
+        try await calculator.close()
+        try await calculationStore.close()
+        let calculationReopened = try FxSessionStore(url: calculationURL)
+        let calculationWorker = try FxDurableAgent<CalculationInput, CalculationUpdate>(
+            harness: CalculationHarness(), store: calculationReopened, queue: calculationQueue)
+        let reopenedCalculationSession = try await calculationWorker.session(id: "typed-consumer")
+        let repeatedCalculation = try await reopenedCalculationSession.submit(
+            CalculationInput(values: [999]), id: calculation.id)
+        guard repeatedCalculation.isRepeated,
+              let calculationWakeup = await calculationQueue.take(),
+              calculationWakeup == FxSessionWakeup(agent: "default", sessionID: calculationSession.id),
+              try await calculationWorker.deliver(calculationWakeup) == .complete else {
+            throw FxError.protocolViolation("Typed queue delivery failed")
+        }
+        var calculationUpdates: [CalculationUpdate] = []
+        for try await update in repeatedCalculation { calculationUpdates.append(update) }
+        guard calculationUpdates.map(\.index) == [0, 1, 2],
+              calculationUpdates.map(\.total) == [3, 1, 8],
+              calculationUpdates.allSatisfy({ $0.input == calculationInput }),
+              try await repeatedCalculation.result.stopReason == .endTurn,
+              let repeatedCalculationWakeup = await calculationQueue.take(),
+              repeatedCalculationWakeup == calculationWakeup,
+              try await calculationWorker.deliver(repeatedCalculationWakeup) == .complete,
+              await calculationQueue.take() == nil else {
+            throw FxError.protocolViolation("Typed values changed after SQLite reopen")
+        }
+        var calculationReplay = reopenedCalculationSession.events().makeAsyncIterator()
+        guard let calculationStarted = try await calculationReplay.next(),
+              case .started(let calculationID, let calculationSessionID, let replayedCalculationInput) = calculationStarted.event,
+              calculationID == calculation.id, calculationSessionID == calculationSession.id,
+              replayedCalculationInput == calculationInput else { throw FxPersistenceError.invalidJournal }
+        let calculationCheckpoint = try await reopenedCalculationSession.checkpoint()
+        try await calculationWorker.close()
+        let seededCalculator = try FxDurableAgent<CalculationInput, CalculationUpdate>(
+            harness: CalculationHarness(), store: calculationReopened, checkpoint: calculationCheckpoint)
+        let seededCalculationSession = try await seededCalculator.session(id: "typed-seeded-consumer")
+        let seededCalculation = try await seededCalculationSession.submit(
+            CalculationInput(values: [4, 5], labels: ["seed": "checkpoint"], attachment: calculationInput.attachment),
+            id: "typed-seeded-input")
+        var seededTotals: [Int] = []
+        for try await update in seededCalculation {
+            guard update.input.attachment == calculationInput.attachment else { throw FxPersistenceError.invalidJournal }
+            seededTotals.append(update.total)
+        }
+        guard seededTotals == [4, 9], try await seededCalculation.result.stopReason == .endTurn else {
+            throw FxError.protocolViolation("Typed checkpoint seed failed")
+        }
+        try await seededCalculator.close()
+        try await calculationReopened.close()
+        print("Typed Swift consumer passed: updates, binary data, duplicate ID, SQLite reopen, queue delivery, checkpoint seed")
         print("Swift package consumer passed")
     }
 }

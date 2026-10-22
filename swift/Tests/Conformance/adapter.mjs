@@ -873,11 +873,15 @@ function checkPromptWithSwift(input, preparing, driver) {
 async function encodePrompt(input) {
   if (!Array.isArray(input)) return input;
   return Promise.all(input.map(async block => {
-    if (block.type !== 'image' || block.data === undefined || typeof block.data === 'string') return block;
-    const data = block.data instanceof Blob ? new Uint8Array(await block.data.arrayBuffer()) :
-      block.data instanceof ArrayBuffer ? new Uint8Array(block.data) :
-      new Uint8Array(block.data.buffer, block.data.byteOffset, block.data.byteLength);
-    return { ...block, mimeType: block.mimeType ?? block.data.type, data: Buffer.from(data).toString('base64') };
+    // Copy a JavaScript getter once at the IPC boundary, as a Swift value does.
+    // Admission, image validation and persistence still run in Swift.
+    const snapshot = { ...block };
+    if (snapshot.type !== 'image' || snapshot.data === undefined || typeof snapshot.data === 'string') return snapshot;
+    const value = snapshot.data;
+    const data = value instanceof Blob ? new Uint8Array(await value.arrayBuffer()) :
+      value instanceof ArrayBuffer ? new Uint8Array(value) :
+      new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    return { ...snapshot, mimeType: snapshot.mimeType ?? value.type, data: Buffer.from(data).toString('base64') };
   }));
 }
 

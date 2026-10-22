@@ -28,11 +28,6 @@ func harnessTurnOperation<Value: Sendable>(isolation: isolated (any Actor)? = #i
     catch { throw HarnessStopped(cause: error) }
 }
 
-func harnessErrorMessage(_ error: any Error) -> String {
-    if case FxError.invalidInput(let message) = error { return message }
-    return (error as? any LocalizedError)?.errorDescription ?? String(describing: error)
-}
-
 extension FxSessionStore {
     public func harnessFailureState(_ lease: FxSessionLease, id: String) throws -> FxHarnessFailureState {
         try database.transaction(mode: "DEFERRED") {

@@ -55,6 +55,7 @@ extension RelayedImageStore: FxCheckpointPersistence where Store: FxCheckpointPe
 
 /// Test-only protocol adapter. Engine behavior stays in LibFx.
 actor Driver: FxHTTPClient, FxPersistence {
+    private let genericHarness = GenericHarnessDriver()
     private var fixtureTransport: FixtureTransport?
     private let inputObservations = InputObservationRelay(emit: DriverOutput.emit)
     private var mcpAdapter: FxMCPAdapter?
@@ -189,6 +190,7 @@ actor Driver: FxHTTPClient, FxPersistence {
     }
 
     private func run(_ value: JSONValue) async throws -> JSONValue {
+        if value["op"]?.string?.hasPrefix("generic") == true { return try await genericHarness.run(value) }
         switch value["op"]?.string {
         case "signIn":
             let token = value["token"]?.string ?? "sign-in"
@@ -503,7 +505,11 @@ actor Driver: FxHTTPClient, FxPersistence {
                     if let usage = result.usage {
                         fields["usage"] = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(usage))
                     }
-                    if let error = result.error { fields["error"] = .object(["message": .string(javascriptMessage(error))]) }
+                    if let failure = result.failure {
+                        var error: [String: JSONValue] = ["message": .string(javascriptMessage(failure.message)), "name": .string(failure.name)]
+                        if let code = failure.code { error["code"] = code }
+                        fields["error"] = .object(error)
+                    }
                     emit(.object(["turnToken": .string(token), "completed": .object(fields)]))
                 } catch { emitFailure(error, token: token) }
                 sessionTurns.removeValue(forKey: token)
@@ -535,6 +541,7 @@ actor Driver: FxHTTPClient, FxPersistence {
                     else {
                         fields["input"] = .array(input.map { block in
                             switch block {
+                            case .payload(let data): return .object(["type": .string("payload"), "data": .string(data.base64EncodedString())])
                             case .text(let text): return .object(["type": .string("text"), "text": .string(text)])
                             case .image(let image):
                                 var fields: [String: JSONValue] = ["type": .string("image"), "mimeType": .string(image.format.rawValue)]
@@ -557,7 +564,11 @@ actor Driver: FxHTTPClient, FxPersistence {
                     fields["type"] = .string("turn_end"); fields["messageId"] = .string(result.id)
                     fields["stopReason"] = .string(result.stopReason.rawValue)
                     fields["usage"] = try result.usage.map { try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode($0)) } ?? .object([:])
-                    if let error = result.error { fields["error"] = .object(["message": .string(error)]) }
+                    if let failure = result.failure {
+                        var error: [String: JSONValue] = ["message": .string(failure.message), "name": .string(failure.name)]
+                        if let code = failure.code { error["code"] = code }
+                        fields["error"] = .object(error)
+                    }
                 }
                 return JSONValue.object(fields)
             }
@@ -1145,6 +1156,7 @@ actor Driver: FxHTTPClient, FxPersistence {
 
     private func encode(_ event: FxEvent) -> JSONValue {
         switch event {
+        case .payload(let data): return .object(["type": .string("payload"), "data": .string(data.base64EncodedString())])
         case .text(let delta): return .object(["type": .string("text_delta"), "delta": .string(delta)])
         case .reasoning(let delta): return .object(["type": .string("reasoning_delta"), "delta": .string(delta)])
         case .userMessage(let text, let id):

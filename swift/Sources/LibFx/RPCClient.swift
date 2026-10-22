@@ -23,15 +23,16 @@ actor RPCClient {
     private var handler: (@Sendable (RPCMessage) async -> Void)?
     private var failureHandler: (@Sendable (any Error) async -> Void)?
     private var failure: (any Error)?
-    private let termination = PromptDispatch()
+    private let termination: PromptDispatch
     private var closed = false
     private var frame = Data()
     private let maxFrameBytes: Int
     nonisolated let messages: AsyncThrowingStream<RPCMessage, any Error>
     private let continuation: AsyncThrowingStream<RPCMessage, any Error>.Continuation
 
-    init(transport: any CoreTransport, maxFrameBytes: Int = 64 * 1024 * 1024, observer: (@Sendable (FxWireDirection, JSONValue) async -> Void)? = nil) {
+    init(transport: any CoreTransport, maxFrameBytes: Int = 64 * 1024 * 1024, termination: PromptDispatch = PromptDispatch(), observer: (@Sendable (FxWireDirection, JSONValue) async -> Void)? = nil) {
         self.observer = observer
+        self.termination = termination
         self.transport = transport
         self.maxFrameBytes = maxFrameBytes
         (messages, continuation) = AsyncThrowingStream.makeStream(bufferingPolicy: .bufferingOldest(4096))
@@ -55,7 +56,7 @@ actor RPCClient {
                     guard !Task.isCancelled else { break }
                     try await self?.receive(chunk)
                 }
-                await self?.finish(FxError.closed)
+                try await self?.finishOutput()
             } catch { await self?.finish(error) }
         }
     }
@@ -139,39 +140,75 @@ actor RPCClient {
     }
 
     private func receive(_ data: Data) async throws {
-        for byte in data {
-            if byte == 10 {
-                if !frame.isEmpty {
-                    let bytes = frame
-                    frame.removeAll(keepingCapacity: true)
-                    try await receiveMessage(JSONDecoder().decode(JSONValue.self, from: bytes))
-                }
-            } else {
-                guard frame.count < maxFrameBytes else { throw FxError.protocolViolation("Frame exceeds limit") }
-                frame.append(byte)
+        var offset = data.startIndex
+        while offset < data.endIndex {
+            guard !closed else { return }
+            let newline = data[offset...].firstIndex(of: 10)
+            let end = newline ?? data.endIndex
+            let count = data.distance(from: offset, to: end)
+            // The delimiter is part of the wire limit, including when it arrives
+            // in a later chunk. Reject before copying an oversized fragment.
+            let delimiterBytes = newline == nil ? 0 : 1
+            guard count <= maxFrameBytes - frame.count - delimiterBytes else {
+                throw FxError.protocolViolation("Frame exceeds limit")
+            }
+            frame.append(contentsOf: data[offset..<end])
+            guard let newline else { return }
+            offset = data.index(after: newline)
+            if !frame.isEmpty {
+                let bytes = frame
+                frame = Data()
+                try await receiveMessage(JSONDecoder().decode(JSONValue.self, from: bytes))
             }
         }
     }
 
+    private func finishOutput() async throws {
+        guard frame.isEmpty else { throw FxError.protocolViolation("Core output ended within a frame") }
+        await finish(FxError.closed)
+    }
+
     private func receiveMessage(_ value: JSONValue) async throws {
         await observer?(.received, value)
+        guard !closed else { return }
         guard case .object = value, value["jsonrpc"] == .string("2.0") else {
             throw FxError.protocolViolation("Invalid JSON-RPC envelope")
         }
-        if let method = value["method"]?.string {
+        if let id = value["id"] {
+            switch id {
+            case .null, .string, .number: break
+            default: throw FxError.protocolViolation("Invalid JSON-RPC identifier")
+            }
+        }
+        if let methodValue = value["method"] {
+            guard let method = methodValue.string, value["result"] == nil, value["error"] == nil else {
+                throw FxError.protocolViolation("Invalid JSON-RPC request")
+            }
+            if let params = value["params"] {
+                switch params {
+                case .object, .array: break
+                default: throw FxError.protocolViolation("Invalid JSON-RPC parameters")
+                }
+            }
             let message = RPCMessage(id: value["id"], method: method, params: value["params"] ?? .object([:]))
             if let handler { await handler(message) }
             else if case .dropped = continuation.yield(message) { throw FxError.outputOverflow }
             return
         }
-        guard let id = value["id"]?.integer, let waiter = pending.removeValue(forKey: id) else { return }
+        guard value["id"] != nil, (value["result"] != nil) != (value["error"] != nil) else {
+            throw FxError.protocolViolation("Invalid JSON-RPC response")
+        }
+        let responseError: FxError?
         if let error = value["error"] {
-            waiter.resume(throwing: FxError.rpc(
-                code: error["code"]?.integer ?? -32603,
-                message: error["message"]?.string ?? "Request failed", data: error["data"]
-            ))
-        } else if let result = value["result"] { waiter.resume(returning: result) }
-        else { waiter.resume(throwing: FxError.protocolViolation("Response has no result")) }
+            guard case .object = error, let code = error["code"]?.integer,
+                  let message = error["message"]?.string else {
+                throw FxError.protocolViolation("Invalid JSON-RPC error")
+            }
+            responseError = .rpc(code: code, message: message, data: error["data"])
+        } else { responseError = nil }
+        guard let id = value["id"]?.integer, let waiter = pending.removeValue(forKey: id) else { return }
+        if let responseError { waiter.resume(throwing: responseError) }
+        else if let result = value["result"] { waiter.resume(returning: result) }
     }
 
     private func failRequest(_ id: Int, _ error: any Error) {
@@ -185,10 +222,11 @@ actor RPCClient {
         await failureHandler?(error)
         for waiter in pending.values { waiter.resume(throwing: error) }
         pending.removeAll()
+        frame = Data()
         continuation.finish(throwing: error)
         reader?.cancel()
-        await termination.resolve(sent: true)
         await transport.close()
+        await termination.resolve(sent: true)
     }
 
     func close() async {

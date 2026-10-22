@@ -1,6 +1,8 @@
 import Foundation
 
 public enum FxEvent: Sendable, Equatable, Codable {
+    /// Encoded update emitted by a custom durable harness.
+    case payload(Data)
     case text(String)
     case reasoning(String)
     case userMessage(String, id: String?)
@@ -9,6 +11,7 @@ public enum FxEvent: Sendable, Equatable, Codable {
 
     // Keep the event record independent of the public display-input enum.
     private enum Record: Codable {
+        case payload(Data)
         case text(String)
         case reasoning(String)
         case userMessage(String, id: String?)
@@ -18,6 +21,7 @@ public enum FxEvent: Sendable, Equatable, Codable {
 
     public init(from decoder: any Decoder) throws {
         switch try Record(from: decoder) {
+        case .payload(let data): self = .payload(data)
         case .text(let text): self = .text(text)
         case .reasoning(let text): self = .reasoning(text)
         case .userMessage(let text, let id): self = .userMessage(text, id: id)
@@ -38,6 +42,7 @@ public enum FxEvent: Sendable, Equatable, Codable {
     public func encode(to encoder: any Encoder) throws {
         let record: Record
         switch self {
+        case .payload(let data): record = .payload(data)
         case .text(let text): record = .text(text)
         case .reasoning(let text): record = .reasoning(text)
         case .userMessage(let text, let id): record = .userMessage(text, id: id)
@@ -88,8 +93,9 @@ public struct FxTurnResult: Sendable, Equatable, Codable {
     }
     public let stopReason: StopReason
     public let usage: FxUsage
-    public init(stopReason: StopReason, usage: FxUsage = .init()) {
-        self.stopReason = stopReason; self.usage = usage
+    public let failure: FxSessionFailure?
+    public init(stopReason: StopReason, usage: FxUsage = .init(), failure: FxSessionFailure? = nil) {
+        self.stopReason = stopReason; self.usage = usage; self.failure = failure
     }
 }
 

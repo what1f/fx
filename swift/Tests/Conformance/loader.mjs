@@ -2,7 +2,10 @@
 // its assertions and size boundaries remain unchanged.
 const adapter = new URL('./adapter.mjs', import.meta.url).href;
 export async function resolve(specifier, context, nextResolve) {
-  if (specifier === '../durable/local.mjs' && ['/sdk/tests/test-durable.mjs', '/sdk/tests/test-durable-provider-crash.mjs']
+  if (context.parentURL?.endsWith('/sdk/tests/test-durable-core.mjs') && specifier === '../durable.js') {
+    return { url: new URL('./generic-adapter.mjs', import.meta.url).href, shortCircuit: true };
+  }
+  if (specifier === '../durable/local.mjs' && ['/sdk/tests/test-durable.mjs', '/sdk/tests/test-durable-core.mjs', '/sdk/tests/test-durable-provider-crash.mjs']
     .some(path => context.parentURL?.endsWith(path))) {
     return { url: adapter, shortCircuit: true };
   }
@@ -23,6 +26,26 @@ export async function resolve(specifier, context, nextResolve) {
 
 export async function load(url, context, nextLoad) {
   const result = await nextLoad(url, context);
+  if (url.endsWith('/sdk/tests/test-durable-core.mjs') && process.env.LIBFX_SWIFT_GENERIC_CASES) {
+    let source = result.source.toString();
+    const marker = 'for (const [name, fn] of tests) {';
+    const names = JSON.parse(process.env.LIBFX_SWIFT_GENERIC_CASES);
+    if (!Array.isArray(names) || names.length === 0 || names.some(name => typeof name !== 'string') || new Set(names).size !== names.length) {
+      throw new Error('Generic durable selection must contain distinct test names');
+    }
+    if (source.split(marker).length !== 2) throw new Error('Upstream generic durable loop changed; review test ownership');
+    source = source.replace(marker, `const selectedNames = ${JSON.stringify(names)};
+const selectedCases = selectedNames.map(name => {
+  const matches = tests.filter(test => test[0] === name);
+  assert.equal(matches.length, 1, 'Each selected generic durable case must still exist exactly once: ' + name);
+  return matches[0];
+});
+for (const [name, fn] of selectedCases) {`);
+    const report = 'console.log(`${tests.length - failed}/${tests.length} core tests passed (${durabilityKind})`);';
+    if (source.split(report).length !== 2) throw new Error('Upstream generic durable report changed');
+    source = source.replace(report, 'console.log(`${selectedCases.length - failed}/${selectedCases.length} selected core tests passed (${durabilityKind})`);');
+    return { ...result, source };
+  }
   if (url.endsWith('/sdk/tests/test-core-output.mjs')) {
     const source = result.source.toString();
     const marker = '{ sessionId: "session", options: [] }';

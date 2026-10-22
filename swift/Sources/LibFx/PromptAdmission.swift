@@ -3,10 +3,12 @@ import Foundation
 /// Byte-source metadata lets the host check limits before reading asynchronous inputs.
 package enum PromptInputDescriptor: Sendable {
     case text(String)
+    case payload
     case image(format: FxImageFormat, reference: String?, byteCount: Int?, prefix: Data?)
 
     init(_ content: FxPromptContent) {
         switch content {
+        case .payload: self = .payload
         case .text(let text): self = .text(text)
         case .image(let image):
             self = .image(format: image.format, reference: image.sourceReference,
@@ -26,6 +28,7 @@ package struct PromptAdmission {
         var hasContent = allowEmpty
         for (index, block) in input.enumerated() {
             switch block {
+            case .payload: throw FxError.invalidInput("Use a custom durable harness for data inputs")
             case .text(let text): hasContent = hasContent || !text.isEmpty
             case .image(let format, let reference, let byteCount, _):
                 hasContent = true
@@ -71,6 +74,7 @@ package struct PromptAdmission {
         var encodedBytes = 0
         let blocks: [JSONValue] = input.enumerated().map { index, block in
             switch block {
+            case .payload: return .null // Rejected during admission, before frame sizing.
             case .text(let text): return .object(["type": .string("text"), "text": .string(text)])
             case .image(let format, let reference, let byteCount, _):
                 var fields: [String: JSONValue] = ["type": .string("image"), "mimeType": .string(format.rawValue)]

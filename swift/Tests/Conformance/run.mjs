@@ -52,6 +52,8 @@ const checks = [
     ['options', "a session object's model and instructions reach its model requests, over the agent's"],
     ['cancel', 'cancel stops the running turn; dropping its view does not'],
     ['images', "a durable prompt's images reach the model as the base64 it was given"],
+    ['image-snapshot', "a durable prompt checks the copy its log holds, so a getter can't pass one image and store another"],
+    ['backend-error', 'an option the backend rejects fails the first turn once'],
     ['idempotent', 'createFxAgent() refuses a host tool that does not say whether it is idempotent'],
   ].map(([kind, test]) => ({ name: `upstream/test-durable-session-${kind}`, expected: '1/1 durable tests passed', env: { LIBFX_TEST_ONLY: test }, args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable.mjs', 'memory', 'native',
@@ -85,7 +87,13 @@ const checks = [
   ].map(([kind, test]) => ({ name: `upstream/test-durable-delivery-${kind}`, expected: '1/1 durable tests passed', env: { LIBFX_TEST_ONLY: test }, args: [
     '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable.mjs', 'memory', 'native',
   ] })),
-  ...['admission-cache', 'session-readable', 'http-cleanup', 'persistence-errors', 'driver-lifecycle', 'smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'input-observation', 'tool-observation', 'mcp-observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing', 'turn-identity', 'handoff', 'follow-up', 'custom-provider', 'provider-suites', 'agent-crash', 'session-checkpoint', 'session-steering-crash'].map(name => ({
+  ...[
+    ['accepted-crash', 'a prompt accepted just before a crash still runs'],
+    ['send-crash', 'a crash during send never sends twice, and the turn goes on'],
+  ].map(([kind, test]) => ({ name: `upstream/test-durable-delivery-${kind}`, expected: '1/1 durable tests passed', env: { LIBFX_TEST_ONLY: test }, args: [
+    '--no-warnings', '--loader', './swift/Tests/Conformance/loader.mjs', 'sdk/tests/test-durable.mjs', 'local', 'native',
+  ] })),
+  ...['admission-cache', 'session-readable', 'http-cleanup', 'persistence-errors', 'driver-lifecycle', 'generic-relay-lifecycle', 'generic-core', 'generic-result', 'smoke', 'checkpoint-interoperability', 'journal-interoperability', 'recovery', 'turn-control', 'observation', 'input-observation', 'tool-observation', 'mcp-observation', 'automatic-checkpoint', 'sqlite-crash', 'sqlite-fencing', 'turn-identity', 'handoff', 'follow-up', 'custom-provider', 'provider-suites', 'agent-crash', 'session-checkpoint', 'session-steering-crash'].map(name => ({
     name, args: [`swift/Tests/Conformance/${name}.mjs`],
   })),
 ];
@@ -104,7 +112,7 @@ for (const check of checks) {
   child.on('error', failure => { error = failure.message; });
   const { status, signal } = await new Promise(resolve => child.on('close', (status, signal) => resolve({ status, signal })));
   if (child.killed && signal === 'SIGTERM') error ??= 'Conformance process exceeded its 60000 ms deadline';
-  const passed = status === 0 && (!check.expected || stdout.includes(check.expected));
+  const passed = status === 0 && !signal && !stderr && !error && (!check.expected || stdout.includes(check.expected));
   results.push({ name: check.name, passed, elapsedMs: Date.now() - started,
     stdout, stderr, status, signal, error });
   process.stdout.write(`${passed ? 'PASS' : 'FAIL'} ${check.name} (${Date.now() - started} ms; status=${status}; signal=${signal ?? 'none'})${error ? ': ' + error : ''}\n`);

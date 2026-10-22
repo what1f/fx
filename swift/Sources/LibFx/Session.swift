@@ -73,7 +73,7 @@ public struct FxSessionTurn: Sendable, Identifiable, AsyncSequence {
                 if let result = try await agent.store.result(session: sessionID, agent: agent.name, id: id) {
                     try Task.checkCancellation()
                     return FxSessionResult(id: result.id, stopReason: result.stopReason, usage: result.usage,
-                                           error: result.error, epoch: result.epoch, isRepeated: isRepeated)
+                                           failure: result.failure, epoch: result.epoch, isRepeated: isRepeated)
                 }
                 try await agent.failure(sessionID)
                 try await Task.sleep(for: .milliseconds(20))

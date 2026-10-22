@@ -23,7 +23,7 @@ actor NativeTransport: EngineTransport {
     nonisolated var output: AsyncThrowingStream<Data, any Error> {
         AsyncThrowingStream(unfolding: { [weak self] in try await self?.readOutput() })
     }
-    private var outputWaiter: CheckedContinuation<Data?, any Error>?
+    private var outputWaiter: (id: UUID, continuation: CheckedContinuation<Data?, any Error>)?
     private var outputFailure: (any Error)?
     private let handle: CoreHandle
     private let httpClient: any FxHTTPClient
@@ -35,13 +35,13 @@ actor NativeTransport: EngineTransport {
     private var fetchTasks: [Int32: Task<Void, Never>] = [:]
     private var drainTimers: [Int32: Task<Void, Never>] = [:]
     private var closed = false
-    private let sourceClosed: AsyncStream<Void>
-    private let sourceClosedContinuation: AsyncStream<Void>.Continuation
+    private let sourceClosed: PromptDispatch
 
     init(options: JSONValue, httpClient: any FxHTTPClient = FxURLSessionHTTPClient(), modelID: String? = nil,
-         onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)? = nil) throws {
+         readinessClosed: PromptDispatch = PromptDispatch(), onTransportEvent: (@Sendable (FxTransportEvent) async -> Void)? = nil) throws {
         guard fx_core_abi_version() == 1 else { throw FxError.protocolViolation("Unsupported core ABI version") }
         self.httpClient = httpClient
+        self.sourceClosed = readinessClosed
         self.modelID = modelID
         self.onTransportEvent = onTransportEvent
         let data = try JSONEncoder().encode(options)
@@ -55,7 +55,6 @@ actor NativeTransport: EngineTransport {
             throw FxError.transport(error)
         }
         handle = CoreHandle(pointer)
-        (sourceClosed, sourceClosedContinuation) = AsyncStream.makeStream()
     }
 
     func setContext(sessionID: String, modelID: String) { self.sessionID = sessionID; self.modelID = modelID }
@@ -70,8 +69,10 @@ actor NativeTransport: EngineTransport {
             guard let self else { return }
             Task { await self.pump() }
         }
-        source.setCancelHandler { [handle, sourceClosedContinuation] in
-            withExtendedLifetime(handle) { sourceClosedContinuation.finish() }
+        source.setCancelHandler { [handle, sourceClosed] in
+            withExtendedLifetime(handle) {
+                _ = Task { await sourceClosed.resolve(sent: true) }
+            }
         }
         self.source = source
         source.resume()
@@ -138,6 +139,7 @@ actor NativeTransport: EngineTransport {
             if let outputFailure { throw outputFailure }
             return nil
         }
+        let readID = UUID()
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { waiter in
@@ -145,14 +147,15 @@ actor NativeTransport: EngineTransport {
                     waiter.resume(throwing: FxError.protocolViolation("Core output already has a reader"))
                     return
                 }
-                outputWaiter = waiter
+                outputWaiter = (readID, waiter)
                 deliverOutput()
             }
-        } onCancel: { Task { await self.cancelOutputRead() } }
+        } onCancel: { Task { await self.cancelOutputRead(readID) } }
     }
 
-    private func cancelOutputRead() {
-        outputWaiter?.resume(throwing: CancellationError())
+    private func cancelOutputRead(_ id: UUID) {
+        guard outputWaiter?.id == id else { return }
+        outputWaiter?.continuation.resume(throwing: CancellationError())
         outputWaiter = nil
     }
 
@@ -164,7 +167,7 @@ actor NativeTransport: EngineTransport {
         guard status >= 0 else { shutdown(FxError.transport("Cannot drain core")); return }
         if !data.isEmpty {
             outputWaiter = nil
-            waiter.resume(returning: data)
+            waiter.continuation.resume(returning: data)
         } else if fx_core_exited(handle.pointer) != 0 {
             let code = fx_core_exit_code(handle.pointer)
             shutdown(code == 0 ? nil : FxError.transport("Core exited with code \(code)"))
@@ -359,11 +362,14 @@ actor NativeTransport: EngineTransport {
         closed = true
         fx_core_close(handle.pointer)
         if let source { source.cancel() }
-        else { handle.destroy(); sourceClosedContinuation.finish() }
+        else {
+            handle.destroy()
+            Task { await sourceClosed.resolve(sent: true) }
+        }
         source = nil
         outputFailure = error
-        if let error { outputWaiter?.resume(throwing: error) }
-        else { outputWaiter?.resume(returning: nil) }
+        if let error { outputWaiter?.continuation.resume(throwing: error) }
+        else { outputWaiter?.continuation.resume(returning: nil) }
         outputWaiter = nil
     }
 
@@ -376,7 +382,8 @@ actor NativeTransport: EngineTransport {
             }
         }
         shutdown(nil)
-        for await _ in sourceClosed {}
+        // Cancellation cannot skip the source handler before its borrowed FD is destroyed.
+        _ = await sourceClosed.wait()
         handle.destroy()
     }
 }

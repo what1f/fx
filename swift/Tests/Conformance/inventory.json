@@ -142,14 +142,14 @@
     {
       "upstream": "sdk/tests/test-core-output-pressure.mjs",
       "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending"
+      "reason": "The original file has not passed through Swift. NativeTransportTests.swift supplies direct C ABI queue-pressure equivalents, and a separate freshly built Swift driver interaction checks large Unicode output.",
+      "status": "partial: native tests pass with more than 8 MiB of echoed response IDs while output is unread, ordered lossless draining, close with unread output, an independent runtime completing initialization, readiness bursts and output-reader cancellation/reuse. A separate Swift driver/native prompt preserves 8,400,006 UTF-8 bytes from one Unicode provider delta with a matching SHA-256 and end_turn. Combined native/RPC Thread Sanitizer tests pass. These checks qualify the native byte queue; the original full owner, turn-event queue byte/event bounds, cancellation with a full turn-event queue, pressure-triggered tool suppression and callback cancellation, and pending iterator return/throw remain outside this batch."
     },
     {
       "upstream": "sdk/tests/test-core-output.mjs",
       "classification": "adapted",
-      "reason": "Permission cancellation assertions execute through Swift; the loader adds required typed tool metadata. The framing section still executes JavaScript CoreOutput and does not qualify Swift framing.",
-      "status": "partial: both permission callback cancellation phases pass through Swift; native framing equivalents and a permission initiated by the actual Zig runtime remain unqualified"
+      "reason": "Permission cancellation assertions execute through Swift; the loader adds required typed tool metadata. Original CoreOutput framing assertions still execute JavaScript. RPCBoundaryTests.swift and RPCClientTests.swift provide separate native Swift framing evidence.",
+      "status": "partial: both original permission callback cancellation phases pass through Swift. Native tests pass for byte-fragmented Unicode, coalesced ordering, malformed JSON and UTF-8, invalid envelopes, incomplete EOF, rejection of a 64 MiB payload followed by its newline, newline-inclusive small exact limits, pending-request failure and cleanup joins. The combined native/RPC Thread Sanitizer batch passes 21 tests; a separate two-test Thread Sanitizer run confirms both final cleanup joins. Full valid 64 MiB acceptance, every original split offset and a permission request initiated by the actual Zig runtime remain outside this native batch; JavaScript promise-rejection identity has no claimed native equivalent."
     },
     {
       "upstream": "sdk/tests/test-core.mjs",
@@ -166,8 +166,8 @@
     {
       "upstream": "sdk/tests/test-durable-core.mjs",
       "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending upstream assertions: the conversation harness has native and independent public-consumer proof for opaque journals, checkpoint seeds, cancellation, stopped-executor replacement, persisted stop budgets, old-turn cleanup and session halting; arbitrary payloads and unchanged upstream generic-core assertions remain pending"
+      "reason": "Select original cases by checked exact names and retain every assertion. The original JavaScript scripted fixture, closures and counters execute through a callback relay to FxDurableAgent<JSONValue, JSONValue>; Swift owns scheduling, leases, atomic journal marks, persistence and replay. Upstream pure log helpers remain fixture utilities and do not qualify Swift behavior.",
+      "status": "partial: 18 selected original memory cases pass through Swift, covering replay and exported checkpoints, delivery yields with each step once, two-agent ordering, separate named agents' own sessions, message deduplication, refusal before any record, stopped-executor replacement, bounded stop and engine-open retries, cancellation of repeatedly stopped turns, recovery after engine-open outages, session halting and late end records. Exact selections are in generic-core.mjs; generic-core-results.json records exit 0, no signal and empty stderr. Completion metadata derives from successful append-end marks in the current relay instance; recovery after a completed opaque record in a fresh host remains unqualified. Cross-agent forwarding, wake handlers, World and queue fault hooks, and remaining original cases are pending. Native and independent public-consumer proofs remain separate from these selected upstream assertions."
     },
     {
       "upstream": "sdk/tests/test-durable-harness.mjs",
@@ -185,7 +185,7 @@
       "upstream": "sdk/tests/test-durable.mjs",
       "classification": "adapted",
       "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "partial: nine unchanged session selections cover replay/cursors, isolation, completed-message deduplication, two-worker ordering, per-call tool context, model/instruction overrides, cancellation versus dropped views, image bytes and explicit JavaScript idempotency declarations; five checkpoint, seven steering and five delivery selections also pass; generic external durability and remaining scenarios pending; an earlier combined run failed queued-turn cancellation once; 100 normal reruns, twenty Address Sanitizer reruns and the latest 90/90 combined runner pass without explaining that failure, so its cause remains open; public injectable host storage has native and independent-consumer proof, the host queue contract now has native and independent HTTP consumer proof; complete upstream queue scenarios and remote database/queue service integrations remain pending"
+      "status": "partial: eleven unchanged session selections cover replay/cursors, isolation, completed-message deduplication, two-worker ordering, per-call tool context, model/instruction overrides, cancellation versus dropped views, image bytes, one read of an image getter, rejected model options with the original error code and explicit JavaScript idempotency declarations; five checkpoint, seven steering and seven delivery selections also pass. The two added local delivery cases cover acceptance immediately before a host crash and recovery of a non-idempotent send without sending twice; durable-additions-results.json records all four additions exiting 0 with no signal and empty stderr. Generic external durability and remaining scenarios are pending; an earlier combined run failed queued-turn cancellation once; 100 normal reruns, twenty Address Sanitizer reruns and a subsequent 90/90 combined runner pass without explaining that failure, so its cause remains open. Public injectable host storage has native and independent-consumer proof, and the host queue contract has native and independent HTTP consumer proof. Complete upstream forwarding, World and queue fault scenarios, remote database/queue service integrations and remaining original cases remain pending."
     },
     {
       "upstream": "sdk/tests/test-grok-sign-in.mjs",
@@ -262,8 +262,8 @@
     {
       "upstream": "sdk/tests/test-native-core-cancel-before-fetch.mjs",
       "classification": "adapted",
-      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
-      "status": "pending: original file mixes direct N-API operations and injected late-publication handles; redirecting the engine import alone does not qualify Swift publication ordering"
+      "reason": "The original file mixes direct N-API operations with injected late-publication handles. NativeTransportTests.swift checks cancellation at the Swift HTTP dispatch boundary without those JavaScript handles.",
+      "status": "partial: nativeCancellationBeforeHTTPDispatchSuppressesFetchAndAllowsReuse passes normally and under Thread Sanitizer. Cancellation awaited from the first POST started callback produces zero HTTP POST calls; a second prompt completes with the expected text and exactly one POST call. The original direct N-API assertions and deterministic publication-after-abort injection have not run through Swift, so this proof does not qualify that late-publication race."
     },
     {
       "upstream": "sdk/tests/test-native-core-cancel.mjs",

@@ -64,7 +64,7 @@ extension FxSessionStore {
             return ids
         }
         for id in joined {
-            let settled = FxSessionResult(id: id, stopReason: result.stopReason, usage: nil, error: result.error,
+            let settled = FxSessionResult(id: id, stopReason: result.stopReason, usage: nil, failure: result.failure,
                                           epoch: result.epoch, isRepeated: false)
             try database.execute("UPDATE fx_inputs SET result=? WHERE session=? AND id=?", [.blob(try JSONEncoder().encode(settled)), .text(lease.sessionID), .text(id)])
         }
