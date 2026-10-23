@@ -2349,6 +2349,7 @@ fn restoredSteeringChatMessage(text: []const u8) core_types.ChatMessage {
 fn toolResultMemory(result: core_types.PersistedToolResult) core_types.ToolResultMemory {
     return .{
         .review_feedback = result.review_feedback,
+        .loaded_tools_json = result.loaded_tools_json,
         .tool_images = result.tool_images,
         .tool_image_handle = result.tool_image_handle,
         .output_handle = result.output_handle,

@@ -51,7 +51,7 @@ struct KernelSessionHarness: FxSessionHarness {
         }
         config.tools = configuration.tools.map { tool in
             FxTool(name: tool.name, description: tool.description, inputSchema: tool.inputSchema,
-                   isIdempotent: tool.isIdempotent, writes: tool.writes) { value, toolContext in
+                   isIdempotent: tool.isIdempotent, writes: tool.writes, deferred: tool.deferred) { value, toolContext in
                 try await context.checkOwnership()
                 let scoped = FxToolContext(executionID: toolContext.executionID, sessionID: context.sessionID,
                                           turnID: context.inputID ?? "", context: context.options.context, observation: toolContext.observation)

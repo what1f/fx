@@ -462,3 +462,15 @@ Call `session.submit(_:id:)` to accept work and iterate the returned `FxDurableT
 Durable results expose `failure`, an `FxSessionFailure` with `message`, `name`, optional upstream `code` and optional numeric `rpcCode`. The `error` convenience returns its message. A custom executor can throw `FxSessionFailure` directly or return it in `FxTurnResult.failure`; both retain its fields in the durable result. Host storage errors retain their original error object and leave work pending instead of becoming terminal execution failures.
 
 The agent/session surface is still partial. Remote service integrations and full upstream durable-session qualification remain pending. Complete upstream custom-provider, Codex, and Grok test files have local proof. The session store's host event format is Swift-specific; core journal and checkpoint interoperability is a separate tested contract.
+
+## Update deferred host tools
+
+Set `deferred: true` on an `FxTool` to keep its definition out of the initial model request. The core exposes `tool_search` and loads matching definitions when the model searches. Use `try await engine.upsertTools([tool])` to add or replace deferred tools, and `try await engine.removeTools(named: [name])` to remove them. Set `configuration.toolSearchEnabled = true` before opening an empty catalog that you plan to populate later.
+
+Updates require an idle engine and reject a concurrent prompt, checkpoint, or catalog update with `FxError.busy`. A rejected batch leaves the previous catalog in place. Resident tools and provider tools cannot be replaced through these methods. Calls use the current host closure and validate arguments against its current JSON Schema. A schema mismatch returns a tool error with the current definition; a removed tool cannot invoke its old closure.
+
+The catalog holds at most 256 tools. The combined resident, provider, search, and activated tool count is at most 64. Each description and schema is limited to 65,536 bytes, and one search result can carry at most 65,536 bytes of definitions. Keep schema keywords compatible with [JSONSchema.swift](https://github.com/kylef/JSONSchema.swift), which validates host arguments. Remote schema references are unsupported, and newer draft keywords have incomplete coverage in that dependency.
+
+Journal events and checkpoints retain activation metadata, including across automatic context compaction. On reopen, provide the current catalog and closures in `FxConfiguration`; catalog mutations and closures are not persisted. Saved activation names that no longer exist are ignored. The provider receives activated definitions through its ordinary function tool list. This can change the request prefix, and does not guarantee a provider cache hit or byte-identical requests. Dynamic host context append and native Responses tool discovery are not supported by this API.
+
+Run `swift/scripts/test-runtime-catalog-consumer.sh` after building the XCFramework to exercise automatic compaction, schema replacement, removal, SQLite reopen, and checkpoint restoration from a separate package using public APIs.

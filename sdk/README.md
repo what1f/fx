@@ -580,3 +580,7 @@ libfx is developed in the [fx repository](https://github.com/vercel-labs/fx), un
 ## License
 
 [Apache-2.0](https://github.com/vercel-labs/fx/blob/main/LICENSE)
+
+### Native Swift deferred tools
+
+The native Swift package supports deferred host tool catalogs and idle catalog updates. See [Update deferred host tools](../swift/README.md#update-deferred-host-tools) for activation, schema validation, persistence, and capacity limits. The JavaScript SDK does not expose catalog mutation methods.

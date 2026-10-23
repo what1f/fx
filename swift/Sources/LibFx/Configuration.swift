@@ -83,6 +83,8 @@ public struct FxConfiguration: Sendable {
         self.checkpointAfterBytes = checkpointAfterBytes
     }
 
+    public var toolSearchEnabled: Bool = false
+
     var toolDescriptors: [JSONValue] {
         tools.map(\.descriptor) + providerTools.map { .object(["name": .string($0.rawValue), "providerExecuted": .bool(true)]) }
     }
@@ -132,11 +134,13 @@ public struct FxTool: Sendable {
     public let inputSchema: JSONValue
     public let isIdempotent: Bool
     public let writes: Bool?
+    public let deferred: Bool
     public let execute: @Sendable (JSONValue, FxToolContext) async throws -> FxToolResult
 
     public init(
         name: String, description: String, inputSchema: JSONValue, isIdempotent: Bool,
         writes: Bool? = nil,
+        deferred: Bool = false,
         execute: @escaping @Sendable (JSONValue, FxToolContext) async throws -> FxToolResult
     ) {
         self.name = name
@@ -145,6 +149,7 @@ public struct FxTool: Sendable {
         self.isIdempotent = isIdempotent
         self.writes = writes
         self.execute = execute
+        self.deferred = deferred
     }
 
     var descriptor: JSONValue {
@@ -152,6 +157,7 @@ public struct FxTool: Sendable {
             "name": .string(name), "description": .string(description), "inputSchema": inputSchema,
         ]
         if isIdempotent { fields["idempotent"] = .bool(true) }
+        if deferred { fields["deferred"] = .bool(true) }
         if let writes { fields["writes"] = .bool(writes) }
         return .object(fields)
     }

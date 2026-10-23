@@ -36,7 +36,10 @@ pub fn makePersistedToolResult(
     errdefer if (tool_image_handle) |handle| alloc.free(handle);
     const tool_images = if (memory) |info| if (tool_image_handle == null) try types.dupeToolImages(alloc, info.tool_images) else try alloc.alloc(types.ToolImage, 0) else try alloc.alloc(types.ToolImage, 0);
     errdefer types.freeToolImages(alloc, tool_images);
+    const loaded_tools_json = if (memory) |info| if (info.loaded_tools_json) |json| try alloc.dupe(u8, json) else null else null;
+    errdefer if (loaded_tools_json) |json| alloc.free(json);
     var result: types.PersistedToolResult = .{
+        .loaded_tools_json = loaded_tools_json,
         .tool_images = tool_images,
         .tool_image_handle = tool_image_handle,
         .tool_call_id = tool_call_id,

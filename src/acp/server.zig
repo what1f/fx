@@ -87,6 +87,7 @@ const AcpMethod = enum {
     libfx_handoff,
     libfx_follow_up,
     libfx_snapshot,
+    libfx_catalog,
     libfx_journal_open,
     libfx_journal_images,
     mcp_message,
@@ -112,6 +113,7 @@ const AcpMethod = enum {
         if (std.mem.eql(u8, method, "libfx/withdraw")) return .libfx_withdraw;
         if (std.mem.eql(u8, method, "libfx/handoff")) return .libfx_handoff;
         if (std.mem.eql(u8, method, "libfx/follow_up")) return .libfx_follow_up;
+        if (std.mem.eql(u8, method, "libfx/catalog")) return .libfx_catalog;
         if (std.mem.eql(u8, method, "libfx/snapshot")) return .libfx_snapshot;
         if (std.mem.eql(u8, method, "libfx/journal_open")) return .libfx_journal_open;
         if (std.mem.eql(u8, method, "libfx/journal_images")) return .libfx_journal_images;
@@ -142,6 +144,7 @@ const AcpMethod = enum {
             .libfx_checkpoint,
             .libfx_restore,
             .libfx_snapshot,
+            .libfx_catalog,
             .libfx_journal_open,
             .libfx_journal_images,
             .mcp_message,
@@ -152,7 +155,7 @@ const AcpMethod = enum {
 
     fn isLibfx(self: AcpMethod) bool {
         return switch (self) {
-            .libfx_checkpoint, .libfx_restore, .libfx_new, .libfx_steer, .libfx_withdraw, .libfx_handoff, .libfx_follow_up, .libfx_snapshot, .libfx_journal_open, .libfx_journal_images => true,
+            .libfx_checkpoint, .libfx_restore, .libfx_new, .libfx_steer, .libfx_withdraw, .libfx_handoff, .libfx_follow_up, .libfx_snapshot, .libfx_catalog, .libfx_journal_open, .libfx_journal_images => true,
             else => false,
         };
     }
@@ -1443,6 +1446,7 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
             .libfx_handoff => handleKernelHandoff(state, alloc, msg),
             .libfx_follow_up => handleKernelFollowUp(state, alloc, msg),
             .libfx_snapshot => handleKernelSnapshot(state, alloc, msg),
+            .libfx_catalog => handleKernelCatalog(state, alloc, msg),
             .libfx_journal_open => handleKernelJournalOpen(state, alloc, msg),
             .libfx_journal_images => handleKernelJournalImages(state, alloc, msg),
             else => state.writer.writeError(alloc, msg.id, .{
@@ -1469,6 +1473,7 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
         .libfx_handoff => handleKernelHandoff(state, alloc, msg),
         .libfx_follow_up => handleKernelFollowUp(state, alloc, msg),
         .libfx_snapshot => handleKernelSnapshot(state, alloc, msg),
+        .libfx_catalog => handleKernelCatalog(state, alloc, msg),
         .libfx_journal_open => handleKernelJournalOpen(state, alloc, msg),
         .libfx_journal_images => handleKernelJournalImages(state, alloc, msg),
         .initialize,
@@ -1726,6 +1731,32 @@ const invalid_checkpoint_meta: jsonrpc.RpcError = .{
     .code = ErrorCode.invalid_params,
     .message = "Invalid libfx checkpoint meta",
 };
+
+fn handleKernelCatalog(state: *ServerState, alloc: Allocator, msg: *const jsonrpc.Message) !void {
+    const invalid: jsonrpc.RpcError = .{ .code = ErrorCode.invalid_params, .message = "Invalid tool catalog" };
+    var parsed = libfxSessionId(alloc, msg) catch return state.writer.writeError(alloc, msg.id, invalid);
+    defer parsed.deinit();
+    const active = activeLibfxSession(state, parsed.value) orelse return state.writer.writeError(alloc, msg.id, invalid);
+    if (active.journal) |*journal| if (journal.progress_open or journal.pending_resume != null or journal.follow_ups_waiting != 0) return writePromptInProgress(state, alloc, msg.id);
+    const value = parsed.value.object.get("tools") orelse return state.writer.writeError(alloc, msg.id, invalid);
+    var candidate = host_tool_runtime.Runtime.initWithProviderRegistry(state.alloc, value, libfx_provider_tool_registry) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return state.writer.writeError(alloc, msg.id, invalid),
+    };
+    var candidate_owned = true;
+    defer if (candidate_owned) candidate.deinit();
+    candidate.enableSearch();
+    for (candidate.descriptors, 0..) |entry, index| {
+        for (state.host_tools.descriptors, 0..) |prior, prior_index| {
+            if (std.mem.eql(u8, entry.object.get("name").?.string, prior.object.get("name").?.string)) candidate.loaded[index] = state.host_tools.loaded[prior_index];
+        }
+    }
+    candidate.validateActiveBudget() catch return state.writer.writeError(alloc, msg.id, invalid);
+    state.host_tools.deinit();
+    state.host_tools = candidate;
+    candidate_owned = false;
+    try state.writer.writeResponse(alloc, msg.id, "null");
+}
 
 fn handleKernelCheckpoint(
     state: *ServerState,
@@ -2667,6 +2698,11 @@ fn parseInitializeRequest(
                 libfx_provider_tool_registry,
             );
             errdefer request.host_tools.deinit();
+            if (libfx.object.get("toolSearch")) |flag| {
+                if (flag != .bool) return error.InvalidInitializeParams;
+                if (flag.bool) request.host_tools.enableSearch();
+                try request.host_tools.validateActiveBudget();
+            }
             if (libfx.object.get("instructions")) |instructions| {
                 if (instructions != .string or instructions.string.len > 64 * 1024) {
                     return error.InvalidInitializeParams;
