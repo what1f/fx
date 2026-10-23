@@ -8,6 +8,7 @@ const image_attachments = @import("../core/images/image_attachments.zig");
 const tool_call_ids = @import("tool_call_ids.zig");
 const json_comparison = @import("../core/shared/json_comparison.zig");
 const text_utils = @import("../core/shared/text_utils.zig");
+const diagnostics = @import("responses_diagnostics.zig");
 
 pub fn selectReplayParts(alloc: std.mem.Allocator, replay: ?types.ProviderReplay, _: []const types.ToolCall, text: bool, reasoning: bool) !?types.ProviderReplay {
     const source = replay orelse return null;
@@ -885,6 +886,7 @@ pub const Reducer = struct {
         output_index: i64,
         id_hash: ?[TextDigest.digest_length]u8,
         phase: ?AssistantMessagePhase,
+        phase_finalized: bool = false,
         offset: usize = 0,
         length: usize = 0,
 
@@ -963,6 +965,8 @@ pub const Reducer = struct {
         defer parsed.deinit();
         if (parsed.value != .object) return false;
         const event_type = stringField(parsed.value.object, "type") orelse return false;
+        diagnostics.event(alloc, @intFromPtr(self), self.event_count, parsed.value.object);
+        errdefer diagnostics.record(alloc, .{ .stream = @intFromPtr(self), .sequence = self.event_count, .failure = true });
 
         if (std.mem.eql(u8, event_type, "response.output_item.added")) {
             const output_index = try optional_index(parsed.value.object, "output_index") orelse return false;
@@ -993,7 +997,7 @@ pub const Reducer = struct {
             } else if (std.mem.eql(u8, item_type, "reasoning")) {
                 try self.reconcile_reasoning(alloc, output_index, item.object, .identity, limits);
             } else if (std.mem.eql(u8, item_type, "message")) {
-                _ = try self.reconcile_message(alloc, output_index, try text_identity(item.object, "id"), try assistantMessagePhase(item.object), limits);
+                _ = try self.reconcile_message(alloc, output_index, try text_identity(item.object, "id"), try assistantMessagePhase(item.object), false, limits);
             } else {
                 try self.check_output_kind(output_index, .unknown);
             }
@@ -1175,7 +1179,7 @@ pub const Reducer = struct {
         self.reasoning_bytes = total;
     }
 
-    fn reconcile_message(self: *Reducer, alloc: std.mem.Allocator, output_index: i64, id_hash: ?[TextDigest.digest_length]u8, phase: ?AssistantMessagePhase, limits: StreamLimits) !*MessageItem {
+    fn reconcile_message(self: *Reducer, alloc: std.mem.Allocator, output_index: i64, id_hash: ?[TextDigest.digest_length]u8, phase: ?AssistantMessagePhase, completed: bool, limits: StreamLimits) !*MessageItem {
         try self.check_output_kind(output_index, .message);
         var low: usize = 0;
         var high = self.message_items.items.len;
@@ -1192,14 +1196,20 @@ pub const Reducer = struct {
         if (low < self.message_items.items.len and self.message_items.items[low].output_index == output_index) {
             const prior = &self.message_items.items[low];
             if (phase) |value| {
-                if (prior.phase) |old| if (old != value) return error.ResponsesTextConflict;
+                // The added item is provisional. Providers can classify a message
+                // as commentary only once they decide to follow it with a tool.
+                if (prior.phase) |old| if (old != value and (prior.phase_finalized or !completed)) {
+                    diagnostics.record(alloc, .{ .check = "message_phase", .output_index = output_index, .prior_phase = old, .phase = value, .finalized = prior.phase_finalized });
+                    return error.ResponsesTextConflict;
+                };
                 prior.phase = value;
+                if (completed) prior.phase_finalized = true;
             }
             if (id_hash != null) prior.id_hash = id_hash;
             return prior;
         }
         if (self.message_items.items.len >= limits.events) return error.ResourceLimitExceeded;
-        try self.message_items.insert(alloc, low, .{ .output_index = output_index, .id_hash = id_hash, .phase = phase });
+        try self.message_items.insert(alloc, low, .{ .output_index = output_index, .id_hash = id_hash, .phase = phase, .phase_finalized = completed and phase != null });
         return &self.message_items.items[low];
     }
 
@@ -1228,14 +1238,18 @@ pub const Reducer = struct {
         capture_limit: ?usize,
         limits: StreamLimits,
     ) !void {
-        const message = try self.reconcile_message(alloc, update.key.output_index, update.item_id_hash, null, limits);
+        const message = try self.reconcile_message(alloc, update.key.output_index, update.item_id_hash, null, false, limits);
         if (self.text_parts.count() >= limits.events and !self.text_parts.contains(update.key)) return error.ResourceLimitExceeded;
         const entry = try self.text_parts.getOrPut(alloc, update.key);
         if (!entry.found_existing) entry.value_ptr.* = .{ .kind = update.kind };
         const part = entry.value_ptr;
         if (part.kind != update.kind) return error.ResponsesTextConflict;
         const suffix = switch (update.mode) {
-            .final => try part.final_suffix(update.text),
+            .final => part.final_suffix(update.text) catch |err| {
+                var digest = part.digest;
+                diagnostics.record(alloc, .{ .check = "final_text", .output_index = update.key.output_index, .content_index = update.key.content_index, .received_bytes = part.received_bytes, .final_bytes = update.text.len, .finalized = part.finalized, .received_sha256 = std.fmt.bytesToHex(digest.finalResult(), .lower) });
+                return err;
+            },
             .delta => blk: {
                 if (part.finalized and update.text.len != 0) return error.ResponsesTextConflict;
                 break :blk update.text;
@@ -1293,7 +1307,7 @@ pub const Reducer = struct {
         capture_limit: ?usize,
         limits: StreamLimits,
     ) !void {
-        _ = try self.reconcile_message(alloc, output_index, try text_identity(fields, "id"), try assistantMessagePhase(fields), limits);
+        _ = try self.reconcile_message(alloc, output_index, try text_identity(fields, "id"), try assistantMessagePhase(fields), true, limits);
         const parts = fields.get("content") orelse return error.InvalidEvent;
         if (parts != .array) return error.InvalidEvent;
         const identity = try text_identity(fields, "id");
@@ -2270,7 +2284,49 @@ test "Responses captures assistant phase from terminal output" {
     try std.testing.expectEqualStrings("final_answer", replay.value.array.items[0].object.get("phase").?.string);
 }
 
-test "Responses omits unknown phases and rejects contradictory phases within one message" {
+test "Responses DeepSeek captured stream finalizes a provisional answer as commentary" {
+    // Metadata capture retained all 79 event types and text byte lengths. The
+    // fixture substitutes x bytes and stable IDs; no response text is retained.
+    for ([_]?usize{ null, 1 }) |capture_limit| {
+        var stream = TextRecordTest.init(std.testing.allocator);
+        defer stream.deinit();
+        stream.capture_limit = capture_limit;
+        var events = std.mem.splitScalar(u8, @embedFile("fixtures/deepseek-provisional-phase.jsonl"), '\n');
+        while (events.next()) |event| {
+            if (event.len != 0) try stream.apply(event);
+        }
+        const message = stream.reducer.message_items.items[0];
+        try std.testing.expectEqual(AssistantMessagePhase.commentary, message.phase.?);
+        try std.testing.expect(message.phase_finalized);
+        // A later completed snapshot must still agree with the completed item.
+        try std.testing.expectError(error.ResponsesTextConflict, stream.apply(
+            \\{"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"message","phase":"final_answer","content":[]}}
+        ));
+        try stream.finish(comptime text_utils.repeat("x", 77));
+    }
+}
+
+test "Responses completed phase replaces provisional commentary and persists final replay" {
+    var stream = ToolRecordTest.init(std.testing.allocator);
+    defer stream.deinit();
+    try stream.apply(
+        \\{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"message","phase":"commentary"}}
+    );
+    try stream.apply(
+        \\{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"message","phase":"final_answer","content":[{"type":"output_text","text":"42"}]}}
+    );
+    try stream.apply(
+        \\{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","id":"message","phase":"final_answer","content":[{"type":"output_text","text":"42"}]}]}}
+    );
+    const completion = try stream.finish();
+    defer stream.freeCompletion(completion);
+    try std.testing.expectEqualStrings("42", completion.content.?);
+    const replay = try std.json.parseFromSlice(std.json.Value, stream.alloc, completion.provider_state_json.?, .{});
+    defer replay.deinit();
+    try std.testing.expectEqualStrings("final_answer", replay.value.array.items[0].object.get("phase").?.string);
+}
+
+test "Responses omits unknown phases and rejects contradictory completed phases" {
     var unknown = ToolRecordTest.init(std.testing.allocator);
     defer unknown.deinit();
     try unknown.apply(
@@ -2284,7 +2340,7 @@ test "Responses omits unknown phases and rejects contradictory phases within one
     var conflicting = ToolRecordTest.init(std.testing.allocator);
     defer conflicting.deinit();
     try conflicting.apply(
-        "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"phase\":\"commentary\"}}",
+        "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"phase\":\"commentary\",\"content\":[]}}",
     );
     try std.testing.expectError(error.ResponsesTextConflict, conflicting.apply(
         "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"phase\":\"final_answer\",\"content\":[]}}",

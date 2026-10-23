@@ -92,6 +92,9 @@ describe("tui: direct-write audit", () => {
     expect(output).toContain("category=terminal_reset");
     expect(output).toContain("path=src/core/app/app_entry_runtime.zig");
     expect(output).toContain("function=writeRealStdout");
+    expect(output).toMatch(
+      /path=src\/gateway\/responses_diagnostics\.zig .*function=record .*category=noninteractive_output/,
+    );
   });
 
   test("accepts owned forms and rejects unowned acquisition or writes", () => {
