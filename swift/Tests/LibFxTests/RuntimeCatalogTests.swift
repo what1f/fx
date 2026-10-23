@@ -111,13 +111,15 @@ private func drainCatalogTurn(_ turn: FxTurn) async throws {
         ("tool_search", .object(["query": .string("action_42")])),
         ("action_42", .object(["value": .string("first")])), nil,
         ("tool_search", .object(["query": .string("action_42")])), nil,
-        ("action_42", .object(["value": .string("restored")])), nil,
+        ("action_42", .object(["updated": .string("restored")])), nil,
+        ("action_42", .object(["updated": .string("removed")])), nil,
     ], codex: true)
     let credentials = try FxSubscriptionCredentials(accessToken: "fixture-token", accountID: "fixture-account", expiresAt: Date().addingTimeInterval(3600))
     let auth = FxSubscription(provider: .codex, credentials: { _ in credentials })
     let config = FxConfiguration(provider: .subscription(auth), model: FxModel(id: "gpt-6.1-sol"), tools: [catalogTool("action_42", calls: calls)], httpClient: http)
     let engine = try await FxEngine.open(configuration: config)
     try await drainCatalogTurn(try await engine.prompt("search and call"))
+    try await engine.upsertTools([catalogTool("action_42", key: "updated", calls: calls)])
     try await drainCatalogTurn(try await engine.prompt("search again"))
     let before = await http.posts
     #expect(before.count == 5)
@@ -130,16 +132,23 @@ private func drainCatalogTurn(_ turn: FxTurn) async throws {
     #expect(String(describing: before).contains("tool_search_output"))
     let checkpoint = try await engine.checkpoint()
     try await engine.close()
-    let restored = try await FxEngine.open(configuration: config, checkpoint: checkpoint)
+    var restoredConfig = config
+    restoredConfig.tools = [catalogTool("action_42", key: "updated", calls: calls)]
+    let restored = try await FxEngine.open(configuration: restoredConfig, checkpoint: checkpoint)
     try await drainCatalogTurn(try await restored.prompt("use loaded action"))
+    #expect(await calls.inputs.count == 2)
+    try await restored.removeTools(named: ["action_42"])
+    try await drainCatalogTurn(try await restored.prompt("try removed action"))
     #expect(await calls.inputs.count == 2)
     let final = await http.posts
     #expect(final[5]["tools"] == before[1]["tools"])
     let raw = await http.rawPosts
     let tools = try catalogRawArray("tools", in: raw[0])
     for body in raw { let value = try catalogRawArray("tools", in: body); if value != tools { catalogDiagnose(tools, value) }; #expect(value == tools) }
-    let prefix = try catalogRawArray("input", in: raw[0])
-    #expect(try catalogRawArray("input", in: raw[2]).starts(with: prefix.dropLast()))
+    for index in 1..<raw.count {
+        let prefix = try catalogRawArray("input", in: raw[index - 1])
+        #expect(try catalogRawArray("input", in: raw[index]).starts(with: prefix.dropLast()))
+    }
     try await restored.close()
 }
 
