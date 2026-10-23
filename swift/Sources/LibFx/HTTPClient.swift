@@ -36,8 +36,32 @@ public struct FxURLSessionHTTPClient: FxHTTPClient {
     private let session: URLSession
 
     var usesSharedSession: Bool { session === URLSession.shared }
+    var usesDefaultSession: Bool { session === Self.transientSession }
 
-    public init(session: URLSession = .shared) { self.session = session }
+    private static let transientSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.urlCredentialStorage = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }()
+
+    var permitsPersistentHTTPState: Bool {
+        let configuration = session.configuration
+        return configuration.urlCache != nil || configuration.urlCredentialStorage != nil || configuration.httpCookieStorage != nil
+    }
+
+    /// The default session does not persist request headers, credentials, cookies, or responses.
+    public init() {
+        self.session = Self.transientSession
+    }
+
+    /// A supplied session keeps the host's storage and caching policy.
+    public init(session: URLSession) {
+        self.session = session
+    }
 
     public func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         let (bytes, response) = try await session.bytes(for: request, delegate: CredentialRedirectPolicy())

@@ -16,18 +16,20 @@ Both runs use `deepseek-flash`, a deliberately reduced 32768-token context windo
 | --- | --- | --- |
 | Endpoint | `https://api.deepseek.com/v1/responses` | `https://api.deepseek.com/anthropic/v1/messages` |
 | Deferred invocation | Native search output and native action calls | Explicit `.callAction` compatibility mode |
+| Total model requests | 26 | 27 |
 | Multi-turn recall | Passed | Passed |
 | Search, then execute deferred action | Passed | Passed |
 | Add, update, remove action; removed closure stays unused | Passed | Passed |
 | Reject once, then approve once; rejected closure stays unused | Passed | Passed |
-| Automatic summary model requests | 2 | 2 |
+| Automatic summary model requests | 1 | 2 |
 | Persisted replacements containing a real compactor summary | 1 | 1 |
 | Continue after compaction and execute updated action | Passed | Passed |
 | Appended context survives compaction and SQLite reopen | Passed | Passed |
-| Text / reasoning / tool-start / tool-finish events | 112 / 530 / 11 / 11 | 124 / 474 / 11 / 11 |
-| Requests with cache hits after the first request | 26 of 26 | 26 of 26 |
-| Second request cached tokens | 640 | 512 |
+| Text / reasoning / tool-start / tool-finish events | 118 / 435 / 11 / 11 | 105 / 146 / 11 / 11 |
+| Requests with cache hits after the first request | 25 of 25 | 26 of 26 |
+| Second request cached tokens | 512 | 384 |
 | Runtime stderr bytes | 0 | 0 |
+| Post-run HTTP disk cache | Absent | Absent |
 
 Each success comes from the native runtime linked into the consumer and actual HTTPS requests. The HTTP wrapper forwards the service response unchanged and records numeric usage. It does not replace model responses, inject tool calls, or alter request schemas. The test asserts closure counts, approval decisions, recalled markers, streamed event pairs, and a persisted `compacted_summary` with a positive removed-turn count.
 
@@ -48,65 +50,64 @@ These are the final successful runs. Each row represents one actual model reques
 ### Responses
 
 ```text
-request=1 kind=conversation input_tokens=489 input_tokens_details.cached_tokens=256 output_tokens=289 output_tokens_details.reasoning_tokens=279 total_tokens=778
-request=2 kind=conversation input_tokens=788 input_tokens_details.cached_tokens=640 output_tokens=6 output_tokens_details.reasoning_tokens=0 total_tokens=794
-request=3 kind=conversation input_tokens=811 input_tokens_details.cached_tokens=640 output_tokens=139 output_tokens_details.reasoning_tokens=98 total_tokens=950
-request=4 kind=conversation input_tokens=1066 input_tokens_details.cached_tokens=896 output_tokens=22 output_tokens_details.reasoning_tokens=0 total_tokens=1088
-request=5 kind=conversation input_tokens=1105 input_tokens_details.cached_tokens=896 output_tokens=8 output_tokens_details.reasoning_tokens=0 total_tokens=1113
-request=6 kind=conversation input_tokens=1136 input_tokens_details.cached_tokens=896 output_tokens=42 output_tokens_details.reasoning_tokens=0 total_tokens=1178
-request=7 kind=conversation input_tokens=1298 input_tokens_details.cached_tokens=1152 output_tokens=23 output_tokens_details.reasoning_tokens=0 total_tokens=1321
-request=8 kind=conversation input_tokens=1335 input_tokens_details.cached_tokens=1152 output_tokens=18 output_tokens_details.reasoning_tokens=0 total_tokens=1353
-request=9 kind=conversation input_tokens=1370 input_tokens_details.cached_tokens=1152 output_tokens=23 output_tokens_details.reasoning_tokens=0 total_tokens=1393
-request=10 kind=conversation input_tokens=1409 input_tokens_details.cached_tokens=1152 output_tokens=10 output_tokens_details.reasoning_tokens=0 total_tokens=1419
-request=11 kind=conversation input_tokens=1569 input_tokens_details.cached_tokens=1408 output_tokens=41 output_tokens_details.reasoning_tokens=0 total_tokens=1610
-request=12 kind=conversation input_tokens=1726 input_tokens_details.cached_tokens=1536 output_tokens=22 output_tokens_details.reasoning_tokens=0 total_tokens=1748
-request=13 kind=conversation input_tokens=1764 input_tokens_details.cached_tokens=1536 output_tokens=8 output_tokens_details.reasoning_tokens=0 total_tokens=1772
-request=14 kind=conversation input_tokens=1922 input_tokens_details.cached_tokens=1664 output_tokens=76 output_tokens_details.reasoning_tokens=54 total_tokens=1998
-request=15 kind=conversation input_tokens=2015 input_tokens_details.cached_tokens=1792 output_tokens=18 output_tokens_details.reasoning_tokens=0 total_tokens=2033
-request=16 kind=conversation input_tokens=2166 input_tokens_details.cached_tokens=1920 output_tokens=41 output_tokens_details.reasoning_tokens=0 total_tokens=2207
-request=17 kind=conversation input_tokens=2220 input_tokens_details.cached_tokens=2048 output_tokens=27 output_tokens_details.reasoning_tokens=12 total_tokens=2247
-request=18 kind=conversation input_tokens=6500 input_tokens_details.cached_tokens=2176 output_tokens=53 output_tokens_details.reasoning_tokens=50 total_tokens=6553
-request=19 kind=conversation input_tokens=10774 input_tokens_details.cached_tokens=6528 output_tokens=3 output_tokens_details.reasoning_tokens=0 total_tokens=10777
-request=20 kind=compaction input_tokens=16098 input_tokens_details.cached_tokens=10752 output_tokens=2187 output_tokens_details.reasoning_tokens=1135 total_tokens=18285
-request=21 kind=compaction input_tokens=15497 input_tokens_details.cached_tokens=14848 output_tokens=1840 output_tokens_details.reasoning_tokens=1158 total_tokens=17337
-request=22 kind=conversation input_tokens=7345 input_tokens_details.cached_tokens=256 output_tokens=28 output_tokens_details.reasoning_tokens=25 total_tokens=7373
-request=23 kind=conversation input_tokens=7391 input_tokens_details.cached_tokens=7168 output_tokens=13 output_tokens_details.reasoning_tokens=0 total_tokens=7404
-request=24 kind=conversation input_tokens=7419 input_tokens_details.cached_tokens=7168 output_tokens=53 output_tokens_details.reasoning_tokens=12 total_tokens=7472
-request=25 kind=conversation input_tokens=7588 input_tokens_details.cached_tokens=7424 output_tokens=22 output_tokens_details.reasoning_tokens=0 total_tokens=7610
-request=26 kind=conversation input_tokens=7627 input_tokens_details.cached_tokens=7424 output_tokens=10 output_tokens_details.reasoning_tokens=0 total_tokens=7637
-request=27 kind=conversation input_tokens=7648 input_tokens_details.cached_tokens=7424 output_tokens=6 output_tokens_details.reasoning_tokens=0 total_tokens=7654
+request=1 kind=conversation input_tokens=489 input_tokens_details.cached_tokens=256 output_tokens=175 output_tokens_details.reasoning_tokens=165 total_tokens=664
+request=2 kind=conversation input_tokens=674 input_tokens_details.cached_tokens=512 output_tokens=7 output_tokens_details.reasoning_tokens=0 total_tokens=681
+request=3 kind=conversation input_tokens=698 input_tokens_details.cached_tokens=512 output_tokens=55 output_tokens_details.reasoning_tokens=14 total_tokens=753
+request=4 kind=conversation input_tokens=869 input_tokens_details.cached_tokens=640 output_tokens=22 output_tokens_details.reasoning_tokens=0 total_tokens=891
+request=5 kind=conversation input_tokens=908 input_tokens_details.cached_tokens=768 output_tokens=9 output_tokens_details.reasoning_tokens=0 total_tokens=917
+request=6 kind=conversation input_tokens=940 input_tokens_details.cached_tokens=768 output_tokens=42 output_tokens_details.reasoning_tokens=0 total_tokens=982
+request=7 kind=conversation input_tokens=1102 input_tokens_details.cached_tokens=896 output_tokens=23 output_tokens_details.reasoning_tokens=0 total_tokens=1125
+request=8 kind=conversation input_tokens=1139 input_tokens_details.cached_tokens=896 output_tokens=16 output_tokens_details.reasoning_tokens=0 total_tokens=1155
+request=9 kind=conversation input_tokens=1172 input_tokens_details.cached_tokens=1024 output_tokens=50 output_tokens_details.reasoning_tokens=27 total_tokens=1222
+request=10 kind=conversation input_tokens=1238 input_tokens_details.cached_tokens=1024 output_tokens=11 output_tokens_details.reasoning_tokens=0 total_tokens=1249
+request=11 kind=conversation input_tokens=1399 input_tokens_details.cached_tokens=1152 output_tokens=41 output_tokens_details.reasoning_tokens=0 total_tokens=1440
+request=12 kind=conversation input_tokens=1556 input_tokens_details.cached_tokens=1408 output_tokens=22 output_tokens_details.reasoning_tokens=0 total_tokens=1578
+request=13 kind=conversation input_tokens=1594 input_tokens_details.cached_tokens=1408 output_tokens=9 output_tokens_details.reasoning_tokens=0 total_tokens=1603
+request=14 kind=conversation input_tokens=1753 input_tokens_details.cached_tokens=1536 output_tokens=22 output_tokens_details.reasoning_tokens=0 total_tokens=1775
+request=15 kind=conversation input_tokens=1792 input_tokens_details.cached_tokens=1536 output_tokens=35 output_tokens_details.reasoning_tokens=17 total_tokens=1827
+request=16 kind=conversation input_tokens=1960 input_tokens_details.cached_tokens=1664 output_tokens=51 output_tokens_details.reasoning_tokens=10 total_tokens=2011
+request=17 kind=conversation input_tokens=2024 input_tokens_details.cached_tokens=1792 output_tokens=17 output_tokens_details.reasoning_tokens=0 total_tokens=2041
+request=18 kind=conversation input_tokens=6294 input_tokens_details.cached_tokens=1920 output_tokens=21 output_tokens_details.reasoning_tokens=18 total_tokens=6315
+request=19 kind=conversation input_tokens=10536 input_tokens_details.cached_tokens=6272 output_tokens=3 output_tokens_details.reasoning_tokens=0 total_tokens=10539
+request=20 kind=compaction input_tokens=15860 input_tokens_details.cached_tokens=10496 output_tokens=1762 output_tokens_details.reasoning_tokens=600 total_tokens=17622
+request=21 kind=conversation input_tokens=7100 input_tokens_details.cached_tokens=256 output_tokens=3 output_tokens_details.reasoning_tokens=0 total_tokens=7103
+request=22 kind=conversation input_tokens=7121 input_tokens_details.cached_tokens=6912 output_tokens=172 output_tokens_details.reasoning_tokens=157 total_tokens=7293
+request=23 kind=conversation input_tokens=7308 input_tokens_details.cached_tokens=7168 output_tokens=68 output_tokens_details.reasoning_tokens=27 total_tokens=7376
+request=24 kind=conversation input_tokens=7492 input_tokens_details.cached_tokens=7296 output_tokens=22 output_tokens_details.reasoning_tokens=0 total_tokens=7514
+request=25 kind=conversation input_tokens=7531 input_tokens_details.cached_tokens=7296 output_tokens=10 output_tokens_details.reasoning_tokens=0 total_tokens=7541
+request=26 kind=conversation input_tokens=7552 input_tokens_details.cached_tokens=7296 output_tokens=125 output_tokens_details.reasoning_tokens=119 total_tokens=7677
 ```
 
 ### Messages
 
 ```text
-request=1 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=128 input_tokens=424 output_tokens=113
-request=2 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=512 input_tokens=163 output_tokens=6
-request=3 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=512 input_tokens=186 output_tokens=54
-request=4 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=640 input_tokens=183 output_tokens=54
-request=5 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=640 input_tokens=254 output_tokens=8
-request=6 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=768 input_tokens=157 output_tokens=42
-request=7 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=896 input_tokens=137 output_tokens=55
-request=8 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=896 input_tokens=206 output_tokens=14
-request=9 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=896 input_tokens=237 output_tokens=64
-request=10 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1024 input_tokens=189 output_tokens=17
-request=11 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1152 input_tokens=228 output_tokens=41
-request=12 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1280 input_tokens=212 output_tokens=54
-request=13 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1408 input_tokens=154 output_tokens=9
-request=14 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1536 input_tokens=185 output_tokens=125
-request=15 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1664 input_tokens=199 output_tokens=18
-request=16 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1792 input_tokens=222 output_tokens=58
-request=17 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1920 input_tokens=165 output_tokens=17
-request=18 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=2048 input_tokens=4307 output_tokens=24
-request=19 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=6272 input_tokens=4328 output_tokens=3
-request=20 kind=compaction cache_creation_input_tokens=0 cache_read_input_tokens=10496 input_tokens=5438 output_tokens=1548
-request=21 kind=compaction cache_creation_input_tokens=0 cache_read_input_tokens=14720 input_tokens=613 output_tokens=3349
-request=22 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=256 input_tokens=6984 output_tokens=67
-request=23 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=7168 input_tokens=157 output_tokens=115
-request=24 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=7296 input_tokens=159 output_tokens=115
-request=25 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=7424 input_tokens=217 output_tokens=54
-request=26 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=7552 input_tokens=160 output_tokens=16
-request=27 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=7552 input_tokens=187 output_tokens=6
+request=1 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=384 input_tokens=168 output_tokens=10
+request=2 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=384 input_tokens=188 output_tokens=7
+request=3 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=384 input_tokens=212 output_tokens=54
+request=4 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=512 input_tokens=209 output_tokens=54
+request=5 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=640 input_tokens=152 output_tokens=8
+request=6 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=640 input_tokens=183 output_tokens=42
+request=7 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=768 input_tokens=163 output_tokens=55
+request=8 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=768 input_tokens=232 output_tokens=15
+request=9 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=896 input_tokens=136 output_tokens=65
+request=10 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=896 input_tokens=217 output_tokens=11
+request=11 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1024 input_tokens=250 output_tokens=41
+request=12 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1152 input_tokens=234 output_tokens=54
+request=13 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1280 input_tokens=176 output_tokens=8
+request=14 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1408 input_tokens=206 output_tokens=54
+request=15 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1536 input_tokens=149 output_tokens=11
+request=16 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1664 input_tokens=165 output_tokens=41
+request=17 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1664 input_tokens=219 output_tokens=30
+request=18 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=1792 input_tokens=4374 output_tokens=62
+request=19 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=6144 input_tokens=4305 output_tokens=3
+request=20 kind=compaction cache_creation_input_tokens=0 cache_read_input_tokens=10368 input_tokens=5415 output_tokens=862
+request=21 kind=compaction cache_creation_input_tokens=0 cache_read_input_tokens=14464 input_tokens=718 output_tokens=1820
+request=22 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=256 input_tokens=6507 output_tokens=27
+request=23 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=6656 input_tokens=152 output_tokens=13
+request=24 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=6656 input_tokens=180 output_tokens=68
+request=25 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=6784 input_tokens=191 output_tokens=54
+request=26 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=6912 input_tokens=134 output_tokens=9
+request=27 kind=conversation cache_creation_input_tokens=0 cache_read_input_tokens=6912 input_tokens=154 output_tokens=6
 ```
 
 ## Reproduce the live acceptance
@@ -120,7 +121,9 @@ python3 swift/scripts/test-deepseek-consumer.py responses
 python3 swift/scripts/test-deepseek-consumer.py messages
 ```
 
-The Python launcher reads the existing `ANTHROPIC_AUTH_TOKEN` assignment from `~/.local/bin/dcc` into memory, sets `DEEPSEEK_API_KEY` only in the consumer's environment, and executes the built consumer. It never prints or writes the credential. Temporary conversation databases are removed when each run exits. No trace capture or observation sink is enabled. Provider-error diagnostics are bounded and redact credentials before printing.
+A final disk-cache audit found that the initial Foundation shared HTTP session had cached an authenticated request in the acceptance executable's system `Cache.db-wal`. It was removed with that test executable's cache directory. This was a local HTTP cache write. The credential was absent from git and test output logs. LibFx's default HTTP client now uses an ephemeral session with URL cache, credential storage, and cookie storage disabled. The final live runs and post-run cache checks in this record passed after this repair; the acceptance executable's HTTP cache directory remained absent. The historical cache write is recorded here rather than described as never having happened.
+
+The Python launcher reads the existing `ANTHROPIC_AUTH_TOKEN` assignment from `~/.local/bin/dcc` into memory, sets `DEEPSEEK_API_KEY` only in the consumer's environment, and runs the built consumer. After exit, it checks the executable's HTTP cache for an exact credential match without printing the credential. It never prints or writes the credential. Temporary conversation databases are removed when each run exits. No trace capture or observation sink is enabled. Provider-error diagnostics are bounded and redact credentials before printing.
 
 ## Final local gates
 
@@ -130,7 +133,7 @@ The generated XCFramework contains arm64 and x86_64 macOS slices. Its static arc
 | --- | --- |
 | `zig build` | Passed |
 | Complete `FX_SOUND=0 zig build test` | Passed |
-| `swift test --package-path swift --no-parallel` | Passed: LibFx 405, MCP 11, HTTP 14, AgentKit 31; total 461 |
+| `swift test --package-path swift --no-parallel` | Passed: LibFx 406, MCP 11, HTTP 14, AgentKit 31; total 462 |
 | `test-consumer.sh` | Passed |
 | `test-tool-approval-consumer.sh` | Passed |
 | `test-workspace-tools-consumer.sh` | Passed, including real file and shell effects, denial, and cancellation |

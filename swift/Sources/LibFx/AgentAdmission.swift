@@ -123,14 +123,14 @@ struct AgentDefinition: Sendable, Equatable {
         if let harness = harness as? KernelSessionHarness {
             let configuration = harness.configuration
             kernel = Kernel(configuration)
-            let sharedHTTP = (configuration.httpClient as? FxURLSessionHTTPClient)?.usesSharedSession == true
+            let defaultHTTP = (configuration.httpClient as? FxURLSessionHTTPClient)?.usesDefaultSession == true
             var opaqueProvider = false
             switch configuration.provider {
             case .subscription: opaqueProvider = true
             case .custom(_, let credentials): opaqueProvider = credentials != nil
             case .gateway: break
             }
-            opaque = !sharedHTTP || opaqueProvider || !configuration.tools.isEmpty
+            opaque = !defaultHTTP || opaqueProvider || !configuration.tools.isEmpty
                 || configuration.onPermission != nil || configuration.prepareImage != nil
                 || configuration.validatePermission != nil || openingRetryPolicy != nil || hasQueue || queueAuthority != nil
         } else {

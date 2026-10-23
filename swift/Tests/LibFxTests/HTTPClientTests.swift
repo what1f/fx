@@ -133,3 +133,9 @@ private func session() -> URLSession {
     }
     #expect(ScriptedURLProtocol.stalledStopped.value)
 }
+
+@Test func defaultHTTPClientDoesNotRetainPersistentHTTPState() {
+    let client = FxURLSessionHTTPClient()
+    #expect(!client.usesSharedSession)
+    #expect(!client.permitsPersistentHTTPState)
+}

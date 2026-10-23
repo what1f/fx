@@ -155,7 +155,7 @@ let engine = try await FxEngine.open(configuration: FxConfiguration(
 
 The asynchronous credentials closure receives the provider name and engine session ID and returns an API key. Omit it for a service that needs no key. Cancellation of the turn cancels a pending credential lookup. Keys are added only to the provider's configured model endpoint and remain outside core configuration and saved records. Rejected keys are not refreshed or resent. Error details are bounded and mask the key, including JSON-escaped copies.
 
-The default Foundation HTTP client follows redirects only for unauthenticated GET and HEAD requests. A custom `FxHTTPClient` must preserve that credential scope when handling redirects. Custom providers support HTTPS and HTTP on loopback addresses. Use `FxProvider.subscription` for Codex or Grok subscriptions.
+The default Foundation HTTP client uses an ephemeral session with response caching, cookie storage, and credential storage disabled. It follows redirects only for unauthenticated GET and HEAD requests. A custom `FxHTTPClient` must preserve that credential scope when handling redirects. Custom providers support HTTPS and HTTP on loopback addresses. Use `FxProvider.subscription` for Codex or Grok subscriptions.
 
 ## Sign in to a subscription
 
