@@ -699,3 +699,30 @@ test "search definition budget includes array delimiters and commas" {
         }
     }
 }
+
+test "repeated broad search retains one active tool per name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc,
+        \\[{"name":"notes_read","description":"Read notes","inputSchema":{},"deferred":true},
+        \\ {"name":"notes_write","description":"Write notes","inputSchema":{},"deferred":true}]
+    , .{});
+    var runtime = try Runtime.init(alloc, parsed.value);
+    defer runtime.deinit();
+    var first: ?@import("../shared/types.zig").ToolResultMemory = null;
+    _ = try runtime.search(.{ .allocator = alloc, .tool_result_memory_sink = &first }, "{\"query\":\"notes\"}");
+    const loaded = try std.json.parseFromSlice(std.json.Value, alloc, first.?.loaded_tools_json.?, .{});
+    try std.testing.expectEqual(@as(usize, 2), loaded.value.array.items.len);
+    var second: ?@import("../shared/types.zig").ToolResultMemory = null;
+    const result = try runtime.search(.{ .allocator = alloc, .tool_result_memory_sink = &second }, "{\"query\":\"notes\"}");
+    try std.testing.expectEqualStrings(first.?.loaded_tools_json.?, second.?.loaded_tools_json.?);
+    const active = try runtime.initialTools(alloc);
+    var read_count: usize = 0;
+    for (active) |tool| if (std.mem.eql(u8, tool.name, "notes_read")) {
+        read_count += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), read_count);
+    try std.testing.expect(std.mem.find(u8, result.success, "notes_read") != null);
+    try std.testing.expect(std.mem.find(u8, result.success, "notes_write") != null);
+}

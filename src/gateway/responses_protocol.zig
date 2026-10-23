@@ -58,6 +58,20 @@ pub fn writeInput(
     limits: ReplayLimits,
     budget: image_attachments.CaptureBudget,
 ) !void {
+    return writeInputWithTools(writer, scratch_alloc, messages, verified_images, limits, budget, null);
+}
+
+pub fn writeInputWithTools(
+    writer: *std.Io.Writer,
+    scratch_alloc: std.mem.Allocator,
+    messages: []const types.ChatMessage,
+    verified_images: ?[]const image_attachments.VerifiedSnapshot,
+    limits: ReplayLimits,
+    budget: image_attachments.CaptureBudget,
+    current: ?[]const stream_provider.DynamicFunctionTool,
+) !void {
+    var definitions_projection = @import("deferred_definitions.zig").Projection.init(scratch_alloc);
+    defer definitions_projection.deinit();
     try budget.check();
     if (verified_images != null and (messages.len != 1 or
         messages[0].role != .user or messages[0].images.len != 0))
@@ -175,7 +189,9 @@ pub fn writeInput(
                     try writer.writeAll(",\"tools\":[");
                     const definitions = if (message.tool_result_memory) |memory| memory.loaded_tools_json else null;
                     if (definitions) |json| {
-                        const parsed = try std.json.parseFromSlice(std.json.Value, scratch_alloc, json, .{});
+                        const projected_definitions = try definitions_projection.project(scratch_alloc, json, current);
+                        defer scratch_alloc.free(projected_definitions);
+                        const parsed = try std.json.parseFromSlice(std.json.Value, scratch_alloc, projected_definitions, .{});
                         defer parsed.deinit();
                         for (parsed.value.array.items, 0..) |entry, index| {
                             if (index > 0) try writer.writeByte(',');
@@ -2843,4 +2859,29 @@ test "deferred tools preserve Responses tools and prior input bytes" {
     loaded.selected_dynamic = &.{.{ .name = "action", .description = "Changed", .input_schema = .{ .object = .empty }, .deferred = true }};
     _ = try writeTools(&after.writer, alloc, loaded);
     try std.testing.expectEqualStrings(before.written(), after.written());
+}
+
+test "deferred Responses replay declares current tool once across repeated searches" {
+    const alloc = std.testing.allocator;
+    const saved = "[{\"name\":\"action\",\"description\":\"old\",\"inputSchema\":{}},{\"name\":\"removed\",\"description\":\"removed\",\"inputSchema\":{}}]";
+    const messages = [_]types.ChatMessage{
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "s1", .name = "tool_search", .arguments_json = "{\"query\":\"notes\"}" }} },
+        .{ .role = .tool, .tool_call_id = "s1", .tool_name = "tool_search", .tool_result_memory = .{ .loaded_tools_json = saved } },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "s2", .name = "tool_search", .arguments_json = "{\"query\":\"notes\"}" }} },
+        .{ .role = .tool, .tool_call_id = "s2", .tool_name = "tool_search", .tool_result_memory = .{ .loaded_tools_json = saved } },
+    };
+    const schema = try std.json.parseFromSlice(std.json.Value, alloc, "{\"type\":\"object\",\"required\":[\"updated\"]}", .{});
+    defer schema.deinit();
+    const tools = [_]stream_provider.DynamicFunctionTool{.{ .name = "action", .description = "current", .input_schema = schema.value, .deferred = true }};
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try writeInputWithTools(&out.writer, alloc, &messages, null, ImageInputTest.limits, .{}, &tools);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "\"name\":\"action\""));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, out.written(), "\"type\":\"tool_search_output\""));
+    try std.testing.expect(std.mem.find(u8, out.written(), "updated") != null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "removed") == null);
+    try std.testing.expect(std.mem.find(u8, out.written(), "old") == null);
+    out.clearRetainingCapacity();
+    try writeInputWithTools(&out.writer, alloc, &messages, null, ImageInputTest.limits, .{}, &.{});
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, out.written(), "\"tools\":[]"));
 }

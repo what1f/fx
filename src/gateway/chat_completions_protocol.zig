@@ -543,7 +543,15 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
                 try write_user_content_parts(writer, alloc, message);
             } else {
                 const definitions = if (message.role == .tool and message.tool_result_memory != null) message.tool_result_memory.?.loaded_tools_json else null;
-                try std.json.Stringify.value(definitions orelse message.content, .{}, writer);
+                if (definitions) |saved| {
+                    var definitions_projection = @import("deferred_definitions.zig").Projection.init(alloc);
+                    defer definitions_projection.deinit();
+                    const current = try definitions_projection.project(alloc, saved, request.tools.selected_dynamic);
+                    defer alloc.free(current);
+                    try std.json.Stringify.value(current, .{}, writer);
+                } else {
+                    try std.json.Stringify.value(message.content, .{}, writer);
+                }
             }
             try write_replay(writer, alloc, message);
             if (message.role == .tool) {
@@ -2616,6 +2624,7 @@ test "deferred definitions survive ordinary tool output truncation" {
         .{ .role = .assistant, .tool_calls = &.{.{ .id = "search", .name = "tool_search", .arguments_json = "{}" }} },
         .{ .role = .tool, .tool_call_id = "search", .tool_name = "tool_search", .content = "truncated preview", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"full_definition\"}]" } },
     };
+    request.tools.selected_dynamic = &.{.{ .name = "full_definition", .description = "Full definition", .input_schema = .{ .object = .empty }, .deferred = true }};
     const body = try build_request(alloc, request, .{});
     defer alloc.free(body);
     try std.testing.expect(std.mem.find(u8, body, "full_definition") != null);
@@ -2634,4 +2643,33 @@ test "chat completions preserves cache and reasoning usage across final trailers
     try std.testing.expectEqual(@as(?u64, 64), result.completed.completion.usage.cache_read_tokens);
     try std.testing.expectEqual(@as(?u64, 16), result.completed.completion.usage.cache_write_tokens);
     try std.testing.expectEqual(@as(?u64, 4), result.completed.completion.usage.reasoning_tokens);
+}
+
+test "deferred Chat Completions replay updates schema text and removes deleted tools" {
+    const alloc = std.testing.allocator;
+    var request = test_request();
+    request.instructions = &.{};
+    request.messages = &.{
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "search", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "search", .tool_name = "tool_search", .content = "Search results", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"action\",\"description\":\"old\"},{\"name\":\"removed\"},{\"name\":\"action\"}]" } },
+    };
+    const schema = try std.json.parseFromSlice(std.json.Value, alloc, "{\"type\":\"object\",\"required\":[\"updated\"]}", .{});
+    defer schema.deinit();
+    request.tools.selected_dynamic = &.{.{ .name = "action", .description = "current", .input_schema = schema.value, .deferred = true }};
+    const body = try build_request(alloc, request, .{});
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const content = parsed.value.object.get("messages").?.array.items[1].object.get("content").?.string;
+    const definitions = try std.json.parseFromSlice(std.json.Value, alloc, content, .{});
+    defer definitions.deinit();
+    try std.testing.expectEqual(@as(usize, 1), definitions.value.array.items.len);
+    try std.testing.expect(std.mem.find(u8, content, "updated") != null);
+    try std.testing.expect(std.mem.find(u8, content, "old") == null);
+    request.tools.selected_dynamic = &.{};
+    const removed = try build_request(alloc, request, .{});
+    defer alloc.free(removed);
+    const removed_parsed = try std.json.parseFromSlice(std.json.Value, alloc, removed, .{});
+    defer removed_parsed.deinit();
+    try std.testing.expectEqualStrings("[]", removed_parsed.value.object.get("messages").?.array.items[1].object.get("content").?.string);
 }

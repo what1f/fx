@@ -58,7 +58,12 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
     var toolBytes: Data?
     var previousMessages: Data?
     func resetPrefix() { previousMessages = nil }
-    func update(key: String, removed: Bool = false) { self.key = key; self.removed = removed }
+    func update(key: String, removed: Bool = false) {
+        // Schema replacement and removal rewrite the original discovery record
+        // in the outgoing request. Only unchanged catalogs preserve the prefix.
+        if self.key != key || self.removed != removed { previousMessages = nil }
+        self.key = key; self.removed = removed
+    }
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         let body = try JSONDecoder().decode(JSONValue.self, from: request.httpBody ?? Data())
         guard case .array(let messages) = body["messages"] else { throw RuntimeCatalogProbeError.failed("Missing messages") }

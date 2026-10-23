@@ -116,9 +116,9 @@ actor State {
 
 @main struct Acceptance {
     static func main() async {
-        let key = ProcessInfo.processInfo.environment["DEEPSEEK_API_KEY"] ?? ""
+        let key = (ProcessInfo.processInfo.environment["DORA_TEST_DEEPSEEK_KEY"] ?? ProcessInfo.processInfo.environment["DEEPSEEK_API_KEY"]) ?? ""
         do {
-            try require(!key.isEmpty, "Set DEEPSEEK_API_KEY in the process environment")
+            try require(!key.isEmpty, "Set DORA_TEST_DEEPSEEK_KEY in the process environment")
             let kind = CommandLine.arguments.dropFirst().first ?? "responses"
             let api: FxCustomProvider.APIProtocol = kind == "messages" ? .anthropicMessages : kind == "chat" ? .chatCompletions : .responses
             let base = kind == "messages" ? "https://api.deepseek.com/anthropic/v1" : "https://api.deepseek.com/v1"

@@ -12,7 +12,7 @@ match = re.search(r'ANTHROPIC_AUTH_TOKEN="([^"\n]+)"', source)
 if not match:
     sys.exit('No credential found in dcc')
 environment = os.environ.copy()
-environment['DEEPSEEK_API_KEY'] = match[1]
+environment['DORA_TEST_DEEPSEEK_KEY'] = match[1]
 environment['FX_SOUND'] = '0'
 for name in ('FX_DEBUG', 'FX_DEBUG_TRACE', 'FX_DEBUG_RECORD', 'FX_RECORD',
              'FX_TRACE', 'FX_TRACE_LOG', 'FX_TRACE_STDERR', 'FX_RESPONSES_DIAGNOSTICS'):

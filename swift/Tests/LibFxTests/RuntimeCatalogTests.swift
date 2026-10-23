@@ -145,9 +145,22 @@ private func drainCatalogTurn(_ turn: FxTurn) async throws {
     let raw = await http.rawPosts
     let tools = try catalogRawArray("tools", in: raw[0])
     for body in raw { let value = try catalogRawArray("tools", in: body); if value != tools { catalogDiagnose(tools, value) }; #expect(value == tools) }
-    for index in 1..<raw.count {
+    // Catalog mutations rewrite prior declarations so the provider sees the
+    // current schema once. An unchanged catalog retains its input prefix.
+    for index in [1, 2, 4, 6, 8] {
         let prefix = try catalogRawArray("input", in: raw[index - 1])
         #expect(try catalogRawArray("input", in: raw[index]).starts(with: prefix.dropLast()))
+    }
+    for (index, body) in final.enumerated() {
+        guard case .array(let input) = body["input"] else { Issue.record("Missing input"); continue }
+        let definitions = input.flatMap { item -> [JSONValue] in
+            guard case .array(let tools) = item["tools"] else { return [] }
+            return tools
+        }.filter { $0["name"] == .string("action_42") }
+        #expect(definitions.count == (index == 0 || index >= 7 ? 0 : 1))
+        if index >= 3 && index < 7 {
+            #expect(definitions.first?["parameters"]?["required"] == .array([.string("updated")]))
+        }
     }
     try await restored.close()
 }
@@ -273,4 +286,34 @@ private actor MessagesCatalogHTTP: FxHTTPClient {
         let prefix = try catalogRawArray("messages", in: requests[earlier])
         let current = try catalogRawArray("messages", in: requests[later]); if !current.starts(with: prefix.dropLast()) { catalogDiagnose(Data(prefix.dropLast()), current) }; #expect(current.starts(with: prefix.dropLast()))
     }
+}
+
+@Test func runtimeCatalogRepeatedBroadSearchDeclaresEachNameOnce() async throws {
+    let calls = CatalogCalls()
+    let http = CatalogHTTP(actions: [
+        ("tool_search", .object(["query": .string("notes")])),
+        ("tool_search", .object(["query": .string("notes")])),
+        ("notes_read", .object(["value": .string("read")])), nil,
+    ], codex: true)
+    let credentials = try FxSubscriptionCredentials(accessToken: "fixture-token", accountID: "fixture-account", expiresAt: Date().addingTimeInterval(3600))
+    let config = FxConfiguration(provider: .subscription(FxSubscription(provider: .codex, credentials: { _ in credentials })), model: FxModel(id: "gpt-6.1-sol"), tools: [catalogTool("notes_read", calls: calls), catalogTool("notes_write", calls: calls)], httpClient: http)
+    let engine = try await FxEngine.open(configuration: config)
+    try await drainCatalogTurn(try await engine.prompt("Find notes tools twice and read"))
+    let requests = await http.posts
+    #expect(requests.count == 4)
+    for (index, body) in requests.enumerated() {
+        guard case .array(let input) = body["input"] else { Issue.record("Missing input"); continue }
+        let names = input.flatMap { item -> [JSONValue] in
+            guard case .array(let tools) = item["tools"] else { return [] }
+            return tools.compactMap { $0["name"] }
+        }
+        #expect(Set(names.map { String(describing: $0) }).count == names.count)
+        #expect(names.count == (index == 0 ? 0 : 2))
+        if index > 0 {
+            #expect(names.contains(.string("notes_read")))
+            #expect(names.contains(.string("notes_write")))
+        }
+    }
+    #expect(await calls.inputs == [.object(["value": .string("read")])])
+    try await engine.close()
 }

@@ -99,6 +99,8 @@ These operations require an idle agent. `upsertTools` replaces the current schem
 
 Catalog changes and appended context are persisted as reminders at the end of the conversation. Open with the current plugin definitions and closures after restart. The journal preserves conversation and discovery state; it does not install plugins or serialize closures. After compaction, the core reinserts the current catalog.
 
+Repeated searches can return the same matches. Each native request declares a tool name once, at its first discovery position, using its current schema. Updated schemas replace prior declarations in the outgoing request, and removed tools are omitted. This can invalidate the cache prefix from that position. The persisted discovery record stays unchanged. Chat Completions and Messages `.callAction` search results also use current schemas.
+
 Responses carries discovered definitions in `tool_search_output`. Messages in `.native` mode uses inline `tool_addition` blocks and a fixed deferred placeholder, following pi. Messages in `.callAction` mode returns definitions as tool-result text and routes calls through `call_action`, using the same current-schema validation and approval wrapper. Chat Completions uses fixed `tool_search` and `call_action` functions. Service support must be verified for each endpoint; see [the local acceptance record](DORA-VALIDATION.md).
 
 ## Show events and handle approval
