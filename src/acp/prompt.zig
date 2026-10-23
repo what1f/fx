@@ -1098,6 +1098,7 @@ pub fn handlePrompt(
     for (state.context_snapshot.notices) |notice| try pushContextNotice(@ptrCast(&ctx), notice);
 
     session.session_rt.setConversationLanguageFromUserMessage(owned_prompt);
+    try server.ensureCatalogReminder(state, session);
     const context_history = try session.session_rt.snapshotHistory(alloc);
     defer types.freeHistoryTurnSlice(alloc, context_history);
     var context_snapshot = try state.context_snapshot.dupe(alloc);
@@ -1144,7 +1145,6 @@ pub fn handlePrompt(
     const deps = agentRuntimeDeps(&ctx);
     var dynamic_tool_arena = std.heap.ArenaAllocator.init(alloc);
     defer dynamic_tool_arena.deinit();
-    try server.ensureCatalogReminder(state, session);
     const initial_dynamic_tools = try initialDynamicTools(&ctx, dynamic_tool_arena.allocator());
     var agent_config = buildAgentConfig(state, session, .{
         .skill_catalog = .{ .skills = skill_catalog.items, .diagnostics = skill_catalog.diagnostics },

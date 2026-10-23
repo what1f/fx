@@ -137,7 +137,7 @@ private func drainCatalogTurn(_ turn: FxTurn) async throws {
     #expect(final[5]["tools"] == before[1]["tools"])
     let raw = await http.rawPosts
     let tools = try catalogRawArray("tools", in: raw[0])
-    for body in raw { #expect(try catalogRawArray("tools", in: body) == tools) }
+    for body in raw { let value = try catalogRawArray("tools", in: body); if value != tools { catalogDiagnose(tools, value) }; #expect(value == tools) }
     let prefix = try catalogRawArray("input", in: raw[0])
     #expect(try catalogRawArray("input", in: raw[2]).starts(with: prefix.dropLast()))
     try await restored.close()
@@ -262,6 +262,6 @@ private actor MessagesCatalogHTTP: FxHTTPClient {
     #expect(String(decoding: requests[1], as: UTF8.self).contains("tool_addition"))
     for (earlier, later) in [(2, 3), (5, 6)] {
         let prefix = try catalogRawArray("messages", in: requests[earlier])
-        #expect(try catalogRawArray("messages", in: requests[later]).starts(with: prefix.dropLast()))
+        let current = try catalogRawArray("messages", in: requests[later]); if !current.starts(with: prefix.dropLast()) { catalogDiagnose(Data(prefix.dropLast()), current) }; #expect(current.starts(with: prefix.dropLast()))
     }
 }

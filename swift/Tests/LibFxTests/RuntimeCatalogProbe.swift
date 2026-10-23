@@ -12,9 +12,20 @@ private actor RuntimeProbeCalls {
 func catalogRawArray(_ key: String, in data: Data) throws -> Data {
     let bytes = Array(data)
     let marker = Array("\"\(key)\":[".utf8)
-    guard let start = bytes.indices.first(where: { $0 + marker.count <= bytes.count && Array(bytes[$0..<($0 + marker.count)]) == marker }) else {
-        throw RuntimeCatalogProbeError.failed("Missing raw array: \(key)")
+    var level = 0, inString = false, escape = false
+    var found: Int?
+    for index in bytes.indices {
+        let byte = bytes[index]
+        if inString {
+            if escape { escape = false } else if byte == 92 { escape = true } else if byte == 34 { inString = false }
+        } else {
+            if level == 1 && index + marker.count <= bytes.count && Array(bytes[index..<(index + marker.count)]) == marker { found = index; break }
+            if byte == 34 { inString = true }
+            else if byte == 91 || byte == 123 { level += 1 }
+            else if byte == 93 || byte == 125 { level -= 1 }
+        }
     }
+    guard let start = found else { throw RuntimeCatalogProbeError.failed("Missing raw array: \(key)") }
     let begin = start + marker.count - 1
     var depth = 0, quoted = false, escaped = false
     for index in begin..<bytes.count {
@@ -29,6 +40,12 @@ func catalogRawArray(_ key: String, in data: Data) throws -> Data {
         }
     }
     throw RuntimeCatalogProbeError.failed("Unterminated raw array")
+}
+
+func catalogDiagnose(_ before: Data, _ after: Data) {
+    let a = Array(before), b = Array(after)
+    let i = zip(a,b).enumerated().first(where: { $0.element.0 != $0.element.1 })?.offset ?? min(a.count,b.count)
+    print("WIRE DIFF", i, "BEFORE", String(decoding: a[max(0,i-80)..<min(a.count,i+240)], as: UTF8.self), "AFTER", String(decoding: b[max(0,i-80)..<min(b.count,i+240)], as: UTF8.self))
 }
 
 private actor RuntimeProbeHTTP: FxHTTPClient {
@@ -68,7 +85,7 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
             toolBytes = rawTools
             let rawMessages = try catalogRawArray("messages", in: request.httpBody!)
             if let previousMessages {
-                guard rawMessages.starts(with: previousMessages.dropLast()) else { throw RuntimeCatalogProbeError.failed("Prior message bytes changed") }
+                guard rawMessages.starts(with: previousMessages.dropLast()) else { catalogDiagnose(Data(previousMessages.dropLast()), rawMessages); throw RuntimeCatalogProbeError.failed("Prior message bytes changed") }
             }
             previousMessages = rawMessages
             conversations += 1
@@ -125,7 +142,7 @@ func runRuntimeCatalogProbe() async throws -> Int {
         ]), isIdempotent: true, deferred: true) { input, _ in await calls.record(input); return "called" }
     }
     func config(_ tools: [FxTool]) -> FxConfiguration {
-        var configuration = FxConfiguration(provider: .custom(provider), model: "small", tools: [FxTool(name: "resident", description: "Always available", inputSchema: .object(["type": .string("object")])) { _, _ in "resident" }] + tools, workspace: directory,
+        var configuration = FxConfiguration(provider: .custom(provider), model: "small", tools: [FxTool(name: "resident", description: "Always available", inputSchema: .object(["type": .string("object")]), isIdempotent: true) { _, _ in "resident" }] + tools, workspace: directory,
             httpClient: http, checkpointAfterBytes: nil)
         configuration.toolSearchEnabled = true
         return configuration
