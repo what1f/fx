@@ -40,6 +40,7 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
     var requests: [JSONValue] = []
     var toolBytes: Data?
     var previousMessages: Data?
+    func resetPrefix() { previousMessages = nil }
     func update(key: String, removed: Bool = false) { self.key = key; self.removed = removed }
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         let body = try JSONDecoder().decode(JSONValue.self, from: request.httpBody ?? Data())
@@ -54,6 +55,7 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
         let delta: JSONValue
         var reason = "stop"
         if summary {
+            previousMessages = nil
             summaries += 1
             let headings = text.split(separator: "\n").filter { $0.hasPrefix("Turn ") && $0.contains(" (") }
             let notes = headings.map { "\($0)\nIn between: catalog probe used the action." }.joined(separator: "\n\n")
@@ -65,8 +67,8 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
             if let toolBytes, toolBytes != rawTools { throw RuntimeCatalogProbeError.failed("Tool bytes changed") }
             toolBytes = rawTools
             let rawMessages = try catalogRawArray("messages", in: request.httpBody!)
-            if messages.last?["role"] == .string("tool"), let previousMessages {
-                guard rawMessages.starts(with: previousMessages.dropLast()) else { throw RuntimeCatalogProbeError.failed("Prior message bytes changed after loading") }
+            if let previousMessages {
+                guard rawMessages.starts(with: previousMessages.dropLast()) else { throw RuntimeCatalogProbeError.failed("Prior message bytes changed") }
             }
             previousMessages = rawMessages
             conversations += 1
@@ -168,14 +170,17 @@ func runRuntimeCatalogProbe() async throws -> Int {
         let removedCheckpoint = try await reopened.checkpoint()
         try await reopened.close()
         try await reopenedStore.close()
+        await http.resetPrefix()
         let restored = try await FxEngine.open(configuration: config([tool("updated")]), checkpoint: checkpoint)
         try await prompt(restored)
         try require(await calls.values.count == count + 1, "Checkpoint did not restore current action")
         try await restored.close()
+        await http.resetPrefix()
         let deleted = try await FxEngine.open(configuration: config([]), checkpoint: removedCheckpoint)
         try await prompt(deleted)
         try require(await calls.values.count == count + 1, "Deleted checkpoint action executed")
         try await deleted.close()
+        await http.resetPrefix()
         let deletedStore = try FxSQLitePersistence(url: database)
         let deletedJournal = try await FxEngine.open(configuration: config([]), persistence: deletedStore)
         try await prompt(deletedJournal)

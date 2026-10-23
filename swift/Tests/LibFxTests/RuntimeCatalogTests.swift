@@ -260,4 +260,8 @@ private actor MessagesCatalogHTTP: FxHTTPClient {
     let initial = try catalogRawArray("messages", in: requests[0])
     #expect(try catalogRawArray("messages", in: requests[2]).starts(with: initial.dropLast()))
     #expect(String(decoding: requests[1], as: UTF8.self).contains("tool_addition"))
+    for (earlier, later) in [(2, 3), (5, 6)] {
+        let prefix = try catalogRawArray("messages", in: requests[earlier])
+        #expect(try catalogRawArray("messages", in: requests[later]).starts(with: prefix.dropLast()))
+    }
 }
