@@ -140,6 +140,7 @@ pub const StructuredResponseFormat = struct {
 };
 
 pub const DynamicFunctionTool = struct {
+    deferred: bool = false,
     name: []const u8,
     description: []const u8,
     input_schema: std.json.Value,

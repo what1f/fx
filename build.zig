@@ -80,6 +80,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const exe_tests = b.addTest(.{
+        .filters = if (b.option([]const u8, "test-filter", "Run matching unit tests")) |filter| &.{filter} else &.{},
         .root_module = exe.root_module,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
@@ -104,6 +105,8 @@ pub fn build(b: *std.Build) void {
     session_manager_test_step.dependOn(&run_session_manager_tests.step);
     session_manager_test_step.dependOn(&run_session_manager_hook_tests.step);
 
+    const focused_test_step = b.step("test-focused", "Run filtered runtime tests");
+    focused_test_step.dependOn(&run_exe_tests.step);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_session_manager_tests.step);

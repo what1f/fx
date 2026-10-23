@@ -73,7 +73,7 @@ pub const Runtime = struct {
             std.json.Stringify.value(entry, .{}, &out.writer) catch return error.OutOfMemory;
             owned.* = std.json.parseFromSliceLeaky(std.json.Value, alloc, out.written(), .{}) catch return error.InvalidHostTool;
         }
-        const tools = try alloc.alloc(tool_dispatch.Tool, tools_value.array.items.len + 1);
+        const tools = try alloc.alloc(tool_dispatch.Tool, tools_value.array.items.len + 2);
         const order = try alloc.alloc([]const u8, tools.len);
         const deferred = try alloc.alloc(bool, tools_value.array.items.len);
         const loaded = try alloc.alloc(bool, tools_value.array.items.len);
@@ -85,7 +85,7 @@ pub const Runtime = struct {
         for (descriptors, 0..) |entry, index| {
             const name_value = entry.object.get("name") orelse return error.InvalidHostTool;
             if (name_value != .string) return error.InvalidHostTool;
-            if (std.mem.eql(u8, name_value.string, "tool_search") or !validName(name_value.string)) return error.InvalidHostToolName;
+            if (std.mem.eql(u8, name_value.string, "tool_search") or std.mem.eql(u8, name_value.string, "call_action") or !validName(name_value.string)) return error.InvalidHostToolName;
             for (order[0..index]) |prior| {
                 if (std.mem.eql(u8, prior, name_value.string)) {
                     return error.DuplicateHostToolName;
@@ -148,6 +148,7 @@ pub const Runtime = struct {
 
             order[index] = name;
             dynamic_tools[dynamic_index] = .{
+                .deferred = deferred[index],
                 .name = name,
                 .description = description,
                 .input_schema = schema,
@@ -175,9 +176,11 @@ pub const Runtime = struct {
         for (deferred) |flag| if (!flag) {
             direct_count += 1;
         };
-        if (direct_count + @as(usize, if (std.mem.findScalar(bool, deferred, true) != null) 1 else 0) > max_tools) return error.TooManyHostTools;
+        if (direct_count + @as(usize, if (std.mem.findScalar(bool, deferred, true) != null) 2 else 0) > max_tools) return error.TooManyHostTools;
+        tools[tools.len - 2] = call_action_tool;
         tools[tools.len - 1] = search_tool;
         tools[tools.len - 1].model_visible = std.mem.findScalar(bool, deferred, true) != null;
+        order[order.len - 2] = call_action_tool.name;
         order[order.len - 1] = search_tool.name;
         var visible: std.ArrayList(stream_provider.DynamicFunctionTool) = .empty;
         for (dynamic_tools) |definition| {
@@ -189,8 +192,8 @@ pub const Runtime = struct {
         return .{
             .backing = backing,
             .arena = arena,
-            .tools = if (tools[tools.len - 1].model_visible) tools else tools[0 .. tools.len - 1],
-            .order = if (tools[tools.len - 1].model_visible) order else order[0 .. order.len - 1],
+            .tools = if (tools[tools.len - 1].model_visible) tools else tools[0 .. tools.len - 2],
+            .order = if (tools[tools.len - 1].model_visible) order else order[0 .. order.len - 2],
             .search_enabled = tools[tools.len - 1].model_visible,
             .dynamic_tools = try visible.toOwnedSlice(alloc),
             .definitions = dynamic_tools,
@@ -202,8 +205,8 @@ pub const Runtime = struct {
 
     pub fn enableSearch(self: *Runtime) void {
         if (self.search_enabled or self.arena == null) return;
-        self.tools = self.tools.ptr[0 .. self.tools.len + 1];
-        self.order = self.order.ptr[0 .. self.order.len + 1];
+        self.tools = self.tools.ptr[0 .. self.tools.len + 2];
+        self.order = self.order.ptr[0 .. self.order.len + 2];
         @constCast(&self.tools[self.tools.len - 1]).model_visible = true;
         self.search_enabled = true;
     }
@@ -239,8 +242,8 @@ pub const Runtime = struct {
     }
 
     pub fn validateActiveBudget(self: *const Runtime) !void {
-        var count: usize = if (self.search_enabled) 1 else 0;
-        for (self.loaded, self.deferred) |loaded, deferred| if (loaded or !deferred) {
+        var count: usize = if (self.search_enabled) 2 else 0;
+        for (self.deferred) |deferred| if (!deferred) {
             count += 1;
         };
         if (count > max_tools) return error.TooManyHostTools;
@@ -267,7 +270,9 @@ pub const Runtime = struct {
         if (parsed.value != .object) return error.InvalidToolArguments;
         const query = parsed.value.object.get("query") orelse return error.InvalidToolArguments;
         if (query != .string or query.string.len == 0) return error.InvalidToolArguments;
-        var prepared = lexical.prepare(query.string) catch return error.InvalidToolArguments;
+        const exact = std.mem.startsWith(u8, query.string, "select:");
+        const search_query = if (exact) query.string[7..] else query.string;
+        var prepared = lexical.prepare(search_query) catch return error.InvalidToolArguments;
         const limit: usize = if (parsed.value.object.get("limit")) |v| if (v == .integer and v.integer >= 1 and v.integer <= 20) @intCast(v.integer) else return error.InvalidToolArguments else 5;
         const docs = try ctx.allocator.alloc(retrieval.Document, self.definitions.len);
         defer ctx.allocator.free(docs);
@@ -282,30 +287,31 @@ pub const Runtime = struct {
         defer output.deinit();
         var additions: std.Io.Writer.Allocating = .init(ctx.allocator);
         defer additions.deinit();
-        output.writer.writeAll("Loaded tools:") catch return error.OutOfMemory;
+        output.writer.writeAll("Definitions (use call_action with name and args on Chat Completions):") catch return error.OutOfMemory;
         additions.writer.writeByte('[') catch return error.OutOfMemory;
         var count: usize = 0;
         for (page.matches) |match| {
             const definition = self.definitions[match.document_index];
+            if (exact and !std.mem.eql(u8, definition.name, search_query)) continue;
             for (self.descriptors, 0..) |entry, index| {
                 if (!std.mem.eql(u8, definition.name, entry.object.get("name").?.string) or !self.deferred[index]) continue;
-                if (self.loaded[index]) continue;
+
                 var schema: std.Io.Writer.Allocating = .init(ctx.allocator);
                 defer schema.deinit();
                 std.json.Stringify.value(entry, .{}, &schema.writer) catch return error.OutOfMemory;
-                if (additions.written().len + schema.written().len + @as(usize, if (count > 0) 1 else 0) + 1 > 64 * 1024) return .{ .failure = try ctx.allocator.dupe(u8, "Selected tool definitions exceed the 65536 byte limit") };
+                if (additions.written().len + schema.written().len + @as(usize, if (count > 0) 2 else 0) + 1 > 64 * 1024) return .{ .failure = try ctx.allocator.dupe(u8, "Selected tool definitions exceed the 65536 byte limit") };
                 if (count > 0) additions.writer.writeByte(',') catch return error.OutOfMemory;
                 additions.writer.writeAll(schema.written()) catch return error.OutOfMemory;
-                output.writer.print("\n{s}", .{definition.name}) catch return error.OutOfMemory;
+                output.writer.print("\n{s}", .{schema.written()}) catch return error.OutOfMemory;
                 count += 1;
             }
         }
         additions.writer.writeByte(']') catch return error.OutOfMemory;
-        var loaded_count: usize = if (self.search_enabled) 1 else 0;
+        var loaded_count: usize = if (self.search_enabled) 2 else 0;
         for (self.loaded, self.deferred) |flag, deferred| if (flag or !deferred) {
             loaded_count += 1;
         };
-        if (loaded_count + count > max_tools) return .{ .failure = try ctx.allocator.dupe(u8, "Too many loaded tools") };
+        if (loaded_count + count > max_catalog_tools) return .{ .failure = try ctx.allocator.dupe(u8, "Too many loaded tools") };
         // Validate and allocate the complete result before activating any tool.
         const schemas = try additions.toOwnedSlice();
         const text = try output.toOwnedSlice();
@@ -363,7 +369,7 @@ const RawInput = struct {
 fn validName(name: []const u8) bool {
     if (name.len == 0 or name.len > max_name_bytes) return false;
     for (name) |byte| switch (byte) {
-        'a'...'z', 'A'...'Z', '0'...'9', '_', '-' => {},
+        'a'...'z', 'A'...'Z', '0'...'9', '_', '-', '.' => {},
         else => return false,
     };
     return true;
@@ -412,6 +418,22 @@ fn call(
         const catalog = ctx.host_tool_catalog orelse return error.InvalidToolArguments;
         return catalog.search(ctx, input.as(RawInput).json);
     }
+    if (std.mem.eql(u8, ctx.tool_call_name, "call_action")) {
+        const catalog = ctx.host_tool_catalog orelse return error.InvalidToolArguments;
+        const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, input.as(RawInput).json, .{}) catch return error.InvalidToolArguments;
+        defer parsed.deinit();
+        const name = parsed.value.object.get("name") orelse return error.InvalidToolArguments;
+        const args = parsed.value.object.get("args") orelse return error.InvalidToolArguments;
+        if (name != .string or args != .object) return error.InvalidToolArguments;
+        for (catalog.descriptors, 0..) |entry, index| {
+            if (!catalog.deferred[index] or !std.mem.eql(u8, entry.object.get("name").?.string, name.string)) continue;
+            if (!catalog.loaded[index]) return .{ .failure = try ctx.allocator.dupe(u8, "Fetch the action definition with tool_search before calling it") };
+            const json = std.json.Stringify.valueAlloc(ctx.allocator, args, .{}) catch return error.OutOfMemory;
+            defer ctx.allocator.free(json);
+            return provider.call(ctx.allocator, name.string, ctx.tool_call_id, json, ctx.max_tool_result_bytes, ctx.cancel_flag);
+        }
+        return .{ .failure = try ctx.allocator.dupe(u8, "Action is no longer available") };
+    }
     return provider.call(
         ctx.allocator,
         ctx.tool_call_name,
@@ -421,6 +443,18 @@ fn call(
         ctx.cancel_flag,
     );
 }
+
+const call_action_tool: tool_dispatch.Tool = .{
+    .name = "call_action",
+    .description = "Call an action after fetching its definition with tool_search.",
+    .model_schema = .{ .name = "call_action", .description = "Call an action after fetching its definition with tool_search.", .input_schema = .{ .properties = &.{ .{ .name = "name", .json_type = .string }, .{ .name = "args", .json_type = .object } }, .required = &.{ "name", "args" } } },
+    .executor_kind = .host,
+    .activity_kind = .command,
+    .decode = decode,
+    .call = call,
+    .reads_only_fn = readsOnly,
+    .irreversible_fn = irreversible,
+};
 
 const search_tool: tool_dispatch.Tool = .{
     .name = "tool_search",

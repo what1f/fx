@@ -124,6 +124,7 @@ fn select_functions(alloc: Allocator, tools: stream_provider.ToolSelection, choi
     }
     var schema_budget: SchemaBudget = .{};
     for (tools.selected_dynamic) |function| {
+        if (function.deferred) continue;
         if (contains_name(tools.advertised_names, function.name)) continue;
         if (function.input_schema != .object) return error.InvalidToolSchema;
         try validate_dynamic_schema(function.input_schema, 0, &schema_budget);
@@ -2580,4 +2581,21 @@ test "chat completions prose resembling a call stays prose and cancellation afte
     try test_accept(&cancelled, test_stop);
     try test_accept(&cancelled, "[DONE]");
     try std.testing.expectError(error.Cancelled, cancelled.finish(true));
+}
+
+test "deferred tools preserve Chat Completions request bytes" {
+    const alloc = std.testing.allocator;
+    var request = test_tool_request();
+    const before = try build_request(alloc, request, .{});
+    defer alloc.free(before);
+    const schema: std.json.ObjectMap = .empty;
+    const definition: stream_provider.DynamicFunctionTool = .{ .name = "plugin.action", .description = "changed", .input_schema = .{ .object = schema }, .deferred = true };
+    request.tools.selected_dynamic = &.{definition};
+    const after = try build_request(alloc, request, .{});
+    defer alloc.free(after);
+    try std.testing.expectEqualStrings(before, after);
+    request.tools.selected_dynamic = &.{};
+    const removed = try build_request(alloc, request, .{});
+    defer alloc.free(removed);
+    try std.testing.expectEqualStrings(before, removed);
 }

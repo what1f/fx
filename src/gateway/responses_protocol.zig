@@ -664,6 +664,7 @@ pub fn writeTools(
         count += 1;
     }
     for (tools.selected_dynamic) |tool| {
+        if (tool.deferred) continue;
         if (containsName(tools.advertised_names, tool.name)) continue;
         if (count > 0) try out.writer.writeByte(',');
         try writeFunctionTool(
