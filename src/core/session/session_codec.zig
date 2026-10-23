@@ -5354,6 +5354,7 @@ fn expectPermissionStateEqual(
 fn expectHistoryTurnEqual(expected: session.HistoryTurn, actual: session.HistoryTurn) !void {
     try std.testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(actual));
     switch (expected) {
+        .host_context => |text| try std.testing.expectEqualStrings(text, actual.host_context),
         .compacted_summary => |entry| {
             try std.testing.expectEqualSlices(u8, entry.summary, actual.compacted_summary.summary);
             try std.testing.expectEqual(entry.removed_turn_count, actual.compacted_summary.removed_turn_count);

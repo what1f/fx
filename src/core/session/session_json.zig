@@ -82,6 +82,11 @@ pub noinline fn renderSessionJson(
 
 fn writeHistoryTurnJson(writer: *std.Io.Writer, turn: session.HistoryTurn) !void {
     switch (turn) {
+        .host_context => |text| {
+            try writer.writeAll("{\"kind\":\"host_context\",\"text\":");
+            try std.json.Stringify.value(text, .{}, writer);
+            try writer.writeByte('}');
+        },
         .compacted_summary => |entry| {
             try writer.writeAll("{\"kind\":\"compacted_summary\",\"summary\":");
             try std.json.Stringify.value(entry.summary, .{}, writer);
@@ -473,6 +478,10 @@ fn parseLegacyHistoryTurn(alloc: Allocator, value: std.json.Value) !session.Hist
     const object = try requireObject(value);
     const kind = try requireString(object, "kind");
 
+    if (std.mem.eql(u8, kind, "host_context")) {
+        const text = try requireString(object, "text");
+        return .{ .host_context = try alloc.dupe(u8, text) };
+    }
     if (std.mem.eql(u8, kind, "compacted_summary")) {
         const root_user_messages: [][]u8 = if (object.get("root_user_messages")) |messages_value| blk: {
             if (messages_value != .array) return error.InvalidSessionFormat;
@@ -2143,4 +2152,15 @@ test {
     _ = @import("session_codec.zig");
     _ = @import("session_event.zig");
     _ = @import("session_projection.zig");
+}
+
+test "session JSON round trips appended host context as a separate history kind" {
+    const alloc = std.testing.allocator;
+    const history = [_]session.HistoryTurn{.{ .host_context = @constCast("preference reminder") }};
+    const json = try renderSessionJson(alloc, "host-reminder", 1, 2, session.ConversationLanguage.literal("en"), "/tmp/workspace", &history, .{});
+    defer alloc.free(json);
+    var restored = try parseStoredSession(TestStoredSession, alloc, json);
+    defer restored.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), restored.history.len);
+    try std.testing.expectEqualStrings("preference reminder", restored.history[0].host_context);
 }

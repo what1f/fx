@@ -78,6 +78,31 @@ private actor AgentBlockingTool {
 }
 
 @Suite(.serialized, .timeLimit(.minutes(1))) struct AgentNativeTests {
+    @Test func catalogAndContextUseAgentEntryPointAndPersistBeforeClose() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("agent-catalog-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = directory.appendingPathComponent("conversation.sqlite")
+        let http = AgentHTTP()
+        var configuration = try agentConfiguration(http, workspace: directory)
+        configuration.toolSearchEnabled = true
+        let agent = try await Agent.open(configuration: configuration, persistenceURL: database, builtInTools: [])
+        let deferred = FxTool(name: "catalog_note", description: "Catalog note", inputSchema: .object(["type": .string("object")]), isIdempotent: true, deferred: true) { _, _ in "value" }
+        try await agent.upsertTools([deferred])
+        try await agent.removeTools(named: [deferred.name])
+        try await agent.appendContext("PERSISTED_AGENT_REMINDER")
+        try await agent.close()
+        let restored = try await Agent.open(configuration: configuration, persistenceURL: database, builtInTools: [])
+        _ = try await finishAgentTurn(try await restored.prompt("continue"))
+        try await restored.close()
+        let request = try #require(await http.requests.last)
+        let encoded = String(decoding: try JSONEncoder().encode(request), as: UTF8.self)
+        #expect(encoded.contains("PERSISTED_AGENT_REMINDER"))
+        await #expect(throws: FxError.closed) { try await restored.appendContext("closed") }
+        await #expect(throws: FxError.closed) { try await restored.upsertTools([deferred]) }
+        await #expect(throws: FxError.closed) { try await restored.removeTools(named: [deferred.name]) }
+    }
+
     @Test func sqliteReopenContinuesActualNativeConversation() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

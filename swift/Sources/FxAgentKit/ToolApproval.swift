@@ -48,7 +48,7 @@ public actor FxToolApproval {
     /// Preserves the tool's descriptor and calls its implementation once after approval.
     public nonisolated func wrap(tool: FxTool, pluginID: String, effect: FxToolEffect) -> FxTool {
         FxTool(name: tool.name, description: tool.description, inputSchema: tool.inputSchema,
-               isIdempotent: tool.isIdempotent, writes: tool.writes) { input, context in
+               isIdempotent: tool.isIdempotent, writes: tool.writes, deferred: tool.deferred) { input, context in
             try await self.authorize(Request(pluginID: pluginID, toolName: tool.name,
                                              input: input, context: context, effect: effect))
             try Task.checkCancellation()

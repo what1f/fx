@@ -47,6 +47,23 @@ public actor Agent {
         return try await engine.prompt(content, id: id)
     }
 
+    /// Adds or replaces deferred definitions while the conversation is idle.
+    public func upsertTools(_ tools: [FxTool]) async throws {
+        guard closingTask == nil else { throw FxError.closed }
+        try await engine.upsertTools(tools)
+    }
+
+    public func removeTools(named names: [String]) async throws {
+        guard closingTask == nil else { throw FxError.closed }
+        try await engine.removeTools(named: names)
+    }
+
+    /// Persists a reminder at the end of the conversation.
+    public func appendContext(_ text: String) async throws {
+        guard closingTask == nil else { throw FxError.closed }
+        try await engine.appendContext(text)
+    }
+
     /// Restores unfinished work using LibFx's existing recovery rules.
     public func resume() async throws -> FxTurn? {
         guard closingTask == nil else { throw FxError.closed }

@@ -17,6 +17,7 @@ const types = @import("../core/shared/types.zig");
 const model_provider = @import("../core/config/model_provider.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
 const sse = @import("sse.zig");
+const responses = @import("configured_responses.zig");
 const anthropic = @import("anthropic_protocol.zig");
 
 const Allocator = std.mem.Allocator;
@@ -25,7 +26,7 @@ const Allocator = std.mem.Allocator;
 pub fn bundle(definition: *const definitions.Definition) provider_set.Bundle {
     const context: *anyopaque = @ptrCast(@constCast(definition));
     return .{
-        .agent_stream = .{ .context = context, .stream_fn = stream, .build_request_fn = build, .project_replay_fn = project_replay },
+        .agent_stream = .{ .context = context, .stream_fn = stream, .build_request_fn = build, .project_replay_fn = if (definition.protocol == .@"openai-responses") @import("responses_protocol.zig").selectReplayParts else project_replay },
         .model_catalog = model_catalog_provider(definition),
         .cli_model_catalog = .{ .context = context, .fetch_fn = fetch_cli_catalog },
         .permission_reviewer = .{ .context = context, .review_fn = review },
@@ -56,7 +57,8 @@ fn build(raw: ?*anyopaque, alloc: Allocator, request: streams.RequestData) ![]u8
 /// The request body for `definition`, omitting replay parts recorded for
 /// another endpoint. Caller owns the result.
 pub fn build_for(definition: *const definitions.Definition, alloc: Allocator, request: streams.RequestData) ![]u8 {
-    if (definition.protocol == .@"anthropic-messages") return anthropic.build(alloc, request);
+    if (definition.protocol == .@"anthropic-messages") return anthropic.buildConfigured(alloc, request, bound_identity(definition), definition.deferred_tool_mode);
+    if (definition.protocol == .@"openai-responses") return responses.build(alloc, request, bound_identity(definition));
     const identity = bound_identity(definition);
     for (request.messages) |message| if (message.provider_replay) |replay| {
         if (!replay.matches(.{ .provider = identity, .model = request.model })) {
@@ -212,7 +214,7 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
 
         return .{ .failed = .{ .kind = failure_kind(response.head.status), .detail = detail, .retry_after_seconds = retry_after, .ownership = .owned } };
     }
-    var result = (if (definition.protocol == .@"anthropic-messages") anthropic.consume(alloc, reader, request, watch.progress()) else consume(alloc, reader, request, watch.progress())) catch |err| return watch.failure(err);
+    var result = (if (definition.protocol == .@"anthropic-messages") anthropic.consume(alloc, reader, request, watch.progress()) else if (definition.protocol == .@"openai-responses") responses.consume(alloc, request, reader, watch.progress()) else consume(alloc, reader, request, watch.progress())) catch |err| return watch.failure(err);
     if (watch.finish()) |err| {
         result.deinit(alloc);
         return err;

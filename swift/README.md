@@ -135,7 +135,7 @@ The response must be a JSON object with a `data` array of entries with nonempty 
 
 ## Use a custom provider
 
-Use an OpenAI Chat Completions service through `FxProvider.custom`:
+Use a model service through `FxProvider.custom`. Set `apiProtocol` to `.chatCompletions` (the default), `.responses`, or `.anthropicMessages`. For Messages endpoints that reject inline tool definitions, set `deferredToolMode: .callAction` to keep discovery and invocation on fixed functions:
 
 ```swift
 let provider = try FxCustomProvider(
@@ -153,7 +153,7 @@ let engine = try await FxEngine.open(configuration: FxConfiguration(
 ))
 ```
 
-The asynchronous credentials closure receives the provider name and engine session ID and returns an API key. Omit it for a service that needs no key. Cancellation of the turn cancels a pending credential lookup. Keys are added only to the provider's chat endpoint and remain outside core configuration and saved records. Rejected keys are not refreshed or resent. Error details are bounded and mask the key, including JSON-escaped copies.
+The asynchronous credentials closure receives the provider name and engine session ID and returns an API key. Omit it for a service that needs no key. Cancellation of the turn cancels a pending credential lookup. Keys are added only to the provider's configured model endpoint and remain outside core configuration and saved records. Rejected keys are not refreshed or resent. Error details are bounded and mask the key, including JSON-escaped copies.
 
 The default Foundation HTTP client follows redirects only for unauthenticated GET and HEAD requests. A custom `FxHTTPClient` must preserve that credential scope when handling redirects. Custom providers support HTTPS and HTTP on loopback addresses. Use `FxProvider.subscription` for Codex or Grok subscriptions.
 
@@ -473,7 +473,7 @@ Updates require an idle engine and reject a concurrent prompt, checkpoint, or ca
 
 The catalog holds at most 256 tools. The combined resident, provider, and discovery-tool count is at most 64. Deferred actions do not consume that prefix budget. Each description and schema is limited to 65,536 bytes, and one search result can carry at most 65,536 bytes of definitions. Keep schema keywords compatible with [JSONSchema.swift](https://github.com/kylef/JSONSchema.swift), which validates host arguments. Remote schema references are unsupported, and newer draft keywords have incomplete coverage in that dependency.
 
-Journal events and checkpoints retain activation metadata, including across automatic context compaction. On reopen, provide the current catalog and closures in `FxConfiguration`; catalog mutations and closures are not persisted. Saved activation names that no longer exist are ignored. Definitions remain at their discovery position in the conversation; catalog changes do not rewrite the top-level tool list. This preserves the serialized tool prefix, but does not establish service-side cache hits.
+Journal events and checkpoints retain activation metadata, including across automatic context compaction. On reopen, provide the current catalog and closures in `FxConfiguration`. Catalog changes append persisted reminders, but the journal does not serialize the executable catalog or closures. Saved activation names that no longer exist are ignored. Definitions remain at their discovery position in the conversation; catalog changes do not rewrite the top-level tool list. This preserves the serialized tool prefix, but does not establish service-side cache hits.
 
 Run `swift/scripts/test-runtime-catalog-consumer.sh` after building the XCFramework to exercise automatic compaction, schema replacement, removal, SQLite reopen, and checkpoint restoration from a separate package using public APIs.
 
@@ -487,4 +487,4 @@ persistence enabled, it waits for the journal write. Catalog updates also append
 reminders; they do not rewrite earlier messages. Compaction injects the current
 catalog again. Fetch definitions again when they are absent from the context.
 These paths have local fixtures; service acceptance and cache hits need separate
-provider validation. Anthropic Messages supports text and tools with `apiProtocol: .anthropicMessages`; images and extended thinking are not supported in this path.
+provider validation. Anthropic Messages supports text, tools, and streamed thinking with signature replay through `apiProtocol: .anthropicMessages`. Images and redacted thinking are not supported in this path. See [the AgentKit integration guide](FxAgentKit/DORA-INTEGRATION.md).

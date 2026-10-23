@@ -60,7 +60,7 @@ With a `persistenceURL`, the agent stores its conversation in `FxSQLitePersisten
 
 Call `try await agent.resume()` after opening to recover an unfinished turn. It returns the existing `FxTurn` type, or `nil` when there is no unfinished work. Consume a resumed turn's events and result in the same way as a new turn. LibFx's recovery rules continue to protect ambiguous tool calls from automatic repetition. To hand off an active turn while preserving unfinished work, call `try await turn.handoff()` before closing, then resume from a new agent instance.
 
-Long-context compaction remains part of the existing core agent runtime. FxAgentKit does not add a separate summarizer or rewrite its configuration. `checkpointAfterBytes` controls persistence snapshots, not the model's context-compaction threshold. Dynamic plugin catalogs and deferred activation are not exposed by this Agent API.
+Long-context compaction remains part of the existing core agent runtime. FxAgentKit does not add a separate summarizer or rewrite its configuration. `checkpointAfterBytes` controls persistence snapshots, not the model's context-compaction threshold. Use `upsertTools`, `removeTools(named:)`, and `appendContext` while the agent is idle. Set `toolSearchEnabled` before opening an initially empty catalog. Approval wrappers preserve `FxTool.deferred`. Reopen with the current tool definitions and closures; the journal stores conversation and activation state, not executable plugins. See [the dora integration guide](DORA-INTEGRATION.md).
 
 ## Run the public consumer
 

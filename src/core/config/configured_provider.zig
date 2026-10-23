@@ -26,12 +26,14 @@ pub const ParseError = Allocator.Error || error{
     InvalidAuth,
     InvalidEnvironmentName,
     InvalidToolChoiceMode,
+    InvalidDeferredToolMode,
     InvalidModelId,
     InvalidModelMetadata,
 };
 
-pub const Protocol = enum { @"openai-chat-completions", @"anthropic-messages" };
+pub const Protocol = enum { @"openai-chat-completions", @"openai-responses", @"anthropic-messages" };
 pub const ToolChoiceMode = enum { omit, send };
+pub const DeferredToolMode = enum { native, call_action };
 
 /// Describes a credential slot, never a credential value. Resolution belongs at
 /// the effectful edge; `none` must omit Authorization rather than supply a token.
@@ -56,12 +58,13 @@ pub const Definition = struct {
     base_url: []const u8,
     auth: Auth,
     tool_choice_mode: ToolChoiceMode = .omit,
+    deferred_tool_mode: DeferredToolMode = .native,
     reviewer_model: ?[]const u8 = null,
     model_metadata: []const ModelMetadata = &.{},
 
     /// Caller owns the returned URL. base_url is already a validated API prefix.
     pub fn chat_url(self: Definition, alloc: Allocator) Allocator.Error![]u8 {
-        return std.mem.concat(alloc, u8, &.{ self.base_url, if (self.protocol == .@"anthropic-messages") "/messages" else "/chat/completions" });
+        return std.mem.concat(alloc, u8, &.{ self.base_url, if (self.protocol == .@"anthropic-messages") "/messages" else if (self.protocol == .@"openai-responses") "/responses" else "/chat/completions" });
     }
 
     /// Borrowed metadata; absence and unspecified fields remain unknown.
@@ -87,6 +90,7 @@ pub const Definition = struct {
             .none => {},
             .bearer => |env| hash_part(&hash, env),
         }
+        if (self.deferred_tool_mode != .native) hash_part(&hash, @tagName(self.deferred_tool_mode));
         return hash.finalResult();
     }
 
@@ -165,9 +169,9 @@ pub const Registry = struct {
 
 fn parse_definition(alloc: Allocator, id: []const u8, value: std.json.Value) ParseError!Definition {
     try validate_id(id);
-    try check_fields(value, &.{ "protocol", "base_url", "auth", "tool_choice_mode", "reviewer_model", "model_metadata" });
+    try check_fields(value, &.{ "protocol", "base_url", "auth", "tool_choice_mode", "reviewer_model", "model_metadata", "deferred_tool_mode" });
     const protocol = try required(value, "protocol");
-    if (protocol != .string or (!std.mem.eql(u8, protocol.string, "openai-chat-completions") and !std.mem.eql(u8, protocol.string, "anthropic-messages"))) return error.InvalidProtocol;
+    if (protocol != .string or (!std.mem.eql(u8, protocol.string, "openai-chat-completions") and !std.mem.eql(u8, protocol.string, "anthropic-messages") and !std.mem.eql(u8, protocol.string, "openai-responses"))) return error.InvalidProtocol;
     const url = try required(value, "base_url");
     if (url != .string) return error.InvalidBaseUrl;
     const normalized = try validate_url(url.string);
@@ -176,6 +180,12 @@ fn parse_definition(alloc: Allocator, id: []const u8, value: std.json.Value) Par
     if (value.object.get("tool_choice_mode")) |choice| {
         if (choice != .string) return error.InvalidToolChoiceMode;
         mode = if (std.mem.eql(u8, choice.string, "omit")) .omit else if (std.mem.eql(u8, choice.string, "send")) .send else return error.InvalidToolChoiceMode;
+    }
+    var deferred_mode: DeferredToolMode = .native;
+    if (value.object.get("deferred_tool_mode")) |routing| {
+        if (routing != .string) return error.InvalidDeferredToolMode;
+        deferred_mode = if (std.mem.eql(u8, routing.string, "native")) .native else if (std.mem.eql(u8, routing.string, "call_action")) .call_action else return error.InvalidDeferredToolMode;
+        if (deferred_mode == .call_action and !std.mem.eql(u8, protocol.string, "anthropic-messages")) return error.InvalidDeferredToolMode;
     }
     var reviewer: ?[]const u8 = null;
     if (value.object.get("reviewer_model")) |model_value| {
@@ -200,10 +210,11 @@ fn parse_definition(alloc: Allocator, id: []const u8, value: std.json.Value) Par
     errdefer if (owned_reviewer) |model_id| alloc.free(model_id);
     return .{
         .id = owned_id,
-        .protocol = if (std.mem.eql(u8, protocol.string, "anthropic-messages")) .@"anthropic-messages" else .@"openai-chat-completions",
+        .protocol = if (std.mem.eql(u8, protocol.string, "anthropic-messages")) .@"anthropic-messages" else if (std.mem.eql(u8, protocol.string, "openai-responses")) .@"openai-responses" else .@"openai-chat-completions",
         .base_url = owned_url,
         .auth = owned_auth,
         .tool_choice_mode = mode,
+        .deferred_tool_mode = deferred_mode,
         .reviewer_model = owned_reviewer,
         .model_metadata = if (value.object.get("model_metadata")) |metadata| try parse_metadata(alloc, metadata) else &.{},
     };
@@ -637,4 +648,21 @@ fn test_invalid_allocations(alloc: Allocator) !void {
 
 test "configured provider validation failures release earlier definitions and models" {
     try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, test_invalid_allocations, .{});
+}
+
+test "Messages call action compatibility changes replay authority and rejects other protocols" {
+    const alloc = std.testing.allocator;
+    var native = try Registry.parse_json(alloc,
+        \\{"local":{"protocol":"anthropic-messages","base_url":"https://models.example/v1","auth":{"type":"none"}}}
+    );
+    defer native.deinit(alloc);
+    var compatible = try Registry.parse_json(alloc,
+        \\{"local":{"protocol":"anthropic-messages","base_url":"https://models.example/v1","auth":{"type":"none"},"deferred_tool_mode":"call_action"}}
+    );
+    defer compatible.deinit(alloc);
+    try std.testing.expectEqual(DeferredToolMode.call_action, compatible.get("local").?.deferred_tool_mode);
+    try std.testing.expect(!std.mem.eql(u8, &native.get("local").?.binding_identity(), &compatible.get("local").?.binding_identity()));
+    try std.testing.expectError(error.InvalidDeferredToolMode, Registry.parse_json(alloc,
+        \\{"local":{"protocol":"openai-responses","base_url":"https://models.example/v1","auth":{"type":"none"},"deferred_tool_mode":"call_action"}}
+    ));
 }

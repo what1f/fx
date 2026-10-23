@@ -50,7 +50,7 @@ pub fn bundle(raw: ?*anyopaque, definition: *const definitions.Definition) provi
             .context = context,
             .stream_fn = stream,
             .build_request_fn = buildRequest,
-            .project_replay_fn = chat_completions.project_replay,
+            .project_replay_fn = if (own.protocol == .@"openai-responses") @import("responses_protocol.zig").selectReplayParts else chat_completions.project_replay,
         },
         .model_catalog = chat_completions.model_catalog_provider(own),
     };
@@ -91,7 +91,7 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
 
     var reader: host_stream.HostStreamReader = undefined;
     reader.init(transport, opened.handle, request.cancel_flag, request.deadline, request.cooperative_pulse);
-    const result = (if (definition.protocol == .@"anthropic-messages") anthropic.consume(alloc, &reader.interface, request, null) else chat_completions.consume(alloc, &reader.interface, request, null)) catch |err| switch (err) {
+    const result = (if (definition.protocol == .@"anthropic-messages") anthropic.consume(alloc, &reader.interface, request, null) else if (definition.protocol == .@"openai-responses") @import("configured_responses.zig").consume(alloc, request, &reader.interface, null) else chat_completions.consume(alloc, &reader.interface, request, null)) catch |err| switch (err) {
         error.ReadFailed => return host_stream.readFailure(&reader, request.cancel_flag),
         else => return err,
     };
@@ -208,4 +208,25 @@ test "host chat completions context refuses settings it cannot honor" {
     try std.testing.expectError(error.InsecureBaseUrl, Context.init(alloc, fake.transport(),
         \\{"plain":{"protocol":"openai-chat-completions","base_url":"http://models.example/v1","auth":{"type":"none"}}}
     ));
+}
+
+test "host configured Responses binds endpoint and retains cached usage" {
+    const alloc = std.testing.allocator;
+    const body = "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hello\"}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":128,\"output_tokens\":3,\"input_tokens_details\":{\"cached_tokens\":64}}}}\n\n";
+    var fake = FakeTransport{ .model = "local-model", .responses = &.{.{ .status = 200, .body = body }} };
+    defer fake.deinit();
+    var context = try Context.init(alloc, fake.transport(),
+        \\{"local":{"protocol":"openai-responses","base_url":"https://models.example/v1","auth":{"type":"none"},"model_metadata":{"local-model":{"supports_tool_use":true}}}}
+    );
+    defer context.deinit(alloc);
+    const provider = bundle(&context, context.definition()).agent_stream.?;
+    var request = fake.request(.host_managed);
+    request.prepared_request_body = null;
+    var result = try provider.stream(alloc, request);
+    defer result.deinit(alloc);
+    try std.testing.expectEqualStrings("https://models.example/v1/responses", fake.urls[0]);
+    try std.testing.expect(std.mem.find(u8, fake.bodies[0], "\"input\":[") != null);
+    try std.testing.expectEqual(@as(?u64, 64), result.completed.completion.usage.cache_read_tokens);
+    try std.testing.expectEqualStrings("hello", result.completed.completion.content.?);
 }

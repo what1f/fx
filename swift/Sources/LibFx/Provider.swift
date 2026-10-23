@@ -11,12 +11,18 @@ public enum FxProvider: Sendable {
     case custom(FxCustomProvider, credentials: (@Sendable (FxCredentialRequest) async throws -> String)? = nil)
 }
 
-/// An OpenAI Chat Completions service. Credentials belong to the host, not its definition.
+/// A custom model service. Credentials belong to the host, not its definition.
 public struct FxCustomProvider: Sendable {
     public enum APIProtocol: String, Sendable {
         case chatCompletions = "openai-chat-completions"
+        case responses = "openai-responses"
         case anthropicMessages = "anthropic-messages"
     }
+    public enum DeferredToolMode: String, Sendable {
+        case native
+        case callAction = "call_action"
+    }
+    public let deferredToolMode: DeferredToolMode
     public let apiProtocol: APIProtocol
     public struct ModelCapabilities: Sendable {
         public var contextWindow: UInt32?
@@ -47,7 +53,7 @@ public struct FxCustomProvider: Sendable {
     public let models: [String: ModelCapabilities]
     let chatURL: URL
 
-    public init(name: String, baseURL: URL, models: [String: ModelCapabilities] = [:], apiProtocol: APIProtocol = .chatCompletions) throws {
+    public init(name: String, baseURL: URL, models: [String: ModelCapabilities] = [:], apiProtocol: APIProtocol = .chatCompletions, deferredToolMode: DeferredToolMode = .native) throws {
         let letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
         let allowed = letters + "0123456789_-"
         guard (1...64).contains(name.utf8.count), let first = name.first, letters.contains(first),
@@ -75,12 +81,16 @@ public struct FxCustomProvider: Sendable {
                 throw FxError.invalidInput("Output token limit must be less than the context window")
             }
         }
+        guard deferredToolMode == .native || apiProtocol == .anthropicMessages else {
+            throw FxError.invalidInput("Call-action routing requires the Messages protocol")
+        }
+        self.deferredToolMode = deferredToolMode
         self.apiProtocol = apiProtocol
         self.name = name
         self.baseURL = baseURL
         self.models = models
         let base = baseURL.absoluteString
-        guard let chatURL = URL(string: (base.hasSuffix("/") ? String(base.dropLast()) : base) + (apiProtocol == .anthropicMessages ? "/messages" : "/chat/completions")) else {
+        guard let chatURL = URL(string: (base.hasSuffix("/") ? String(base.dropLast()) : base) + (apiProtocol == .anthropicMessages ? "/messages" : apiProtocol == .responses ? "/responses" : "/chat/completions")) else {
             throw FxError.invalidInput("Invalid provider URL")
         }
         self.chatURL = chatURL
@@ -89,6 +99,7 @@ public struct FxCustomProvider: Sendable {
     var definition: JSONValue {
         .object([name: .object([
             "protocol": .string(apiProtocol.rawValue),
+            "deferred_tool_mode": .string(deferredToolMode.rawValue),
             "base_url": .string(baseURL.absoluteString),
             "auth": .object(["type": .string("none")]),
             "model_metadata": .object(models.mapValues(\.json)),

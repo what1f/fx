@@ -887,6 +887,9 @@ pub const Reducer = struct {
         const usage = types.Usage{
             .input_tokens = incoming.input_tokens orelse self.usage.input_tokens,
             .output_tokens = incoming.output_tokens orelse self.usage.output_tokens,
+            .cache_read_tokens = (try nested_token_count(fields, "prompt_tokens_details", "cached_tokens")) orelse (try token_count(fields, "prompt_cache_hit_tokens")) orelse self.usage.cache_read_tokens,
+            .cache_write_tokens = (try nested_token_count(fields, "prompt_tokens_details", "cache_write_tokens")) orelse self.usage.cache_write_tokens,
+            .reasoning_tokens = (try nested_token_count(fields, "completion_tokens_details", "reasoning_tokens")) orelse self.usage.reasoning_tokens,
         };
         const total = incoming_total orelse self.usage_total;
         var final_fields = self.usage_final_fields;
@@ -1008,6 +1011,11 @@ fn integer(value: std.json.Value) Error!i64 {
 
 fn index_value(value: std.json.Value) Error!usize {
     return std.math.cast(usize, try integer(value)) orelse error.InvalidChunk;
+}
+
+fn nested_token_count(fields: std.json.ObjectMap, parent: []const u8, key: []const u8) Error!?u64 {
+    const value = non_null(fields, parent) orelse return null;
+    return token_count(try object(value), key);
 }
 
 fn token_count(fields: std.json.ObjectMap, key: []const u8) Error!?u64 {
@@ -2612,4 +2620,18 @@ test "deferred definitions survive ordinary tool output truncation" {
     defer alloc.free(body);
     try std.testing.expect(std.mem.find(u8, body, "full_definition") != null);
     try std.testing.expect(std.mem.find(u8, body, "truncated preview") == null);
+}
+
+test "chat completions preserves cache and reasoning usage across final trailers" {
+    const alloc = std.testing.allocator;
+    var reducer = try Reducer.init(alloc, test_request(), .{});
+    defer reducer.deinit();
+    try test_accept(&reducer, "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":128,\"prompt_tokens_details\":{\"cached_tokens\":64,\"cache_write_tokens\":16}}}");
+    try test_accept(&reducer, "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":8,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}");
+    _ = try reducer.accept("[DONE]", false);
+    var result = try reducer.finish(false);
+    defer result.deinit(alloc);
+    try std.testing.expectEqual(@as(?u64, 64), result.completed.completion.usage.cache_read_tokens);
+    try std.testing.expectEqual(@as(?u64, 16), result.completed.completion.usage.cache_write_tokens);
+    try std.testing.expectEqual(@as(?u64, 4), result.completed.completion.usage.reasoning_tokens);
 }

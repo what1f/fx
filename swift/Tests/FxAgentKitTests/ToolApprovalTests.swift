@@ -49,6 +49,15 @@ private actor PendingApproval {
 }
 
 @Suite(.serialized, .timeLimit(.minutes(1))) struct ToolApprovalTests {
+    @Test func preservesDeferredMetadata() {
+        let approval = FxToolApproval { _ in .deny }
+        let original = FxTool(name: "deferred_note", description: "Save a note", inputSchema: .object(["type": .string("object")]), isIdempotent: false, writes: true, deferred: true) { _, _ in "saved" }
+        let wrapped = approval.wrap(tool: original, pluginID: "notes", effect: .write)
+        #expect(wrapped.deferred)
+        #expect(wrapped.inputSchema == original.inputSchema)
+        #expect(wrapped.writes == true)
+    }
+
     @Test(arguments: [FxToolEffect.readOnly, .write, .dangerous],
           [FxToolApproval.Decision.allowOnce, .allowPlugin, .deny])
     func effectPolicy(effect: FxToolEffect, decision: FxToolApproval.Decision) async throws {
