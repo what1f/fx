@@ -2,7 +2,7 @@ import Foundation
 import CryptoKit
 
 struct CheckpointMetadata: Sendable {
-    let value: JSONValue
+    private(set) var value: JSONValue
 
     init(configuration: FxConfiguration, modelID: String? = nil) throws {
         let encoder = JSONEncoder()
@@ -16,6 +16,19 @@ struct CheckpointMetadata: Sendable {
         ]
         if let model = modelID ?? configuration.model.id { fields["model"] = .string(model) }
         value = .object(fields)
+    }
+
+    func replacingTools(_ descriptors: [JSONValue]) throws -> CheckpointMetadata {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let sorted = descriptors.sorted { ($0["name"]?.string ?? "") < ($1["name"]?.string ?? "") }
+        let hash = SHA256.hash(data: try encoder.encode(JSONValue.array(sorted))).map { String(format: "%02x", $0) }.joined()
+        var result = self
+        if case .object(var fields) = value {
+            fields["toolSchemaHash"] = .string("sha256:" + hash)
+            result.value = .object(fields)
+        }
+        return result
     }
 
     func compare(_ saved: JSONValue?, sessionID: String, observation: FxObservationOptions?, onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)? = nil) async {

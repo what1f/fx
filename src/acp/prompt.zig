@@ -520,6 +520,7 @@ const AcpContext = struct {
             .permission_rules = session.permission_rules,
             .tool_registry = self.toolRegistry(),
             .host_tool_provider = hostToolProvider(self.state),
+            .host_tool_catalog = &self.state.host_tools,
             .permission_reviewer_provider = self.state.cfg.provider_set.select(session.provider).permission_reviewer,
             .auto_classifier = self.auto_classifier,
             .subagent_host = self.state.subagent_host,
@@ -1083,10 +1084,7 @@ pub fn handlePrompt(
     });
     defer tool_projection.deinit(alloc);
 
-    const owned_prompt = try alloc.dupe(
-        u8,
-        if (recovery_checkpoint) |checkpoint| checkpoint.user.text else prompt_text,
-    );
+    const owned_prompt = try alloc.dupe(u8, if (recovery_checkpoint) |checkpoint| checkpoint.user.text else prompt_text);
     defer alloc.free(owned_prompt);
 
     var skill_catalog = state.skills.acquireCatalog();
@@ -1100,6 +1098,7 @@ pub fn handlePrompt(
     for (state.context_snapshot.notices) |notice| try pushContextNotice(@ptrCast(&ctx), notice);
 
     session.session_rt.setConversationLanguageFromUserMessage(owned_prompt);
+    try server.ensureCatalogReminder(state, session);
     const context_history = try session.session_rt.snapshotHistory(alloc);
     defer types.freeHistoryTurnSlice(alloc, context_history);
     var context_snapshot = try state.context_snapshot.dupe(alloc);
@@ -1155,6 +1154,7 @@ pub fn handlePrompt(
         .advertised_functions = tool_projection.advertised_functions,
         .custom_tool_guidance = tool_projection.custom_guidance,
     });
+    if (state.host_tools.search_enabled) agent_config.catalog_reminder = try state.host_tools.reminder(dynamic_tool_arena.allocator());
     agent_config.session_child_capability = sessionChildCapability(session);
     maybeStartAcpTitleTask(state, session, owned_prompt, recovery_checkpoint != null, ctx.observer);
     defer if (session.title_task != null) completeAcpTitleTask(state, session);
@@ -1381,7 +1381,25 @@ fn initialDynamicTools(
     ctx: *AcpContext,
     arena: Allocator,
 ) ![]const agent_stream_provider.DynamicFunctionTool {
-    const host_tools = ctx.state.host_tools.dynamic_tools;
+    if (ctx.state.active_session) |*active| {
+        for (active.session_rt.agent.history.items) |turn| if (turn == .compacted_summary) {
+            if (turn.compacted_summary.host_state_json) |json| try ctx.state.host_tools.loadState(arena, json);
+        };
+        var messages: std.ArrayList(types.ChatMessage) = .empty;
+        try session_runtime.appendHistoryChatMessages(arena, &messages, active.session_rt.agent.history.items);
+        for (messages.items) |message| if (message.tool_result_memory) |memory| if (memory.loaded_tools_json) |json| {
+            const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, json, .{}) catch continue;
+            var catalog = @import("../core/tooling/host_tool_runtime.zig").Runtime.init(arena, parsed) catch return error.InvalidToolSchema;
+            defer catalog.deinit();
+            for (catalog.definitions) |entry| {
+                const name = entry.name;
+                for (ctx.state.host_tools.descriptors, 0..) |descriptor, index| if (std.mem.eql(u8, name, descriptor.object.get("name").?.string)) {
+                    ctx.state.host_tools.loaded[index] = true;
+                };
+            }
+        };
+    }
+    const host_tools = try ctx.state.host_tools.initialTools(arena);
     if (comptime host_target.is_wasm) return host_tools;
     const session = if (ctx.state.active_session) |*active| active else return host_tools;
     const loaded = if (session.mcp) |mcp| try mcp.snapshotAlwaysLoadedTools(
@@ -3018,11 +3036,21 @@ fn commitContextCompaction(
     const session = if (ctx.state.active_session) |*value| value else return error.SessionPersistenceUnavailable;
     session.session_write_mutex.lockUncancelable(io_mod.getIo());
     defer session.session_write_mutex.unlock(io_mod.getIo());
-    const prepared = try session_runtime.prepareCompactedHistory(ctx.alloc, session.session_rt.agent.history.items, summary, retained_from orelse .{ .turns = history_range.rawHistoryTurnCount(session.session_rt.agent.history.items) });
+    var retained_summary = summary;
+    const host_state = if (ctx.state.host_tools.search_enabled) try ctx.state.host_tools.saveState(ctx.alloc) else null;
+    defer if (host_state) |json| ctx.alloc.free(json);
+    retained_summary.host_state_json = host_state;
+    var prepared = try session_runtime.prepareCompactedHistory(ctx.alloc, session.session_rt.agent.history.items, retained_summary, retained_from orelse .{ .turns = history_range.rawHistoryTurnCount(session.session_rt.agent.history.items) });
     var prepared_owned = true;
     defer if (prepared_owned) types.freeHistoryTurnSlice(ctx.alloc, prepared);
+    if (ctx.state.host_tools.search_enabled) {
+        const reminder = try ctx.state.host_tools.reminder(ctx.alloc);
+        errdefer ctx.alloc.free(reminder);
+        prepared = try ctx.alloc.realloc(prepared, prepared.len + 1);
+        prepared[prepared.len - 1] = .{ .host_context = reminder };
+    }
     if (session.v2) |v2| {
-        v2.commitCompaction(summary, active_prefix != null, retained_from) catch |err| {
+        v2.commitCompaction(retained_summary, active_prefix != null, retained_from) catch |err| {
             if (session_adapter.writeMayHaveLanded(err) and active_prefix != null) {
                 if (ctx.current_prompt_input) |input| input.retainImageSnapshots();
             }

@@ -7747,12 +7747,14 @@ fn processQueuedPromptLoop(
                         var retained_messages: std.ArrayList(ChatMessage) = .empty;
                         try session_runtime.appendHistoryChatMessages(arena, &retained_messages, outcome.retained_history);
                         try projectEmptyHistoryReplay(arena, deps.agent_stream_provider, .{ .provider = job.provider, .model = gateway_model }, retained_messages.items);
+                        if (config.catalog_reminder) |reminder| try retained_messages.append(arena, .{ .role = .user, .content = reminder });
                         active_compaction_handoff = outcome.model_text;
                         trace_count_after_compaction = true;
                         active_compaction_history_tail = retained_messages.items;
-                        const next_history = try arena.alloc(HistoryTurn, outcome.retained_history.len + 1);
+                        const next_history = try arena.alloc(HistoryTurn, outcome.retained_history.len + 1 + @as(usize, if (config.catalog_reminder != null) 1 else 0));
                         next_history[0] = .{ .compacted_summary = outcome.checkpoint };
-                        @memcpy(next_history[1..], outcome.retained_history);
+                        @memcpy(next_history[1..][0..outcome.retained_history.len], outcome.retained_history);
+                        if (config.catalog_reminder) |reminder| next_history[next_history.len - 1] = .{ .host_context = @constCast(reminder) };
                         compaction_history = next_history;
                         finalization.compacted_execution = .{
                             .tool_steps = finalization.compacted_execution.tool_steps + active_cut.tool_steps,

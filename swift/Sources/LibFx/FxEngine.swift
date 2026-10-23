@@ -9,7 +9,7 @@ public actor FxEngine {
     public nonisolated let sessionID: String
     private let rpc: RPCClient
     private let transport: any EngineTransport
-    private let tools: [String: FxTool]
+    private var tools: [String: FxTool]
     private let permissions: PermissionRequests
     private let validatePermission: (@Sendable () async throws -> Void)?
     private let journal: JournalWriter?
@@ -18,7 +18,11 @@ public actor FxEngine {
     private let observation: FxObservationOptions?
     private let onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)?
     private let checkpointAfterBytes: Int?
-    private let checkpointMetadata: CheckpointMetadata
+    private var checkpointMetadata: CheckpointMetadata
+    private var runtimeUpdateTask: Task<Void, any Error>?
+    private let providerToolDescriptors: [JSONValue]
+    private let residentToolDescriptors: [JSONValue]
+    private let toolSearchEnabled: Bool
     private var recovery: FxRecoveryState?
     private var followUps: [QueuedFollowUp] = []
     private var followUpAcceptances: [String: FxFollowUp] = [:]
@@ -52,13 +56,16 @@ public actor FxEngine {
 
     private init(
         sessionID: String, rpc: RPCClient, transport: any EngineTransport,
-        tools: [String: FxTool], journal: JournalWriter?, imagePersistence: (any FxImagePersistence)?, prepareImage: (@Sendable (FxImage) async throws -> FxImage)?, observation: FxObservationOptions?, checkpointAfterBytes: Int?, checkpointMetadata: CheckpointMetadata, onPermission: PermissionRequests.Handler?, validatePermission: (@Sendable () async throws -> Void)?, onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)?
+        tools: [String: FxTool], providerToolDescriptors: [JSONValue], toolSearchEnabled: Bool, journal: JournalWriter?, imagePersistence: (any FxImagePersistence)?, prepareImage: (@Sendable (FxImage) async throws -> FxImage)?, observation: FxObservationOptions?, checkpointAfterBytes: Int?, checkpointMetadata: CheckpointMetadata, onPermission: PermissionRequests.Handler?, validatePermission: (@Sendable () async throws -> Void)?, onLifecycleEvent: (@Sendable (FxLifecycleEvent) async -> Void)?
     ) {
         self.sessionID = sessionID
         self.validatePermission = validatePermission
         self.rpc = rpc
         self.transport = transport
         self.tools = tools
+        self.providerToolDescriptors = providerToolDescriptors
+        self.toolSearchEnabled = toolSearchEnabled
+        self.residentToolDescriptors = tools.values.filter { !$0.deferred }.sorted { $0.name < $1.name }.map(\.descriptor)
         let permissionHandler: PermissionRequests.Handler?
         if let onPermission {
             permissionHandler = { request in
@@ -165,7 +172,8 @@ public actor FxEngine {
                 "protocolVersion": .number(1),
                 "clientCapabilities": .object([
                     "libfx": .object([
-                        "tools": .array(configuration.toolDescriptors),
+                        "tools": .array(configuration.tools.filter { !$0.deferred }.sorted { $0.name < $1.name }.map(\.descriptor) + configuration.tools.filter(\.deferred).sorted { $0.name < $1.name }.map(\.descriptor) + configuration.providerTools.map { .object(["name": .string($0.rawValue), "providerExecuted": .bool(true)]) }),
+                        "toolSearch": .bool(configuration.toolSearchEnabled || configuration.tools.contains(where: \.deferred)),
                         "instructions": .string(configuration.instructions),
                     ]),
                 ]),
@@ -193,7 +201,7 @@ public actor FxEngine {
                 throw FxError.protocolViolation("Runtime does not support observation")
             }
             let journal = persistence.map { JournalWriter(store: $0, head: loaded?.head, lastSequence: loaded?.lastSequence ?? 0, tailBytes: loaded?.tailBytes ?? 0) }
-            let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, journal: journal, imagePersistence: persistence as? any FxImagePersistence, prepareImage: configuration.prepareImage, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes, checkpointMetadata: checkpointMetadata, onPermission: configuration.onPermission, validatePermission: configuration.validatePermission, onLifecycleEvent: configuration.onLifecycleEvent)
+            let engine = FxEngine(sessionID: id, rpc: rpc, transport: transport, tools: tools, providerToolDescriptors: configuration.providerTools.map { .object(["name": .string($0.rawValue), "providerExecuted": .bool(true)]) }, toolSearchEnabled: configuration.toolSearchEnabled || configuration.tools.contains(where: \.deferred), journal: journal, imagePersistence: persistence as? any FxImagePersistence, prepareImage: configuration.prepareImage, observation: configuration.observation, checkpointAfterBytes: configuration.checkpointAfterBytes, checkpointMetadata: checkpointMetadata, onPermission: configuration.onPermission, validatePermission: configuration.validatePermission, onLifecycleEvent: configuration.onLifecycleEvent)
             await journal?.setHandler { [weak engine] result in await engine?.journalSettled(result) }
             await rpc.setHandler { [weak engine] message in await engine?.handle(message) }
             await rpc.setFailureHandler { [weak engine] error in await engine?.transportFailed(error) }
@@ -270,6 +278,74 @@ public actor FxEngine {
         }
     }
 
+    /// Appends context without changing earlier messages. Returns after persistence accepts it.
+    public func appendContext(_ text: String) async throws {
+        try checkCatalogUpdate()
+        guard !text.isEmpty, text.utf8.count <= 65536 else {
+            throw FxError.invalidInput("Context must contain 1–65536 UTF-8 bytes")
+        }
+        let task = Task {
+            _ = try await rpc.request("libfx/context", .object(["sessionId": .string(sessionID), "text": .string(text)]))
+            try await journal?.check()
+        }
+        runtimeUpdateTask = task
+        defer { runtimeUpdateTask = nil }
+        try await task.value
+    }
+
+    /// Adds or updates deferred tools while the engine is idle.
+    public func upsertTools(_ additions: [FxTool]) async throws {
+        try checkCatalogUpdate()
+        guard toolSearchEnabled else { throw FxError.invalidInput("Enable tool search before opening the engine") }
+        var candidate = tools
+        var names: Set<String> = []
+        for tool in additions {
+            guard tool.deferred, names.insert(tool.name).inserted,
+                  candidate[tool.name]?.deferred != false,
+                  !providerToolDescriptors.contains(where: { $0["name"] == .string(tool.name) }) else {
+                throw FxError.invalidInput("Catalog tools must be deferred and have unique names")
+            }
+            candidate[tool.name] = tool
+        }
+        try await updateCatalog(candidate)
+    }
+
+    /// Removes deferred tools. Later calls to their names cannot execute a closure.
+    public func removeTools(named names: [String]) async throws {
+        try checkCatalogUpdate()
+        var candidate = tools
+        for name in names {
+            guard candidate[name]?.deferred == true else { throw FxError.invalidInput("Unknown catalog tool") }
+            candidate.removeValue(forKey: name)
+        }
+        try await updateCatalog(candidate)
+    }
+
+    private func checkCatalogUpdate() throws {
+        try Task.checkCancellation()
+        guard !closed else { throw FxError.closed }
+        guard !handedOff else { throw FxError.handedOff }
+        if let terminalFailure { throw terminalFailure }
+        if let journalFailure { throw journalFailure }
+        guard turnID == nil, !cancelling, !checkpointing, checkpointOwner == nil,
+              runtimeUpdateTask == nil, recovery == nil, followUps.isEmpty,
+              followUpAcceptances.isEmpty, ownedToolTasks.isEmpty else { throw FxError.busy }
+    }
+
+    private func updateCatalog(_ candidate: [String: FxTool]) async throws {
+        let descriptors = residentToolDescriptors + candidate.values.filter(\.deferred).sorted { $0.name < $1.name }.map(\.descriptor) + providerToolDescriptors
+        let metadata = try checkpointMetadata.replacingTools(descriptors)
+        let task = Task {
+            _ = try await rpc.request("libfx/catalog", .object(["sessionId": .string(sessionID), "tools": .array(descriptors)]))
+            self.tools = candidate
+            self.checkpointMetadata = metadata
+            try await journal?.check()
+        }
+        runtimeUpdateTask = task
+        defer { runtimeUpdateTask = nil }
+        try await task.value
+    }
+
     public func prompt(_ text: String, id: String = UUID().uuidString, yieldAt: Date? = nil) throws -> FxTurn {
         try prompt([.text(text)], id: id, yieldAt: yieldAt)
     }
@@ -279,7 +355,7 @@ public actor FxEngine {
         if let terminalFailure { throw terminalFailure }
         guard !handedOff else { throw FxError.handedOff }
         if let journalFailure { throw journalFailure }
-        guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
+        guard turnID == nil, !cancelling, !checkpointing, runtimeUpdateTask == nil else { throw FxError.busy }
         guard validInputID(id) else { throw FxError.invalidInput("Turn ID must contain 1–128 ASCII letters, digits, '.', '_' or '-'") }
         if journal != nil {
             if recovery?.turnID == id, let turn = try resume(yieldAt: yieldAt) { return turn }
@@ -292,6 +368,7 @@ public actor FxEngine {
 
     /// Queues text as a separate turn. Await accepted before relying on recovery after a process exit.
     public func followUp(_ text: String) throws -> FxFollowUp {
+        guard runtimeUpdateTask == nil else { throw FxError.busy }
         guard !closed else { throw FxError.closed }
         guard !handedOff else { throw FxError.handedOff }
         if let journalFailure { throw journalFailure }
@@ -334,7 +411,7 @@ public actor FxEngine {
 
     @discardableResult
     private func startNextFollowUp(held: Bool = false) -> FxTurn? {
-        guard !closed, !handedOff, journalFailure == nil, turnID == nil, !cancelling, !checkpointing, checkpointOwner == nil else { return nil }
+        guard !closed, !handedOff, journalFailure == nil, turnID == nil, !cancelling, !checkpointing, checkpointOwner == nil, runtimeUpdateTask == nil else { return nil }
         while let index = followUps.firstIndex(where: { $0.held == held }) {
             guard followUps[index].ready else { return nil }
             let entry = followUps.remove(at: index)
@@ -385,7 +462,7 @@ public actor FxEngine {
         guard !closed else { throw FxError.closed }
         guard !handedOff else { throw FxError.handedOff }
         if let journalFailure { throw journalFailure }
-        guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
+        guard turnID == nil, !cancelling, !checkpointing, runtimeUpdateTask == nil else { throw FxError.busy }
         guard let recovery else { return startNextFollowUp(held: true) }
         guard executionIDs.isSubset(of: Set(recovery.runningCalls.map(\.executionID))) else {
             throw FxError.invalidInput("Unknown recovery execution identifier")
@@ -417,7 +494,7 @@ public actor FxEngine {
     private func startTurn(_ content: [FxPromptContent], publicID: String, yieldAt: Date? = nil, resuming: Bool = false, replayingOutput: Bool = true, rerunning: Set<String> = [], followUp: QueuedFollowUp? = nil) throws -> FxTurn {
         guard !closed else { throw FxError.closed }
         if let terminalFailure { throw terminalFailure }
-        guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
+        guard turnID == nil, !cancelling, !checkpointing, runtimeUpdateTask == nil else { throw FxError.busy }
         var metadata: [String: JSONValue] = [:]
         if let yieldAt {
             guard journal != nil else { throw FxError.invalidInput("Yielding requires persistence") }
@@ -647,7 +724,9 @@ public actor FxEngine {
                         try await self.journal?.checkFailure()
                         try Task.checkCancellation()
                         guard let tool else { throw FxError.invalidInput("Unknown tool") }
-                        let value = try await tool.execute(params["input"] ?? .null, context)
+                        let input = params["input"] ?? .null
+                        try validateHostToolInput(input, tool: tool)
+                        let value = try await tool.execute(input, context)
                         try Task.checkCancellation()
                         response = try await PersistedImages.tool(value, name: name, store: self.imagePersistence)
                     } catch {
@@ -888,6 +967,7 @@ public actor FxEngine {
     }
 
     public func checkpoint() async throws -> Data {
+        guard runtimeUpdateTask == nil else { throw FxError.busy }
         try Task.checkCancellation()
         guard !closed else { throw FxError.closed }
         let owner = UUID()
@@ -901,7 +981,7 @@ public actor FxEngine {
         defer { finishCheckpoint(owner) }
         try Task.checkCancellation()
         guard !closed else { throw FxError.closed }
-        guard turnID == nil, !cancelling, !checkpointing else { throw FxError.busy }
+        guard turnID == nil, !cancelling, !checkpointing, runtimeUpdateTask == nil else { throw FxError.busy }
         checkpointBarrier = PromptDispatch()
         let reply = try await rpc.request("libfx/checkpoint", .object(["sessionId": .string(sessionID), "checkpointMeta": checkpointMetadata.value]))
         guard let id = reply["checkpointAttachment"]?.integer, let attachmentID = UInt32(exactly: id) else {
@@ -952,7 +1032,7 @@ public actor FxEngine {
     private func storeCheckpoint(finishing id: UUID?) async throws {
         guard !closed else { throw FxError.closed }
         guard !handedOff else { throw FxError.handedOff }
-        guard turnID == id, !cancelling, !checkpointing, checkpointOwner == nil else { throw FxError.busy }
+        guard turnID == id, !cancelling, !checkpointing, checkpointOwner == nil, runtimeUpdateTask == nil else { throw FxError.busy }
         guard let journal else { throw FxError.invalidInput("Persistence store is required") }
         checkpointing = true
         defer { checkpointing = false; checkpointSaveTask = nil; startNextFollowUp() }
@@ -984,6 +1064,7 @@ public actor FxEngine {
             let preparation = imagePreparation
             let checkpointSave = checkpointSaveTask
             let cancellation = cancellationTask
+            let runtimeUpdate = runtimeUpdateTask
             failFollowUps(FxError.closed)
             // Publish the shared teardown task before its first suspension.
             closingTask = Task {
@@ -992,6 +1073,7 @@ public actor FxEngine {
                     await output?.finish(throwing: failure, discarding: true)
                     await finish(turn: turnID, error: failure)
                 }
+                _ = await runtimeUpdate?.result
                 let saved = await checkpointSave?.result
                 _ = await preparation?.result
                 await permissions.cancelAll()

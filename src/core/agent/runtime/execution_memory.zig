@@ -965,6 +965,7 @@ pub fn applyToolResultMemory(
 ) void {
     const source_memory = source orelse return;
     prepared.review_feedback = source_memory.review_feedback;
+    prepared.loaded_tools_json = source_memory.loaded_tools_json;
     prepared.tool_images = source_memory.tool_images;
     prepared.tool_image_handle = source_memory.tool_image_handle;
     prepared.command_output_replay = source_memory.command_output_replay;

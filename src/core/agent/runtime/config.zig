@@ -35,6 +35,8 @@ pub const Config = struct {
     gateway_chat_url: []const u8,
     advertised_tool_names: []const []const u8 = &.{},
     advertised_functions: []const model_tool_schema.FunctionSchema = &.{},
+    /// Current catalog reminder to append again after context compaction.
+    catalog_reminder: ?[]const u8 = null,
     initial_dynamic_tools: []const stream_provider.DynamicFunctionTool = &.{},
     provider_capabilities: provider_set.Bundle.Capabilities = .{
         .gateway_prompt_caching = true,

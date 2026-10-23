@@ -147,6 +147,16 @@ pub fn writeInput(
                 } else if (content.len > 0) try write_assistant_text(writer, &first, content, legacy_phase);
                 for (message.tool_calls) |call| {
                     try writeComma(writer, &first);
+                    if (std.mem.eql(u8, call.name, "tool_search")) {
+                        try writer.writeAll("{\"type\":\"tool_search_call\",\"execution\":\"client\",\"call_id\":");
+                        try std.json.Stringify.value(ids.resolve(call.id), .{}, writer);
+                        try writer.writeAll(",\"arguments\":");
+                        const arguments = try std.json.parseFromSlice(std.json.Value, scratch_alloc, call.arguments_json, .{});
+                        defer arguments.deinit();
+                        try std.json.Stringify.value(arguments.value, .{}, writer);
+                        try writer.writeByte('}');
+                        continue;
+                    }
                     try writer.writeAll("{\"type\":\"function_call\",\"call_id\":");
                     try std.json.Stringify.value(ids.resolve(call.id), .{}, writer);
                     try writer.writeAll(",\"name\":");
@@ -158,6 +168,28 @@ pub fn writeInput(
             },
             .tool => {
                 try writeComma(writer, &first);
+                if (std.mem.eql(u8, message.tool_name orelse "", "tool_search")) {
+                    try writer.writeAll("{\"type\":\"tool_search_output\",\"execution\":\"client\",\"status\":\"completed\",\"call_id\":");
+                    try std.json.Stringify.value(ids.resolve(message.tool_call_id orelse ""), .{}, writer);
+                    try writer.writeAll(",\"tools\":[");
+                    const definitions = if (message.tool_result_memory) |memory| memory.loaded_tools_json else null;
+                    if (definitions) |json| {
+                        const parsed = try std.json.parseFromSlice(std.json.Value, scratch_alloc, json, .{});
+                        defer parsed.deinit();
+                        for (parsed.value.array.items, 0..) |entry, index| {
+                            if (index > 0) try writer.writeByte(',');
+                            try writer.writeAll("{\"type\":\"function\",\"defer_loading\":true,\"name\":");
+                            try std.json.Stringify.value(entry.object.get("name").?, .{}, writer);
+                            try writer.writeAll(",\"description\":");
+                            try std.json.Stringify.value(entry.object.get("description").?, .{}, writer);
+                            try writer.writeAll(",\"parameters\":");
+                            try std.json.Stringify.value(entry.object.get("inputSchema").?, .{}, writer);
+                            try writer.writeByte('}');
+                        }
+                    }
+                    try writer.writeAll("]}");
+                    continue;
+                }
                 try writer.writeAll("{\"type\":\"function_call_output\",\"call_id\":");
                 try std.json.Stringify.value(ids.resolve(message.tool_call_id orelse ""), .{}, writer);
                 try writer.writeAll(",\"output\":");
@@ -641,6 +673,15 @@ pub fn writeTools(
 
     for (tools.advertised_names) |name| {
         const tool = tools.advertisedFunction(name) orelse continue;
+        if (std.mem.eql(u8, name, "call_action")) continue;
+        if (std.mem.eql(u8, name, "tool_search")) {
+            if (count > 0) try out.writer.writeByte(',');
+            try out.writer.writeAll("{\"type\":\"tool_search\",\"execution\":\"client\",\"description\":");
+            try std.json.Stringify.value(tool.description, .{}, &out.writer);
+            try out.writer.writeAll(",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\"}},\"required\":[\"query\"]}}");
+            count += 1;
+            continue;
+        }
         if (count > 0) try out.writer.writeByte(',');
         try writeFunctionTool(
             &out.writer,
@@ -664,6 +705,7 @@ pub fn writeTools(
         count += 1;
     }
     for (tools.selected_dynamic) |tool| {
+        if (tool.deferred) continue;
         if (containsName(tools.advertised_names, tool.name)) continue;
         if (count > 0) try out.writer.writeByte(',');
         try writeFunctionTool(
@@ -927,7 +969,9 @@ pub const Reducer = struct {
             const item = parsed.value.object.get("item") orelse return false;
             if (item != .object) return false;
             const item_type = stringField(item.object, "type") orelse return false;
-            if (std.mem.eql(u8, item_type, "function_call")) {
+            if (std.mem.eql(u8, item_type, "tool_search_call")) {
+                try self.acceptSearchItem(alloc, output_index, item.object, callbacks, limits, false);
+            } else if (std.mem.eql(u8, item_type, "function_call")) {
                 try self.check_output_kind(output_index, .function_call);
                 const call_id = stringField(item.object, "call_id") orelse return false;
                 const name = stringField(item.object, "name") orelse return false;
@@ -1008,7 +1052,9 @@ pub const Reducer = struct {
             const item = parsed.value.object.get("item") orelse return false;
             if (item != .object) return false;
             const item_type = stringField(item.object, "type") orelse return false;
-            if (std.mem.eql(u8, item_type, "function_call")) {
+            if (std.mem.eql(u8, item_type, "tool_search_call")) {
+                try self.acceptSearchItem(alloc, output_index, item.object, callbacks, limits, true);
+            } else if (std.mem.eql(u8, item_type, "function_call")) {
                 try self.reconcileToolItem(alloc, output_index, item.object, callbacks, limits);
             } else if (std.mem.eql(u8, item_type, "reasoning")) {
                 try self.reconcile_reasoning(alloc, output_index, item.object, .completed, limits);
@@ -1036,7 +1082,9 @@ pub const Reducer = struct {
                     if (item != .object) continue;
                     const item_type = stringField(item.object, "type") orelse continue;
                     const index = std.math.cast(i64, output_index) orelse return error.ResourceLimitExceeded;
-                    if (std.mem.eql(u8, item_type, "function_call")) {
+                    if (std.mem.eql(u8, item_type, "tool_search_call")) {
+                        try self.acceptSearchItem(alloc, index, item.object, callbacks, limits, true);
+                    } else if (std.mem.eql(u8, item_type, "function_call")) {
                         try self.reconcileToolItem(alloc, index, item.object, callbacks, limits);
                     } else if (std.mem.eql(u8, item_type, "reasoning")) {
                         try self.reconcile_reasoning(alloc, index, item.object, .completed, limits);
@@ -1256,6 +1304,26 @@ pub const Reducer = struct {
                 .output_index = output_index,
                 .content_index = std.math.cast(i64, content_index) orelse return error.ResourceLimitExceeded,
             }, identity, part.object, callbacks, capture_limit, limits);
+        }
+    }
+
+    fn acceptSearchItem(self: *Reducer, alloc: std.mem.Allocator, output_index: i64, fields: std.json.ObjectMap, callbacks: StreamCallbacks, limits: StreamLimits, final: bool) !void {
+        const execution = stringField(fields, "execution") orelse return error.InvalidEvent;
+        if (!std.mem.eql(u8, execution, "client")) return error.InvalidEvent;
+        try self.check_output_kind(output_index, .function_call);
+        if (findTool(self.tools.items, output_index) == null) {
+            const id = stringField(fields, "call_id") orelse return error.InvalidEvent;
+            try appendTool(alloc, &self.tools, output_index, id, "tool_search", limits);
+            if (callbacks.on_tool_start) |callback| callback(callbacks.context, id, "tool_search", null, null);
+        }
+        const tool = &self.tools.items[findTool(self.tools.items, output_index).?];
+        try tool.reconcileIdentity(alloc, fields, "id", limits);
+        if (final) {
+            const arguments = fields.get("arguments") orelse return error.InvalidEvent;
+            if (arguments != .object) return error.InvalidEvent;
+            const json = try std.json.Stringify.valueAlloc(alloc, arguments, .{});
+            defer alloc.free(json);
+            try tool.finalizeArguments(alloc, json, callbacks, limits);
         }
     }
 
@@ -2692,4 +2760,31 @@ test "Responses usage projection retains optional cached and reasoning detail" {
     try std.testing.expectEqual(@as(?u64, 5), usage.cache_read_tokens);
     try std.testing.expectEqual(@as(?u64, 2), usage.cache_write_tokens);
     try std.testing.expectEqual(@as(?u64, 3), usage.reasoning_tokens);
+}
+
+test "deferred tools preserve Responses tools and prior input bytes" {
+    const alloc = std.testing.allocator;
+    const definitions = "[{\"name\":\"action\",\"description\":\"Act\",\"inputSchema\":{\"type\":\"object\"},\"deferred\":true}]";
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "Find action" },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "search-1", .name = "tool_search", .arguments_json = "{\"query\":\"action\"}" }} },
+        .{ .role = .tool, .tool_call_id = "search-1", .tool_name = "tool_search", .content = "Act", .tool_result_memory = .{ .loaded_tools_json = definitions } },
+    };
+    var before: std.Io.Writer.Allocating = .init(alloc);
+    defer before.deinit();
+    var after: std.Io.Writer.Allocating = .init(alloc);
+    defer after.deinit();
+    try writeInput(&before.writer, alloc, messages[0..2], null, ImageInputTest.limits, .{});
+    try writeInput(&after.writer, alloc, &messages, null, ImageInputTest.limits, .{});
+    try std.testing.expect(std.mem.startsWith(u8, after.written(), before.written()));
+    try std.testing.expect(std.mem.find(u8, after.written(), "\"type\":\"tool_search_output\"") != null);
+    try std.testing.expect(std.mem.find(u8, after.written(), "\"defer_loading\":true") != null);
+    before.clearRetainingCapacity();
+    after.clearRetainingCapacity();
+    const base: stream_provider.ToolSelection = .{ .advertised_names = &.{"tool_search"}, .advertised_functions = &.{.{ .name = "tool_search", .description = "Search" }} };
+    _ = try writeTools(&before.writer, alloc, base);
+    var loaded = base;
+    loaded.selected_dynamic = &.{.{ .name = "action", .description = "Changed", .input_schema = .{ .object = .empty }, .deferred = true }};
+    _ = try writeTools(&after.writer, alloc, loaded);
+    try std.testing.expectEqualStrings(before.written(), after.written());
 }

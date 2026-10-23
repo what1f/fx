@@ -1638,7 +1638,7 @@ fn sendHistoryTurnAsUpdates(
     switch (turn) {
         .assistant => |assistant| try sendUserHistoryTurn(state, alloc, session_id, assistant.user),
         .interrupted => |interrupted| try sendUserHistoryTurn(state, alloc, session_id, interrupted.user),
-        .compacted_summary => return,
+        .compacted_summary, .host_context => return,
     }
 
     switch (turn) {
@@ -1658,7 +1658,7 @@ fn sendHistoryTurnAsUpdates(
                 session_runtime.interruptedTurnNotice(i).body,
             );
         },
-        .compacted_summary => {},
+        .compacted_summary, .host_context => {},
     }
 }
 

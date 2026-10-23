@@ -55,6 +55,7 @@ struct AgentDefinition: Sendable, Equatable {
         let schema: JSONValue
         let idempotent: Bool
         let writes: Bool?
+        let deferred: Bool
     }
     private enum Provider: Sendable, Equatable {
         case gateway(String)
@@ -69,6 +70,7 @@ struct AgentDefinition: Sendable, Equatable {
         let gatewayURL: URL
         let tools: [Tool]
         let providerTools: [FxProviderTool]
+        let toolSearchEnabled: Bool
         let catalog: FxModelCatalog?
         let imageWindow: FxImageWindow?
         let checkpointAfterBytes: Int?
@@ -85,9 +87,10 @@ struct AgentDefinition: Sendable, Equatable {
             gatewayURL = configuration.gatewayURL
             tools = configuration.tools.map {
                 Tool(name: $0.name, description: $0.description, schema: $0.inputSchema,
-                     idempotent: $0.isIdempotent, writes: $0.writes)
+                     idempotent: $0.isIdempotent, writes: $0.writes, deferred: $0.deferred)
             }
             providerTools = configuration.providerTools
+            toolSearchEnabled = configuration.toolSearchEnabled
             catalog = configuration.modelCatalog
             imageWindow = configuration.imageWindow
             checkpointAfterBytes = configuration.checkpointAfterBytes

@@ -96,7 +96,7 @@ actor RPCClient {
     func respondToTool(id: JSONValue, result: JSONValue) async throws {
         var result = result
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.withoutEscapingSlashes]
+        encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
         func frameSize() throws -> Int {
             try encoder.encode(JSONValue.object(["jsonrpc": .string("2.0"), "id": id, "result": result])).count + 1
         }
@@ -129,7 +129,7 @@ actor RPCClient {
     private func send(_ message: JSONValue, beforeWrite: (@Sendable () async throws -> Void)? = nil) async throws {
         guard !closed else { throw FxError.closed }
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.withoutEscapingSlashes]
+        encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
         var data = try encoder.encode(message)
         data.append(10)
         guard data.count <= 8 * 1024 * 1024 else { throw FxError.invalidInput("Request exceeds the 8388608 byte frame limit") }

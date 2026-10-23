@@ -1682,7 +1682,7 @@ fn restoreContextResultBodies(alloc: Allocator, dir: *io_mod.VerifiedDir, histor
         const execution = switch (turn.*) {
             .assistant => |*entry| &entry.execution,
             .interrupted => |*entry| &entry.execution,
-            .compacted_summary => continue,
+            .compacted_summary, .host_context => continue,
         };
         try restoreExecutionResultBodies(alloc, dir, &capability, execution);
     }
@@ -1728,7 +1728,7 @@ pub fn externalizeConversationTurnResults(
     const execution = switch (turn.*) {
         .assistant => |*entry| &entry.execution,
         .interrupted => |*entry| &entry.execution,
-        .compacted_summary => return,
+        .compacted_summary, .host_context => return,
     };
     var has_results = false;
     for (execution.tool_steps) |step| {
@@ -1805,7 +1805,7 @@ pub fn discardEmptyLegacyFileEvidence(alloc: Allocator, history: []session.Histo
         const execution = switch (turn.*) {
             .assistant => |*entry| &entry.execution,
             .interrupted => |*entry| &entry.execution,
-            .compacted_summary => continue,
+            .compacted_summary, .host_context => continue,
         };
         const files = execution.files;
         var retained_count: usize = 0;

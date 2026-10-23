@@ -1634,7 +1634,7 @@ pub const Session = struct {
             const stores = switch (turn.*) {
                 .assistant => |entry| storesBodies(entry.execution),
                 .interrupted => |entry| storesBodies(entry.execution),
-                .compacted_summary => false,
+                .compacted_summary, .host_context => false,
             };
             if (stores) try self.openTurnLocked();
         }
@@ -1648,7 +1648,7 @@ pub const Session = struct {
         const execution = switch (turn.*) {
             .assistant => |*entry| &entry.execution,
             .interrupted => |*entry| &entry.execution,
-            .compacted_summary => return,
+            .compacted_summary, .host_context => return,
         };
         for (execution.tool_steps) |step| for (step.tool_results) |*result| {
             if (result.output_handle != null) continue;
@@ -1964,7 +1964,7 @@ pub const Session = struct {
         const stores = switch (copy) {
             .assistant => |entry| storesBodies(entry.execution),
             .interrupted => |entry| storesBodies(entry.execution),
-            .compacted_summary => return error.InvalidConversationFrame,
+            .compacted_summary, .host_context => return error.InvalidConversationFrame,
         };
         if (stores) try self.openTurnLocked();
         try session_log.externalizeConversationTurnResults(a, &copy, try self.capabilityLocked());
@@ -2349,7 +2349,7 @@ pub const Session = struct {
                 const user = switch (value) {
                     .assistant => |entry| entry.user,
                     .interrupted => |entry| entry.user,
-                    .compacted_summary => return,
+                    .compacted_summary, .host_context => return,
                 };
                 const prompt = try sink.alloc.dupe(u8, user.text);
                 errdefer sink.alloc.free(prompt);
@@ -3313,7 +3313,7 @@ const Conversion = struct {
                 const execution = switch (whole.turn) {
                     .assistant => |entry| entry.execution,
                     .interrupted => |entry| entry.execution,
-                    .compacted_summary => continue,
+                    .compacted_summary, .host_context => continue,
                 };
                 for (execution.tool_steps) |tool_step| for (tool_step.tool_results) |result| {
                     const handle = result.output_handle orelse continue;
@@ -4339,7 +4339,7 @@ fn presentStoredResults(src: Source, alloc: Allocator, turn: types.HistoryTurn) 
     const execution = switch (shown) {
         .assistant => |*entry| &entry.execution,
         .interrupted => |*entry| &entry.execution,
-        .compacted_summary => return shown,
+        .compacted_summary, .host_context => return shown,
     };
     for (execution.tool_steps) |*step| for (step.tool_results) |*result| {
         const handle = result.output_handle orelse continue;

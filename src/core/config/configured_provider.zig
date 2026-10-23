@@ -30,7 +30,7 @@ pub const ParseError = Allocator.Error || error{
     InvalidModelMetadata,
 };
 
-pub const Protocol = enum { @"openai-chat-completions" };
+pub const Protocol = enum { @"openai-chat-completions", @"anthropic-messages" };
 pub const ToolChoiceMode = enum { omit, send };
 
 /// Describes a credential slot, never a credential value. Resolution belongs at
@@ -61,7 +61,7 @@ pub const Definition = struct {
 
     /// Caller owns the returned URL. base_url is already a validated API prefix.
     pub fn chat_url(self: Definition, alloc: Allocator) Allocator.Error![]u8 {
-        return std.mem.concat(alloc, u8, &.{ self.base_url, "/chat/completions" });
+        return std.mem.concat(alloc, u8, &.{ self.base_url, if (self.protocol == .@"anthropic-messages") "/messages" else "/chat/completions" });
     }
 
     /// Borrowed metadata; absence and unspecified fields remain unknown.
@@ -167,7 +167,7 @@ fn parse_definition(alloc: Allocator, id: []const u8, value: std.json.Value) Par
     try validate_id(id);
     try check_fields(value, &.{ "protocol", "base_url", "auth", "tool_choice_mode", "reviewer_model", "model_metadata" });
     const protocol = try required(value, "protocol");
-    if (protocol != .string or !std.mem.eql(u8, protocol.string, "openai-chat-completions")) return error.InvalidProtocol;
+    if (protocol != .string or (!std.mem.eql(u8, protocol.string, "openai-chat-completions") and !std.mem.eql(u8, protocol.string, "anthropic-messages"))) return error.InvalidProtocol;
     const url = try required(value, "base_url");
     if (url != .string) return error.InvalidBaseUrl;
     const normalized = try validate_url(url.string);
@@ -200,7 +200,7 @@ fn parse_definition(alloc: Allocator, id: []const u8, value: std.json.Value) Par
     errdefer if (owned_reviewer) |model_id| alloc.free(model_id);
     return .{
         .id = owned_id,
-        .protocol = .@"openai-chat-completions",
+        .protocol = if (std.mem.eql(u8, protocol.string, "anthropic-messages")) .@"anthropic-messages" else .@"openai-chat-completions",
         .base_url = owned_url,
         .auth = owned_auth,
         .tool_choice_mode = mode,

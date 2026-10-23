@@ -256,6 +256,7 @@ pub fn formatHistoryTurnKinds(alloc: Allocator, history: []const HistoryTurn) ![
 fn historyTurnKindName(turn: HistoryTurn) []const u8 {
     return switch (turn) {
         .compacted_summary => "compacted_summary",
+        .host_context => "host_context",
         .assistant => "assistant",
         .interrupted => "interrupted",
     };

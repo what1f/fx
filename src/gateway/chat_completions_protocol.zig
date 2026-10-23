@@ -124,6 +124,7 @@ fn select_functions(alloc: Allocator, tools: stream_provider.ToolSelection, choi
     }
     var schema_budget: SchemaBudget = .{};
     for (tools.selected_dynamic) |function| {
+        if (function.deferred) continue;
         if (contains_name(tools.advertised_names, function.name)) continue;
         if (function.input_schema != .object) return error.InvalidToolSchema;
         try validate_dynamic_schema(function.input_schema, 0, &schema_budget);
@@ -541,7 +542,8 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
             if (message.role == .user and message.images.len != 0) {
                 try write_user_content_parts(writer, alloc, message);
             } else {
-                try std.json.Stringify.value(message.content, .{}, writer);
+                const definitions = if (message.role == .tool and message.tool_result_memory != null) message.tool_result_memory.?.loaded_tools_json else null;
+                try std.json.Stringify.value(definitions orelse message.content, .{}, writer);
             }
             try write_replay(writer, alloc, message);
             if (message.role == .tool) {
@@ -2580,4 +2582,34 @@ test "chat completions prose resembling a call stays prose and cancellation afte
     try test_accept(&cancelled, test_stop);
     try test_accept(&cancelled, "[DONE]");
     try std.testing.expectError(error.Cancelled, cancelled.finish(true));
+}
+
+test "deferred tools preserve Chat Completions request bytes" {
+    const alloc = std.testing.allocator;
+    var request = test_tool_request();
+    const before = try build_request(alloc, request, .{});
+    defer alloc.free(before);
+    const schema: std.json.ObjectMap = .empty;
+    const definition: stream_provider.DynamicFunctionTool = .{ .name = "plugin.action", .description = "changed", .input_schema = .{ .object = schema }, .deferred = true };
+    request.tools.selected_dynamic = &.{definition};
+    const after = try build_request(alloc, request, .{});
+    defer alloc.free(after);
+    try std.testing.expectEqualStrings(before, after);
+    request.tools.selected_dynamic = &.{};
+    const removed = try build_request(alloc, request, .{});
+    defer alloc.free(removed);
+    try std.testing.expectEqualStrings(before, removed);
+}
+
+test "deferred definitions survive ordinary tool output truncation" {
+    const alloc = std.testing.allocator;
+    var request = test_request();
+    request.messages = &.{
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "search", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "search", .tool_name = "tool_search", .content = "truncated preview", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"full_definition\"}]" } },
+    };
+    const body = try build_request(alloc, request, .{});
+    defer alloc.free(body);
+    try std.testing.expect(std.mem.find(u8, body, "full_definition") != null);
+    try std.testing.expect(std.mem.find(u8, body, "truncated preview") == null);
 }

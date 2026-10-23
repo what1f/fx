@@ -1098,6 +1098,7 @@ pub fn committedFilePresentationContentSourceValid(
 }
 
 pub const PersistedToolResult = struct {
+    loaded_tools_json: ?[]const u8 = null,
     tool_images: []ToolImage = &.{},
     tool_image_handle: ?[]u8 = null,
     tool_call_id: []u8,
@@ -1262,6 +1263,7 @@ test "persisted deferred tool result classifier is exact" {
 }
 
 pub const ToolResultMemory = struct {
+    loaded_tools_json: ?[]const u8 = null,
     /// Host review feedback is retained for the agent, not security evidence.
     review_feedback: bool = false,
     tool_images: []const ToolImage = &.{},
@@ -1396,7 +1398,9 @@ pub fn dupeToolResultMemory(alloc: std.mem.Allocator, memory: ToolResultMemory) 
     else
         null;
     errdefer if (command_output_replay) |replay| freeCommandOutputReplay(alloc, replay);
+    const loaded_tools_json = if (memory.loaded_tools_json) |json| try alloc.dupe(u8, json) else null;
     return .{
+        .loaded_tools_json = loaded_tools_json,
         .review_feedback = memory.review_feedback,
         .tool_images = tool_images,
         .tool_image_handle = tool_image_handle,
@@ -1416,6 +1420,7 @@ pub fn dupeToolResultMemory(alloc: std.mem.Allocator, memory: ToolResultMemory) 
 /// Frees the slice-bearing fields of a ToolResultMemory owned by the caller,
 /// as produced by dupeToolResultMemory.
 pub fn freeToolResultMemory(alloc: std.mem.Allocator, memory: ToolResultMemory) void {
+    if (memory.loaded_tools_json) |json| alloc.free(json);
     freeToolImages(alloc, memory.tool_images);
     if (memory.tool_image_handle) |handle| alloc.free(handle);
     if (memory.output_handle) |handle| alloc.free(handle);
@@ -2207,6 +2212,7 @@ pub const InterruptedHistoryTurn = struct {
 };
 
 pub const CompactedSummaryHistoryTurn = struct {
+    host_state_json: ?[]const u8 = null,
     summary: []u8,
     removed_turn_count: usize,
     compaction_count: usize,
@@ -2223,6 +2229,7 @@ pub const CompactedSummaryHistoryTurn = struct {
 };
 
 pub const HistoryTurn = union(enum) {
+    host_context: []u8,
     compacted_summary: CompactedSummaryHistoryTurn,
     assistant: AssistantHistoryTurn,
     interrupted: InterruptedHistoryTurn,
@@ -2232,7 +2239,7 @@ pub fn setHistoryTurnSummary(turn: *HistoryTurn, summary: TurnSummary) void {
     switch (turn.*) {
         .assistant => |*entry| entry.execution.turn_summary = summary,
         .interrupted => |*entry| entry.execution.turn_summary = summary,
-        .compacted_summary => {},
+        .compacted_summary, .host_context => {},
     }
 }
 
@@ -2240,7 +2247,7 @@ pub fn historyTurnSummary(turn: HistoryTurn) ?TurnSummary {
     return switch (turn) {
         .assistant => |entry| entry.execution.turn_summary,
         .interrupted => |entry| entry.execution.turn_summary,
-        .compacted_summary => null,
+        .compacted_summary, .host_context => null,
     };
 }
 
@@ -2505,8 +2512,10 @@ pub const ResolveMode = enum {
 
 pub fn freeHistoryTurn(alloc: std.mem.Allocator, turn: HistoryTurn) void {
     switch (turn) {
+        .host_context => |text| alloc.free(text),
         .compacted_summary => |entry| {
             alloc.free(entry.summary);
+            if (entry.host_state_json) |json| alloc.free(json);
             freeCompletedToolNames(alloc, entry.root_user_messages);
             freePermissionFeedback(alloc, entry.permission_feedback);
         },
@@ -2544,6 +2553,7 @@ pub fn freeFinishedPrompt(alloc: std.mem.Allocator, finished: FinishedPrompt) vo
 
 pub fn dupeHistoryTurn(alloc: std.mem.Allocator, turn: HistoryTurn) !HistoryTurn {
     return switch (turn) {
+        .host_context => |text| .{ .host_context = try alloc.dupe(u8, text) },
         .compacted_summary => |entry| blk: {
             const summary = try alloc.dupe(u8, entry.summary);
             errdefer alloc.free(summary);
@@ -2556,7 +2566,10 @@ pub fn dupeHistoryTurn(alloc: std.mem.Allocator, turn: HistoryTurn) !HistoryTurn
                 alloc,
                 entry.permission_feedback,
             );
+            errdefer freePermissionFeedback(alloc, permission_feedback);
+            const host_state_json = if (entry.host_state_json) |json| try alloc.dupe(u8, json) else null;
             break :blk .{ .compacted_summary = .{
+                .host_state_json = host_state_json,
                 .summary = summary,
                 .removed_turn_count = entry.removed_turn_count,
                 .compaction_count = entry.compaction_count,
@@ -2935,7 +2948,10 @@ fn dupePersistedToolResult(alloc: std.mem.Allocator, result: PersistedToolResult
     const tool_image_handle = if (result.tool_image_handle) |handle| try alloc.dupe(u8, handle) else null;
     errdefer if (tool_image_handle) |handle| alloc.free(handle);
     const tool_images = try dupeToolImages(alloc, result.tool_images);
+    errdefer freeToolImages(alloc, tool_images);
+    const loaded_tools_json = if (result.loaded_tools_json) |json| try alloc.dupe(u8, json) else null;
     return .{
+        .loaded_tools_json = loaded_tools_json,
         .tool_images = tool_images,
         .tool_image_handle = tool_image_handle,
         .tool_call_id = tool_call_id,
@@ -2959,6 +2975,7 @@ fn dupePersistedToolResult(alloc: std.mem.Allocator, result: PersistedToolResult
 }
 
 pub fn freePersistedToolResult(alloc: std.mem.Allocator, result: PersistedToolResult) void {
+    if (result.loaded_tools_json) |json| alloc.free(json);
     alloc.free(result.tool_call_id);
     alloc.free(result.tool_name);
     alloc.free(result.output);
@@ -3826,4 +3843,36 @@ test "public types remain constructible" {
     _ = decision;
     _ = action;
     _ = resolve_mode;
+}
+
+test "host activation metadata duplication preserves allocation ownership" {
+    const Case = struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            const result: PersistedToolResult = .{
+                .tool_call_id = @constCast("call"),
+                .tool_name = @constCast("tool_search"),
+                .status = .success,
+                .output = @constCast("loaded"),
+                .created_at_ms = 0,
+                .loaded_tools_json = "[]",
+                .output_bytes = 6,
+                .stored_output_bytes = 6,
+            };
+            const copy = try dupePersistedToolResult(alloc, result);
+            defer freePersistedToolResult(alloc, copy);
+            try std.testing.expectEqualStrings("[]", copy.loaded_tools_json.?);
+            var feedback = [_][]u8{@constCast("feedback")};
+            const turn: HistoryTurn = .{ .compacted_summary = .{
+                .summary = @constCast("notes"),
+                .removed_turn_count = 1,
+                .compaction_count = 1,
+                .permission_feedback = &feedback,
+                .host_state_json = "{\"loaded\":[]}",
+            } };
+            const duplicated = try dupeHistoryTurn(alloc, turn);
+            defer freeHistoryTurn(alloc, duplicated);
+            try std.testing.expectEqualStrings("{\"loaded\":[]}", duplicated.compacted_summary.host_state_json.?);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, Case.run, .{});
 }
