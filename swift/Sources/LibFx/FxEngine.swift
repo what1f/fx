@@ -278,6 +278,21 @@ public actor FxEngine {
         }
     }
 
+    /// Appends context without changing earlier messages. Returns after persistence accepts it.
+    public func appendContext(_ text: String) async throws {
+        try checkCatalogUpdate()
+        guard !text.isEmpty, text.utf8.count <= 65536 else {
+            throw FxError.invalidInput("Context must contain 1–65536 UTF-8 bytes")
+        }
+        let task = Task {
+            _ = try await rpc.request("libfx/context", .object(["sessionId": .string(sessionID), "text": .string(text)]))
+            try await journal?.check()
+        }
+        runtimeUpdateTask = task
+        defer { runtimeUpdateTask = nil }
+        try await task.value
+    }
+
     /// Adds or updates deferred tools while the engine is idle.
     public func upsertTools(_ additions: [FxTool]) async throws {
         try checkCatalogUpdate()
@@ -324,6 +339,7 @@ public actor FxEngine {
             _ = try await rpc.request("libfx/catalog", .object(["sessionId": .string(sessionID), "tools": .array(descriptors)]))
             self.tools = candidate
             self.checkpointMetadata = metadata
+            try await journal?.check()
         }
         runtimeUpdateTask = task
         defer { runtimeUpdateTask = nil }

@@ -1144,6 +1144,7 @@ pub fn handlePrompt(
     const deps = agentRuntimeDeps(&ctx);
     var dynamic_tool_arena = std.heap.ArenaAllocator.init(alloc);
     defer dynamic_tool_arena.deinit();
+    try server.ensureCatalogReminder(state, session);
     const initial_dynamic_tools = try initialDynamicTools(&ctx, dynamic_tool_arena.allocator());
     var agent_config = buildAgentConfig(state, session, .{
         .skill_catalog = .{ .skills = skill_catalog.items, .diagnostics = skill_catalog.diagnostics },
@@ -3038,9 +3039,15 @@ fn commitContextCompaction(
     const host_state = if (ctx.state.host_tools.search_enabled) try ctx.state.host_tools.saveState(ctx.alloc) else null;
     defer if (host_state) |json| ctx.alloc.free(json);
     retained_summary.host_state_json = host_state;
-    const prepared = try session_runtime.prepareCompactedHistory(ctx.alloc, session.session_rt.agent.history.items, retained_summary, retained_from orelse .{ .turns = history_range.rawHistoryTurnCount(session.session_rt.agent.history.items) });
+    var prepared = try session_runtime.prepareCompactedHistory(ctx.alloc, session.session_rt.agent.history.items, retained_summary, retained_from orelse .{ .turns = history_range.rawHistoryTurnCount(session.session_rt.agent.history.items) });
     var prepared_owned = true;
     defer if (prepared_owned) types.freeHistoryTurnSlice(ctx.alloc, prepared);
+    if (ctx.state.host_tools.search_enabled) {
+        const reminder = try ctx.state.host_tools.reminder(ctx.alloc);
+        errdefer ctx.alloc.free(reminder);
+        prepared = try ctx.alloc.realloc(prepared, prepared.len + 1);
+        prepared[prepared.len - 1] = .{ .host_context = reminder };
+    }
     if (session.v2) |v2| {
         v2.commitCompaction(retained_summary, active_prefix != null, retained_from) catch |err| {
             if (session_adapter.writeMayHaveLanded(err) and active_prefix != null) {

@@ -584,3 +584,8 @@ libfx is developed in the [fx repository](https://github.com/vercel-labs/fx), un
 ### Native Swift deferred tools
 
 The native Swift package supports deferred host tool catalogs and idle catalog updates. See [Update deferred host tools](../swift/README.md#update-deferred-host-tools) for activation, schema validation, persistence, and capacity limits. The JavaScript SDK does not expose catalog mutation methods.
+
+Deferred host actions no longer enter the top-level tool list when selected.
+Chat Completions uses `tool_search` and `call_action`; Responses returns definitions
+in conversation output items. The Swift engine also supports persisted, appended
+context reminders. Native Anthropic Messages transport remains unsupported.

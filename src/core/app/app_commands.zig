@@ -3118,7 +3118,7 @@ fn projectProviderToolCalls(
         const execution: types.ExecutionMemory = switch (turn) {
             .assistant => |entry| entry.execution,
             .interrupted => |entry| entry.execution,
-            .compacted_summary => continue,
+            .compacted_summary, .host_context => continue,
         };
         for (execution.tool_steps) |step| {
             for (step.tool_calls) |call| {

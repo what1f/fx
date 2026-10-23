@@ -488,6 +488,7 @@ pub fn appendHistoryTurnConversationEvents(
     const initial_len = events.items.len;
     errdefer events.shrinkRetainingCapacity(initial_len);
     switch (turn) {
+        .host_context => {},
         .assistant => |entry| {
             try events.append(alloc, .{ .user = .{
                 .text = entry.user.text,

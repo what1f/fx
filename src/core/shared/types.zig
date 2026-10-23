@@ -2229,6 +2229,7 @@ pub const CompactedSummaryHistoryTurn = struct {
 };
 
 pub const HistoryTurn = union(enum) {
+    host_context: []u8,
     compacted_summary: CompactedSummaryHistoryTurn,
     assistant: AssistantHistoryTurn,
     interrupted: InterruptedHistoryTurn,
@@ -2238,7 +2239,7 @@ pub fn setHistoryTurnSummary(turn: *HistoryTurn, summary: TurnSummary) void {
     switch (turn.*) {
         .assistant => |*entry| entry.execution.turn_summary = summary,
         .interrupted => |*entry| entry.execution.turn_summary = summary,
-        .compacted_summary => {},
+        .compacted_summary, .host_context => {},
     }
 }
 
@@ -2246,7 +2247,7 @@ pub fn historyTurnSummary(turn: HistoryTurn) ?TurnSummary {
     return switch (turn) {
         .assistant => |entry| entry.execution.turn_summary,
         .interrupted => |entry| entry.execution.turn_summary,
-        .compacted_summary => null,
+        .compacted_summary, .host_context => null,
     };
 }
 
@@ -2511,6 +2512,7 @@ pub const ResolveMode = enum {
 
 pub fn freeHistoryTurn(alloc: std.mem.Allocator, turn: HistoryTurn) void {
     switch (turn) {
+        .host_context => |text| alloc.free(text),
         .compacted_summary => |entry| {
             alloc.free(entry.summary);
             if (entry.host_state_json) |json| alloc.free(json);
@@ -2551,6 +2553,7 @@ pub fn freeFinishedPrompt(alloc: std.mem.Allocator, finished: FinishedPrompt) vo
 
 pub fn dupeHistoryTurn(alloc: std.mem.Allocator, turn: HistoryTurn) !HistoryTurn {
     return switch (turn) {
+        .host_context => |text| .{ .host_context = try alloc.dupe(u8, text) },
         .compacted_summary => |entry| blk: {
             const summary = try alloc.dupe(u8, entry.summary);
             errdefer alloc.free(summary);

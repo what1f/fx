@@ -97,6 +97,7 @@ pub fn buildCanonicalRootUserContext(
     var compacted_prefix_turns: usize = 0;
     for (history) |turn| {
         switch (turn) {
+            .host_context => {},
             .compacted_summary => |entry| {
                 has_compacted_summary = true;
                 compacted_prefix_turns = @max(
@@ -170,7 +171,7 @@ pub fn refreshQueuedRootUserContext(
     const finished: Finished = switch (finished_turn) {
         .assistant => |entry| .{ .user = entry.user.text, .execution = entry.execution },
         .interrupted => |entry| .{ .user = entry.user.text, .execution = entry.execution },
-        .compacted_summary => return alloc.dupe(u8, existing_context),
+        .compacted_summary, .host_context => return alloc.dupe(u8, existing_context),
     };
     const finished_user = finished.user;
 

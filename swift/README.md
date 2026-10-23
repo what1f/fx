@@ -474,3 +474,15 @@ The catalog holds at most 256 tools. The combined resident, provider, search, an
 Journal events and checkpoints retain activation metadata, including across automatic context compaction. On reopen, provide the current catalog and closures in `FxConfiguration`; catalog mutations and closures are not persisted. Saved activation names that no longer exist are ignored. The provider receives activated definitions through its ordinary function tool list. This can change the request prefix, and does not guarantee a provider cache hit or byte-identical requests. Dynamic host context append and native Responses tool discovery are not supported by this API.
 
 Run `swift/scripts/test-runtime-catalog-consumer.sh` after building the XCFramework to exercise automatic compaction, schema replacement, removal, SQLite reopen, and checkpoint restoration from a separate package using public APIs.
+
+Deferred actions keep the request's top-level tool list fixed. Chat Completions uses
+`tool_search` to fetch definitions and `call_action(name, args)` to invoke them.
+Responses sends definitions in `tool_search_output` items and calls actions natively.
+The host still supplies current definitions and closures when reopening an engine.
+
+`try await engine.appendContext(text)` appends a system reminder while idle. With
+persistence enabled, it waits for the journal write. Catalog updates also append
+reminders; they do not rewrite earlier messages. Compaction injects the current
+catalog again. Fetch definitions again when they are absent from the context.
+These paths have local fixtures; service acceptance and cache hits need separate
+provider validation. Native Anthropic Messages transport is not available yet.

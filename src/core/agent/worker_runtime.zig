@@ -292,7 +292,7 @@ fn historyTurnImages(turn: types.HistoryTurn) []const types.ImageAttachment {
     return switch (turn) {
         .assistant => |value| value.user.images,
         .interrupted => |value| value.user.images,
-        .compacted_summary => &.{},
+        .compacted_summary, .host_context => &.{},
     };
 }
 

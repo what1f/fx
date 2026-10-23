@@ -8,6 +8,29 @@ private actor RuntimeProbeCalls {
     func record(_ value: JSONValue) { values.append(value) }
 }
 
+// Extract the exact wire bytes, without re-encoding JSON objects.
+private func rawArray(_ key: String, in data: Data) throws -> Data {
+    let bytes = Array(data)
+    let marker = Array("\"\(key)\":[".utf8)
+    guard let start = bytes.indices.first(where: { $0 + marker.count <= bytes.count && Array(bytes[$0..<($0 + marker.count)]) == marker }) else {
+        throw RuntimeCatalogProbeError.failed("Missing raw array: \(key)")
+    }
+    let begin = start + marker.count - 1
+    var depth = 0, quoted = false, escaped = false
+    for index in begin..<bytes.count {
+        let byte = bytes[index]
+        if quoted {
+            if escaped { escaped = false } else if byte == 92 { escaped = true } else if byte == 34 { quoted = false }
+        } else if byte == 34 { quoted = true }
+        else if byte == 91 || byte == 123 { depth += 1 }
+        else if byte == 93 || byte == 125 {
+            depth -= 1
+            if depth == 0 { return Data(bytes[begin...index]) }
+        }
+    }
+    throw RuntimeCatalogProbeError.failed("Unterminated raw array")
+}
+
 private actor RuntimeProbeHTTP: FxHTTPClient {
     var summaries = 0
     var searches = 0
@@ -15,6 +38,8 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
     var key = "value"
     var removed = false
     var requests: [JSONValue] = []
+    var toolBytes: Data?
+    var previousMessages: Data?
     func update(key: String, removed: Bool = false) { self.key = key; self.removed = removed }
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         let body = try JSONDecoder().decode(JSONValue.self, from: request.httpBody ?? Data())
@@ -35,22 +60,26 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
                 + "\n\nFacts:\nnone\nRules:\nnone\nDecisions:\nnone\nStatus:\nnone\nOpen:\nnone"
             delta = .object(["role": .string("assistant"), "content": .string(notes)])
         } else {
+            let rawTools = try rawArray("tools", in: request.httpBody!)
+            if let toolBytes, toolBytes != rawTools { throw RuntimeCatalogProbeError.failed("Tool bytes changed") }
+            toolBytes = rawTools
+            let rawMessages = try rawArray("messages", in: request.httpBody!)
+            if messages.last?["role"] == .string("tool"), let previousMessages {
+                guard rawMessages.starts(with: previousMessages.dropLast()) else { throw RuntimeCatalogProbeError.failed("Prior message bytes changed after loading") }
+            }
+            previousMessages = rawMessages
             conversations += 1
             let lastRole = messages.last?["role"]?.string
             let afterSearch = messages.last?["name"] == .string("tool_search")
             if lastRole == "user" || afterSearch {
-                let advertised: [JSONValue]
-                if case .array(let tools) = body["tools"] { advertised = tools } else { advertised = [] }
-                let loaded = advertised.contains { $0["function"]?["name"] == .string("probe_action") }
-                if !removed && searches > 0 && !loaded { throw RuntimeCatalogProbeError.failed("Activated tool missing from request") }
-                if loaded {
-                    let definition = advertised.first { $0["function"]?["name"] == .string("probe_action") }?["function"]?["parameters"]
-                    guard definition?["required"] == .array([.string(key)]) else { throw RuntimeCatalogProbeError.failed("Request contains stale schema") }
+                let name = afterSearch || removed ? "call_action" : "tool_search"
+                if afterSearch && !removed {
+                    guard text.contains("\"required\":[\"\(key)\"]") else { throw RuntimeCatalogProbeError.failed("Search omitted current definition") }
                 }
-                let name = loaded || removed || afterSearch ? "probe_action" : "tool_search"
                 if name == "tool_search" { searches += 1 }
-
-                let args: JSONValue = name == "tool_search" ? .object(["query": .string("probe_action")]) : .object([key: .string("current")])
+                let args: JSONValue = name == "tool_search"
+                    ? .object(["query": .string("select:probe_action")])
+                    : .object(["name": .string("probe_action"), "args": .object([key: .string("current")])])
                 let arguments = String(decoding: try JSONEncoder().encode(args), as: UTF8.self)
                 delta = .object(["role": .string("assistant"), "tool_calls": .array([.object([
                     "index": .number(0), "id": .string("probe-\(conversations)"), "type": .string("function"),
@@ -117,13 +146,16 @@ func runRuntimeCatalogProbe() async throws -> Int {
         await http.update(key: "updated")
         try await prompt(engine)
         try require(await calls.values.last == .object(["updated": .string("current")]), "Updated schema did not execute")
+        try await engine.appendContext("Preference marker: concise answers.")
         let checkpoint = try await engine.checkpoint()
+        try require(String(decoding: checkpoint, as: UTF8.self).contains("Preference marker"), "Context missing from checkpoint")
         try require(String(decoding: checkpoint, as: UTF8.self).contains("host_state_json"), "Compaction activation state missing")
         try await engine.close()
         try await store.close()
         let reopenedStore = try FxSQLitePersistence(url: database)
         let reopened = try await FxEngine.open(configuration: config([tool("updated")]), persistence: reopenedStore)
         try await prompt(reopened)
+        try require(String(describing: await http.requests.last).contains("Preference marker"), "Context missing after immediate close and reopen")
         try await reopened.removeTools(named: ["probe_action"])
         await http.update(key: "updated", removed: true)
         let count = await calls.values.count
@@ -146,7 +178,7 @@ func runRuntimeCatalogProbe() async throws -> Int {
         try require(await calls.values.count == count + 1, "Deleted journal action executed")
         try await deletedJournal.close()
         try await deletedStore.close()
-        try require(await http.searches == 1, "Restore searched again")
+        try require(await http.searches > 1, "Definitions were not fetched on demand")
         return await http.summaries
     } catch {
         print("Catalog probe failure: summaries=\(await http.summaries), conversations=\(await http.conversations)")

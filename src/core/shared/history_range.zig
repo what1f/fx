@@ -33,11 +33,15 @@ pub fn contextHistoryRange(
         if (end) |limit| {
             if (index > limit.turns or (index == limit.turns and limit.tool_steps == 0 and limit.steering == 0)) break;
         }
+        if (original == .host_context) {
+            try view.append(arena, original);
+            continue;
+        }
         var turn = original;
         const execution = switch (turn) {
             .assistant => |*entry| &entry.execution,
             .interrupted => |*entry| &entry.execution,
-            .compacted_summary => unreachable,
+            .compacted_summary, .host_context => unreachable,
         };
         const first_step = if (index == start.turns) start.tool_steps else 0;
         const first_steering = if (index == start.turns) start.steering else 0;
@@ -70,7 +74,7 @@ pub fn contextHistoryRange(
                     entry.completed_tool_names = &.{};
                     entry.cancelled_command = null;
                 },
-                .compacted_summary => unreachable,
+                .compacted_summary, .host_context => unreachable,
             }
         }
         try view.append(arena, turn);

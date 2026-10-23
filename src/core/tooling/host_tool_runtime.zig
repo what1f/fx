@@ -211,6 +211,23 @@ pub const Runtime = struct {
         self.search_enabled = true;
     }
 
+    /// Caller owns the reminder. The catalog is context, never a root instruction.
+    pub fn reminder(self: *const Runtime, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try out.writer.writeAll("<system-reminder>\nAvailable actions (current catalog; replaces earlier catalogs):\n");
+        for (self.descriptors, 0..) |entry, index| {
+            if (!self.deferred[index]) continue;
+            try out.writer.print("{s}: {s}\n", .{ entry.object.get("name").?.string, entry.object.get("description").?.string });
+            // Include a version fingerprint so schema-only changes also append a reminder.
+            const schema = try std.json.Stringify.valueAlloc(alloc, entry.object.get("inputSchema").?, .{});
+            defer alloc.free(schema);
+            try out.writer.print("Definition version: {x}\n", .{std.hash.Wyhash.hash(0, schema)});
+        }
+        try out.writer.writeAll("Fetch current definitions with tool_search(query: select:name or keywords). Removed actions cannot be called.\n</system-reminder>");
+        return out.toOwnedSlice();
+    }
+
     pub fn saveState(self: *Runtime, alloc: Allocator) ![]u8 {
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();

@@ -187,21 +187,25 @@ fn selectRecentContext(
         if (selected_any and turns_used >= max_turns) break;
         raw_count -= 1;
         const user = switch (turn) {
+            .host_context => |text| text,
             .assistant => |entry| entry.user.text,
             .interrupted => |entry| entry.user.text,
             .compacted_summary => unreachable,
         };
         const reply = switch (turn) {
+            .host_context => "",
             .assistant => |entry| entry.assistant,
             .interrupted => |entry| entry.assistant orelse "",
             .compacted_summary => unreachable,
         };
         const execution = switch (turn) {
+            .host_context => types.ExecutionMemory{},
             .assistant => |entry| entry.execution,
             .interrupted => |entry| entry.execution,
             .compacted_summary => unreachable,
         };
         const replay = switch (turn) {
+            .host_context => null,
             .assistant => |entry| entry.provider_replay,
             .interrupted => null,
             .compacted_summary => unreachable,

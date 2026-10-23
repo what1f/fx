@@ -534,7 +534,7 @@ pub fn retainedContextTargets(
         const execution = switch (history[index]) {
             .assistant => |turn| turn.execution,
             .interrupted => |turn| turn.execution,
-            .compacted_summary => continue,
+            .compacted_summary, .host_context => continue,
         };
         try collector.collect(execution);
     }

@@ -134,7 +134,7 @@ pub fn historyTurnWorkId(turn: HistoryTurn) ?[]const u8 {
     return switch (turn) {
         .assistant => |entry| entry.user.work_id,
         .interrupted => |entry| entry.user.work_id,
-        .compacted_summary => null,
+        .compacted_summary, .host_context => null,
     };
 }
 
@@ -150,7 +150,7 @@ pub fn decideWorkIdAssociation(
     if (event_work_id == null) {
         return if (turn_work_id == null) .none else error.ConflictingWorkId;
     }
-    if (turn == .compacted_summary) return error.ConflictingWorkId;
+    if (turn == .compacted_summary or turn == .host_context) return error.ConflictingWorkId;
     if (turn_work_id) |work_id| {
         return if (std.mem.eql(u8, work_id, event_work_id.?))
             .already_associated
@@ -171,7 +171,7 @@ pub fn copyWorkIdToTurn(
     switch (turn.*) {
         .assistant => |*entry| entry.user.work_id = owned,
         .interrupted => |*entry| entry.user.work_id = owned,
-        .compacted_summary => unreachable,
+        .compacted_summary, .host_context => unreachable,
     }
 }
 
@@ -331,7 +331,7 @@ fn optionalBytesEqual(lhs: ?[]const u8, rhs: ?[]const u8) bool {
 
 fn images_for_history_turn(turn: HistoryTurn) []const ImageAttachment {
     return switch (turn) {
-        .compacted_summary => &.{},
+        .compacted_summary, .host_context => &.{},
         .assistant => |entry| entry.user.images,
         .interrupted => |entry| entry.user.images,
     };
@@ -339,7 +339,7 @@ fn images_for_history_turn(turn: HistoryTurn) []const ImageAttachment {
 
 fn mutable_images_for_history_turn(turn: *HistoryTurn) []ImageAttachment {
     return switch (turn.*) {
-        .compacted_summary => &.{},
+        .compacted_summary, .host_context => &.{},
         .assistant => |*entry| entry.user.images,
         .interrupted => |*entry| entry.user.images,
     };
@@ -347,7 +347,7 @@ fn mutable_images_for_history_turn(turn: *HistoryTurn) []ImageAttachment {
 
 fn user_text_for_history_turn(turn: HistoryTurn) []const u8 {
     return switch (turn) {
-        .compacted_summary => "",
+        .compacted_summary, .host_context => "",
         .assistant => |entry| entry.user.text,
         .interrupted => |entry| entry.user.text,
     };
@@ -484,7 +484,7 @@ fn rebuilt_legacy_turn_text(
 
 fn mutable_user_for_history_turn(turn: *HistoryTurn) ?*UserTurn {
     return switch (turn.*) {
-        .compacted_summary => null,
+        .compacted_summary, .host_context => null,
         .assistant => |*entry| &entry.user,
         .interrupted => |*entry| &entry.user,
     };
@@ -1293,7 +1293,7 @@ fn collectReferencedShellIds(
                 }
                 try collectShellIdsFromExecution(alloc, entry.execution, out);
             },
-            .compacted_summary => {},
+            .compacted_summary, .host_context => {},
         }
     }
 }
@@ -1935,6 +1935,7 @@ pub fn appendHistoryChatMessages(
 
 fn isCurrentCompactionCheckpoint(turn: HistoryTurn) bool {
     return switch (turn) {
+        .host_context => false,
         .compacted_summary => |entry| compactor.replacesPriorContext(entry.summary),
         else => false,
     };
@@ -2138,6 +2139,7 @@ fn appendHistoryMessagesImpl(
 ) !void {
     for (history) |turn| {
         switch (turn) {
+            .host_context => |text| try messages.append(alloc, message.Message.userText(text)),
             .compacted_summary => |entry| {
                 const text = try formatCompactedContinuationMessage(alloc, entry.summary);
                 errdefer alloc.free(text);
@@ -2372,6 +2374,7 @@ fn appendHistoryChatMessagesImpl(
 ) !void {
     for (history) |turn| {
         switch (turn) {
+            .host_context => |text| try messages.append(alloc, .{ .role = .user, .content = text }),
             .compacted_summary => |entry| {
                 const text = try formatCompactedContinuationMessage(alloc, entry.summary);
                 errdefer alloc.free(text);

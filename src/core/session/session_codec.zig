@@ -608,7 +608,7 @@ pub fn turnNamesImages(turn: session.HistoryTurn, stored: ?*const StoredImages) 
     return switch (turn) {
         .assistant => |entry| namesImages(entry.user, stored) or executionNamesImages(entry.execution, .{}, stored),
         .interrupted => |entry| namesImages(entry.user, stored) or executionNamesImages(entry.execution, .{}, stored),
-        .compacted_summary => false,
+        .compacted_summary, .host_context => false,
     };
 }
 
@@ -766,6 +766,11 @@ pub fn writeHistoryTurnNamingImages(writer: *std.Io.Writer, turn: session.Histor
 /// so durable writers keep their error set.
 fn writeHistoryTurnTo(writer: *std.Io.Writer, turn: session.HistoryTurn, image_blobs: anytype) !void {
     switch (turn) {
+        .host_context => |text| {
+            try writer.writeAll("{\"kind\":\"host_context\",\"text\":");
+            try writeDurableBytes(writer, text);
+            try writer.writeByte('}');
+        },
         .compacted_summary => |entry| {
             try writer.writeAll("{");
             if (entry.host_state_json) |json| {
@@ -872,6 +877,10 @@ pub fn parseHistoryTurnWithImages(
     sources: ImageSources,
 ) !session.HistoryTurn {
     const kind = try requireString(try requireObject(value), "kind");
+    if (std.mem.eql(u8, kind, "host_context")) {
+        const object = try exactObject(value, &.{ "kind", "text" });
+        return .{ .host_context = try parseRequiredDurableBytes(alloc, object, "text") };
+    }
     if (std.mem.eql(u8, kind, "compacted_summary")) {
         const raw_object = try requireObject(value);
         const has_root_user_messages = raw_object.get("root_user_messages") != null;
@@ -6185,4 +6194,25 @@ test "compacted host activation metadata survives allocation failures" {
     };
     try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, Case.run, .{false});
     try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, Case.run, .{true});
+}
+
+test "host context roundtrips separately from user turns" {
+    const alloc = std.testing.allocator;
+    const original: types.HistoryTurn = .{ .host_context = @constCast("<system-reminder>Preference</system-reminder>") };
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try writeHistoryTurn(&out.writer, original);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, out.written(), .{});
+    defer parsed.deinit();
+    const restored = try parseHistoryTurn(alloc, parsed.value);
+    defer types.freeHistoryTurn(alloc, restored);
+    try std.testing.expectEqualStrings(original.host_context, restored.host_context);
+    const copy = try types.dupeHistoryTurn(alloc, restored);
+    defer types.freeHistoryTurn(alloc, copy);
+    try std.testing.expect(copy.host_context.ptr != restored.host_context.ptr);
+    var messages: std.ArrayList(types.ChatMessage) = .empty;
+    defer messages.deinit(alloc);
+    try session.appendHistoryChatMessages(alloc, &messages, &.{restored});
+    try std.testing.expectEqualStrings(original.host_context, messages.items[0].content.?);
+    try std.testing.expect(messages.items[0].context_origin == .ordinary);
 }

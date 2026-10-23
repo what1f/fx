@@ -1018,7 +1018,7 @@ fn fromState(a: Allocator, locked: *Locked, state: *session_codec.DurableSession
                 entry.user.images = try withImages(a, &locked.dir, locked.id, entry.user.images, problem);
                 try storeInline(a, &entry.execution, &stored);
             },
-            .compacted_summary => {},
+            .compacted_summary, .host_context => {},
         }
         try requireKeepable(a, turn.*, history_file, number, problem);
         last_ts = @max(last_ts, turnTime(turn.*));
@@ -1030,7 +1030,7 @@ fn fromState(a: Allocator, locked: *Locked, state: *session_codec.DurableSession
                 .keep_from = null,
                 .ts_ms = last_ts,
             } },
-            .assistant, .interrupted => .{ .whole = .{ .turn = turn.*, .ts_ms = last_ts } },
+            .assistant, .interrupted, .host_context => .{ .whole = .{ .turn = turn.*, .ts_ms = last_ts } },
         });
     }
     member.steps = steps.items;
@@ -1045,7 +1045,7 @@ fn requireKeepable(a: Allocator, turn: types.HistoryTurn, file: []const u8, numb
     const user = switch (turn) {
         .assistant => |entry| entry.user,
         .interrupted => |entry| entry.user,
-        .compacted_summary => return,
+        .compacted_summary, .host_context => return,
     };
     if (!std.unicode.utf8ValidateSlice(user.text))
         return problem.set("{s} turn {d} has a prompt that is not valid UTF-8, which the current format can't keep", .{ file, number });
@@ -1080,7 +1080,7 @@ fn turnTime(turn: types.HistoryTurn) u64 {
     const summary = switch (turn) {
         .assistant => |entry| entry.execution.turn_summary,
         .interrupted => |entry| entry.execution.turn_summary,
-        .compacted_summary => null,
+        .compacted_summary, .host_context => null,
     } orelse return 0;
     return @intCast(@max(summary.completed_at_ms, 0));
 }
