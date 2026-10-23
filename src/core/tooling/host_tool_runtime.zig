@@ -218,7 +218,9 @@ pub const Runtime = struct {
         try out.writer.writeAll("<system-reminder>\nAvailable actions (current catalog; replaces earlier catalogs):\n");
         for (self.descriptors, 0..) |entry, index| {
             if (!self.deferred[index]) continue;
-            try out.writer.print("{s}: {s}\n", .{ entry.object.get("name").?.string, entry.object.get("description").?.string });
+            const description = entry.object.get("description").?.string;
+            const line_end = std.mem.findScalar(u8, description, '\n') orelse description.len;
+            try out.writer.print("{s}: {s}\n", .{ entry.object.get("name").?.string, text_utils.utf8PrefixByBytes(description[0..line_end], 160) });
             // Include a version fingerprint so schema-only changes also append a reminder.
             const schema = try std.json.Stringify.valueAlloc(alloc, entry.object.get("inputSchema").?, .{});
             defer alloc.free(schema);

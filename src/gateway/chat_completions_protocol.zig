@@ -542,7 +542,8 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
             if (message.role == .user and message.images.len != 0) {
                 try write_user_content_parts(writer, alloc, message);
             } else {
-                try std.json.Stringify.value(message.content, .{}, writer);
+                const definitions = if (message.role == .tool and message.tool_result_memory != null) message.tool_result_memory.?.loaded_tools_json else null;
+                try std.json.Stringify.value(definitions orelse message.content, .{}, writer);
             }
             try write_replay(writer, alloc, message);
             if (message.role == .tool) {
@@ -2598,4 +2599,17 @@ test "deferred tools preserve Chat Completions request bytes" {
     const removed = try build_request(alloc, request, .{});
     defer alloc.free(removed);
     try std.testing.expectEqualStrings(before, removed);
+}
+
+test "deferred definitions survive ordinary tool output truncation" {
+    const alloc = std.testing.allocator;
+    var request = test_request();
+    request.messages = &.{
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "search", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "search", .tool_name = "tool_search", .content = "truncated preview", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"full_definition\"}]" } },
+    };
+    const body = try build_request(alloc, request, .{});
+    defer alloc.free(body);
+    try std.testing.expect(std.mem.find(u8, body, "full_definition") != null);
+    try std.testing.expect(std.mem.find(u8, body, "truncated preview") == null);
 }

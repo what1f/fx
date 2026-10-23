@@ -123,7 +123,7 @@ func runRuntimeCatalogProbe() async throws -> Int {
         ]), isIdempotent: true, deferred: true) { input, _ in await calls.record(input); return "called" }
     }
     func config(_ tools: [FxTool]) -> FxConfiguration {
-        var configuration = FxConfiguration(provider: .custom(provider), model: "small", tools: tools, workspace: directory,
+        var configuration = FxConfiguration(provider: .custom(provider), model: "small", tools: [FxTool(name: "resident", description: "Always available", inputSchema: .object(["type": .string("object")])) { _, _ in "resident" }] + tools, workspace: directory,
             httpClient: http, checkpointAfterBytes: nil)
         configuration.toolSearchEnabled = true
         return configuration

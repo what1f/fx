@@ -9,6 +9,7 @@ private actor CatalogCalls {
 
 private actor CatalogHTTP: FxHTTPClient {
     var posts: [JSONValue] = []
+    var rawPosts: [Data] = []
     let actions: [(String, JSONValue)?]
     let codex: Bool
     init(actions: [(String, JSONValue)?], codex: Bool = false) { self.actions = actions; self.codex = codex }
@@ -21,6 +22,7 @@ private actor CatalogHTTP: FxHTTPClient {
         } else {
             let body = try JSONDecoder().decode(JSONValue.self, from: request.httpBody ?? Data())
             posts.append(body)
+            rawPosts.append(request.httpBody!)
             let action = posts.count <= actions.count ? actions[posts.count - 1] : nil
             var events: [JSONValue] = []
             if let (name, input) = action {
@@ -133,6 +135,11 @@ private func drainCatalogTurn(_ turn: FxTurn) async throws {
     #expect(await calls.inputs.count == 2)
     let final = await http.posts
     #expect(final[5]["tools"] == before[1]["tools"])
+    let raw = await http.rawPosts
+    let tools = try catalogRawArray("tools", in: raw[0])
+    for body in raw { #expect(try catalogRawArray("tools", in: body) == tools) }
+    let prefix = try catalogRawArray("input", in: raw[0])
+    #expect(try catalogRawArray("input", in: raw[2]).starts(with: prefix.dropLast()))
     try await restored.close()
 }
 
