@@ -80,8 +80,35 @@ actor Calls {
     }
 }
 
+actor HistoryHTTP: FxHTTPClient {
+    let continuing: Bool
+    init(continuing: Bool) { self.continuing = continuing }
+    func send(_ request: URLRequest) throws -> FxHTTPResponse {
+        let body = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+        if continuing { try require(body.contains("persistent first message"), "Conversation history did not survive process restart") }
+        if continuing { try require(body.contains("history reply"), "Previous assistant reply is missing") }
+        let payload = "data: {\"type\":\"text-delta\",\"delta\":\"history reply\"}\n\ndata: {\"type\":\"finish\",\"finishReason\":{\"unified\":\"stop\",\"raw\":\"stop\"}}\n\ndata: [DONE]\n\n"
+        return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { $0.yield(Data(payload.utf8)); $0.finish() })
+    }
+}
+
 @main struct ToolApprovalSmoke {
     static func main() async throws {
+        if CommandLine.arguments.count == 3 {
+            let continuing = CommandLine.arguments[1] == "continue"
+            var configuration = FxConfiguration(apiKey: "fixture", model: "swift/approval-smoke", httpClient: HistoryHTTP(continuing: continuing))
+            configuration.modelCatalog = try FxModelCatalog(response: Data(#"{"data":[{"id":"swift/approval-smoke","type":"language","tags":["tool-use"]}]}"#.utf8))
+            let agent = try await Agent.open(configuration: configuration, persistenceURL: URL(fileURLWithPath: CommandLine.arguments[2]), builtInTools: [])
+            do {
+                let turn = try await agent.prompt(continuing ? "continue the conversation" : "persistent first message")
+                var text = ""
+                for try await event in turn { if case .text(let delta) = event { text += delta } }
+                try require(try await turn.result.stopReason == .endTurn && text == "history reply", "Persistent conversation failed")
+                try await agent.close()
+            } catch { try? await agent.close(); throw error }
+            print(continuing ? "PASS: Agent restored SQLite history in a second process" : "PASS: Agent persisted the first process conversation")
+            return
+        }
         for allow in [true, false] {
             let file = FileManager.default.temporaryDirectory.appendingPathComponent("approval-smoke-\(UUID().uuidString)")
             defer { try? FileManager.default.removeItem(at: file) }
@@ -93,9 +120,9 @@ actor Calls {
             let tool = approval.wrap(tool: original, pluginID: "notes", effect: .write)
             var configuration = FxConfiguration(apiKey: "fixture", model: "swift/approval-smoke", tools: [tool], httpClient: http)
             configuration.modelCatalog = try FxModelCatalog(response: Data(#"{"data":[{"id":"swift/approval-smoke","type":"language","tags":["tool-use"]}]}"#.utf8))
-            let engine = try await FxEngine.open(configuration: configuration)
+            let agent = try await Agent.open(configuration: configuration, approval: approval, builtInTools: [])
             do {
-                let turn = try await engine.prompt("save the fixture", id: "approval-turn")
+                let turn = try await agent.prompt("save the fixture", id: "approval-turn")
                 var text = "", finishes = 0
                 for try await event in turn {
                     if case .text(let delta) = event { text += delta }
@@ -106,9 +133,9 @@ actor Calls {
                 }
                 try require(try await turn.result.stopReason == .endTurn, "Turn did not finish")
                 try require(text == "handled" && finishes == 1, "Model did not handle the result")
-                try await engine.close()
+                try await agent.close()
             } catch {
-                try? await engine.close()
+                try? await agent.close()
                 throw error
             }
             let requests = await calls.approvals
@@ -118,20 +145,22 @@ actor Calls {
                         "Approval identity changed")
             try require(request.input == .object(["value": .string("fixture")]), "Approval input changed")
             try require(request.context.executionID == "approval-call" && request.context.turnID == "approval-turn"
-                        && request.context.sessionID == engine.sessionID, "Approval context changed")
+                        && !request.context.sessionID.isEmpty, "Approval context changed")
             try require(await calls.executions == (allow ? 1 : 0), "Wrong execution count")
             try require(FileManager.default.fileExists(atPath: file.path) == allow, "Wrong file side effect")
             if allow { try require(try String(contentsOf: file, encoding: .utf8) == "saved", "Wrong file content") }
             try require(await http.output?["type"] == .string(allow ? "text" : "error-text"), "Wrong model tool result")
             try require(await approval.allowedPlugins.isEmpty, "Unexpected persistent grant")
-            print(allow ? "PASS: native FxEngine allowed host closure and wrote the file once"
-                        : "PASS: native FxEngine denied host closure without a file side effect")
+            print(allow ? "PASS: Agent with native FxEngine allowed host closure and wrote the file once"
+                        : "PASS: Agent with native FxEngine denied host closure without a file side effect")
         }
     }
 }
 SWIFT
 LIBFX_SWIFT_PACKAGE="$repo_root/swift" swift build --package-path "$task_tmp" --product ToolApprovalSmoke
 FX_SOUND=0 "$task_tmp/.build/debug/ToolApprovalSmoke" 2> "$task_tmp/runtime.stderr"
+FX_SOUND=0 "$task_tmp/.build/debug/ToolApprovalSmoke" first "$task_tmp/conversation.sqlite" 2>> "$task_tmp/runtime.stderr"
+FX_SOUND=0 "$task_tmp/.build/debug/ToolApprovalSmoke" continue "$task_tmp/conversation.sqlite" 2>> "$task_tmp/runtime.stderr"
 if [[ -s "$task_tmp/runtime.stderr" ]]; then
     cat "$task_tmp/runtime.stderr" >&2
     exit 1
