@@ -1,6 +1,6 @@
 # Host tool approval
 
-Use `FxToolApproval` to authorize plugin effects before a host `FxTool.execute` closure runs. `FxConfiguration.onPermission` handles permission requests from the core. Host closures authorize their own effects, as described in [the Swift SDK permission contract](README.md#resolve-core-permission-requests). This wrapper implements that host responsibility and leaves core permission policy unchanged.
+Import `FxAgentKit` to use `FxToolApproval` to authorize plugin effects before a host `FxTool.execute` closure runs. `FxConfiguration.onPermission` handles permission requests from the core. Host closures authorize their own effects, as described in [the Swift SDK permission contract](README.md#resolve-core-permission-requests). This wrapper implements that host responsibility and leaves core permission policy unchanged.
 
 This wrapper covers only Swift host closures passed through `wrap`. For Swift workspace tools, wrap file reads as `.readOnly`, file writes and edits as `.write`, and every shell call as `.dangerous`. Keep shell approval unconditional; do not infer permission from command text. Core permission requests continue to use `onPermission`.
 
@@ -12,6 +12,7 @@ The following excerpt assumes `saveTool` is an existing `FxTool`. Replace the ca
 
 ```swift
 import LibFx
+import FxAgentKit
 
 let approval = FxToolApproval { request in
     // Return the host's decision after presenting or evaluating this request.

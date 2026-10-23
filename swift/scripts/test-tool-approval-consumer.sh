@@ -11,12 +11,13 @@ import PackageDescription
 let package = Package(
     name: "ToolApprovalSmoke", platforms: [.macOS(.v14)],
     dependencies: [.package(name: "LibFx", path: ProcessInfo.processInfo.environment["LIBFX_SWIFT_PACKAGE"]!)],
-    targets: [.executableTarget(name: "ToolApprovalSmoke", dependencies: [.product(name: "LibFx", package: "LibFx")])]
+    targets: [.executableTarget(name: "ToolApprovalSmoke", dependencies: [.product(name: "FxAgentKit", package: "LibFx"), .product(name: "LibFx", package: "LibFx")])]
 )
 SWIFT
 cat > "$task_tmp/Sources/ToolApprovalSmoke/Smoke.swift" <<'SWIFT'
 import Foundation
 import LibFx
+import FxAgentKit
 
 struct SmokeFailure: Error {
     let message: String
