@@ -2,6 +2,8 @@
 
 A Swift 6 package for running the fx agent core in process through a C ABI. It provides conversation engines, durable sessions, tools, streaming, persistence, observation, and optional MCP and HTTP adapters. See [local acceptance](ACCEPTANCE.md) for the qualification scope and [validation](VALIDATION.md) for command results.
 
+For an agent with built-in workspace tools, host approval, and a persistent conversation, use [FxAgentKit](FxAgentKit/README.md). It builds on the LibFx configuration, event, and result types described here. See [workspace tools](WORKSPACE-TOOLS.md), [tool approval](TOOL-APPROVAL.md), and [automatic compaction](COMPACTION.md) for their contracts and local verification commands.
+
 ## Build and use a local package
 
 Requirements: macOS 14 or later, Xcode, Swift 6.2 or later, and Zig 0.17.0.
