@@ -9,7 +9,7 @@ private actor RuntimeProbeCalls {
 }
 
 // Extract the exact wire bytes, without re-encoding JSON objects.
-private func rawArray(_ key: String, in data: Data) throws -> Data {
+func catalogRawArray(_ key: String, in data: Data) throws -> Data {
     let bytes = Array(data)
     let marker = Array("\"\(key)\":[".utf8)
     guard let start = bytes.indices.first(where: { $0 + marker.count <= bytes.count && Array(bytes[$0..<($0 + marker.count)]) == marker }) else {
@@ -60,10 +60,10 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
                 + "\n\nFacts:\nnone\nRules:\nnone\nDecisions:\nnone\nStatus:\nnone\nOpen:\nnone"
             delta = .object(["role": .string("assistant"), "content": .string(notes)])
         } else {
-            let rawTools = try rawArray("tools", in: request.httpBody!)
+            let rawTools = try catalogRawArray("tools", in: request.httpBody!)
             if let toolBytes, toolBytes != rawTools { throw RuntimeCatalogProbeError.failed("Tool bytes changed") }
             toolBytes = rawTools
-            let rawMessages = try rawArray("messages", in: request.httpBody!)
+            let rawMessages = try catalogRawArray("messages", in: request.httpBody!)
             if messages.last?["role"] == .string("tool"), let previousMessages {
                 guard rawMessages.starts(with: previousMessages.dropLast()) else { throw RuntimeCatalogProbeError.failed("Prior message bytes changed after loading") }
             }

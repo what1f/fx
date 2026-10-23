@@ -249,7 +249,7 @@ pub const Runtime = struct {
         defer parsed.deinit();
         if (parsed.value != .object) return error.InvalidHostState;
         const loaded = parsed.value.object.get("loaded") orelse return error.InvalidHostState;
-        if (loaded != .array or loaded.array.items.len > max_tools) return error.InvalidHostState;
+        if (loaded != .array or loaded.array.items.len > max_catalog_tools) return error.InvalidHostState;
         for (loaded.array.items) |name| if (name != .string or !validName(name.string)) return error.InvalidHostState;
         for (loaded.array.items) |name| {
             for (self.descriptors, 0..) |descriptor, index| if (std.mem.eql(u8, name.string, descriptor.object.get("name").?.string)) {
@@ -316,7 +316,7 @@ pub const Runtime = struct {
                 var schema: std.Io.Writer.Allocating = .init(ctx.allocator);
                 defer schema.deinit();
                 std.json.Stringify.value(entry, .{}, &schema.writer) catch return error.OutOfMemory;
-                if (additions.written().len + schema.written().len + @as(usize, if (count > 0) 2 else 0) + 1 > 64 * 1024) return .{ .failure = try ctx.allocator.dupe(u8, "Selected tool definitions exceed the 65536 byte limit") };
+                if (additions.written().len + schema.written().len + @as(usize, if (count > 0) 1 else 0) + 1 > 64 * 1024) return .{ .failure = try ctx.allocator.dupe(u8, "Selected tool definitions exceed the 65536 byte limit") };
                 if (count > 0) additions.writer.writeByte(',') catch return error.OutOfMemory;
                 additions.writer.writeAll(schema.written()) catch return error.OutOfMemory;
                 output.writer.print("\n{s}", .{schema.written()}) catch return error.OutOfMemory;
@@ -324,11 +324,6 @@ pub const Runtime = struct {
             }
         }
         additions.writer.writeByte(']') catch return error.OutOfMemory;
-        var loaded_count: usize = if (self.search_enabled) 2 else 0;
-        for (self.loaded, self.deferred) |flag, deferred| if (flag or !deferred) {
-            loaded_count += 1;
-        };
-        if (loaded_count + count > max_catalog_tools) return .{ .failure = try ctx.allocator.dupe(u8, "Too many loaded tools") };
         // Validate and allocate the complete result before activating any tool.
         const schemas = try additions.toOwnedSlice();
         const text = try output.toOwnedSlice();
@@ -444,7 +439,11 @@ fn call(
         if (name != .string or args != .object) return error.InvalidToolArguments;
         for (catalog.descriptors, 0..) |entry, index| {
             if (!catalog.deferred[index] or !std.mem.eql(u8, entry.object.get("name").?.string, name.string)) continue;
-            if (!catalog.loaded[index]) return .{ .failure = try ctx.allocator.dupe(u8, "Fetch the action definition with tool_search before calling it") };
+            var advertised = false;
+            for (ctx.advertised_host_tool_names) |current| if (std.mem.eql(u8, current, name.string)) {
+                advertised = true;
+            };
+            if (!catalog.loaded[index] or !advertised) return .{ .failure = try ctx.allocator.dupe(u8, "Fetch the action definition with tool_search before calling it") };
             const json = std.json.Stringify.valueAlloc(ctx.allocator, args, .{}) catch return error.OutOfMemory;
             defer ctx.allocator.free(json);
             return provider.call(ctx.allocator, name.string, ctx.tool_call_id, json, ctx.max_tool_result_bytes, ctx.cancel_flag);

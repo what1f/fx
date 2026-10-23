@@ -1794,6 +1794,27 @@ fn handleKernelCatalog(state: *ServerState, alloc: Allocator, msg: *const jsonrp
     };
     var candidate_owned = true;
     defer if (candidate_owned) candidate.deinit();
+    if (!state.host_tools.search_enabled) return state.writer.writeError(alloc, msg.id, invalid);
+    // Only the deferred catalog may change. Resident definitions own the cached prefix.
+    for ([_]*const host_tool_runtime.Runtime{ &state.host_tools, &candidate }, 0..) |catalog, side| {
+        const other = if (side == 0) &candidate else &state.host_tools;
+        for (catalog.descriptors, 0..) |descriptor, index| {
+            if (catalog.deferred[index]) continue;
+            const original = try std.json.Stringify.valueAlloc(alloc, descriptor, .{});
+            defer alloc.free(original);
+            var matched = false;
+            for (other.descriptors, 0..) |entry, other_index| {
+                if (other.deferred[other_index]) continue;
+                const encoded = try std.json.Stringify.valueAlloc(alloc, entry, .{});
+                defer alloc.free(encoded);
+                if (std.mem.eql(u8, original, encoded)) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) return state.writer.writeError(alloc, msg.id, invalid);
+        }
+    }
     candidate.enableSearch();
     for (candidate.descriptors, 0..) |entry, index| {
         for (state.host_tools.descriptors, 0..) |prior, prior_index| {

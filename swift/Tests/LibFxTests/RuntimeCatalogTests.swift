@@ -198,3 +198,59 @@ private actor CatalogUpdateGate {
     do { let engine = try await FxEngine.open(configuration: configuration); try await engine.close(); Issue.record("Resident capacity ignored search tool") }
     catch {}
 }
+
+private actor MessagesCatalogHTTP: FxHTTPClient {
+    var requests: [Data] = []
+    var step = 0
+    func send(_ request: URLRequest) async throws -> FxHTTPResponse {
+        #expect(request.url?.path == "/v1/messages")
+        #expect(request.value(forHTTPHeaderField: "anthropic-beta") == "inline-tools-2026-09-15")
+        requests.append(request.httpBody!)
+        let phase = step % 3
+        step += 1
+        var events: [JSONValue] = []
+        if phase < 2 {
+            let name = phase == 0 ? "tool_search" : "action_42"
+            let args: JSONValue = phase == 0 ? .object(["query": .string("select:action_42")]) : .object(["value": .string("native")])
+            let arguments = String(decoding: try JSONEncoder().encode(args), as: UTF8.self)
+            events = [
+                .object(["type": .string("content_block_start"), "index": .number(0), "content_block": .object(["type": .string("tool_use"), "id": .string("call-\(step)"), "name": .string(name), "input": .object([:])])]),
+                .object(["type": .string("content_block_delta"), "index": .number(0), "delta": .object(["type": .string("input_json_delta"), "partial_json": .string(arguments)])]),
+                .object(["type": .string("content_block_stop"), "index": .number(0)]),
+            ]
+        } else {
+            events = [
+                .object(["type": .string("content_block_start"), "index": .number(0), "content_block": .object(["type": .string("text"), "text": .string("")])]),
+                .object(["type": .string("content_block_delta"), "index": .number(0), "delta": .object(["type": .string("text_delta"), "text": .string("done")])]),
+                .object(["type": .string("content_block_stop"), "index": .number(0)]),
+            ]
+        }
+        events.append(.object(["type": .string("message_delta"), "delta": .object(["stop_reason": .string(phase < 2 ? "tool_use" : "end_turn")]), "usage": .object(["output_tokens": .number(10)])]))
+        events.append(.object(["type": .string("message_stop")]))
+        let stream = try events.map { "data: " + String(decoding: try JSONEncoder().encode($0), as: UTF8.self) + "\n\n" }.joined()
+        return FxHTTPResponse(statusCode: 200, body: AsyncThrowingStream { $0.yield(Data(stream.utf8)); $0.finish() })
+    }
+}
+
+@Test func runtimeCatalogAnthropicLoadsDefinitionsWithoutChangingPrefix() async throws {
+    let calls = CatalogCalls()
+    let http = MessagesCatalogHTTP()
+    let provider = try FxCustomProvider(name: "messagesfixture", baseURL: URL(string: "https://messages.example/v1")!, models: ["claude-fixture": .init(contextWindow: 100000, maxOutputTokens: 1024)], apiProtocol: .anthropicMessages)
+    let engine = try await FxEngine.open(configuration: FxConfiguration(provider: .custom(provider), model: "claude-fixture", tools: [catalogTool("action_42", calls: calls)], httpClient: http))
+    try await drainCatalogTurn(try await engine.prompt("Find and run action"))
+    #expect(await calls.inputs == [.object(["value": .string("native")])])
+    try await engine.upsertTools([catalogTool("added", calls: calls)])
+    try await drainCatalogTurn(try await engine.prompt("Run again"))
+    try await engine.removeTools(named: ["added"])
+    let checkpoint = try await engine.checkpoint()
+    try await engine.close()
+    let restored = try await FxEngine.open(configuration: FxConfiguration(provider: .custom(provider), model: "claude-fixture", tools: [catalogTool("action_42", calls: calls)], httpClient: http), checkpoint: checkpoint)
+    try await drainCatalogTurn(try await restored.prompt("Run after restore"))
+    try await restored.close()
+    let requests = await http.requests
+    let tools = try catalogRawArray("tools", in: requests[0])
+    for body in requests { #expect(try catalogRawArray("tools", in: body) == tools) }
+    let initial = try catalogRawArray("messages", in: requests[0])
+    #expect(try catalogRawArray("messages", in: requests[2]).starts(with: initial.dropLast()))
+    #expect(String(decoding: requests[1], as: UTF8.self).contains("tool_addition"))
+}
