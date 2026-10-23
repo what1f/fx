@@ -262,3 +262,20 @@ test "deferred tools preserve Anthropic prefix and append definitions" {
     try std.testing.expectEqual(@as(usize, 2), parsed.value.object.get("tools").?.array.items.len);
     try std.testing.expectEqual(@as(usize, 4), parsed.value.object.get("messages").?.array.items.len);
 }
+
+test "Anthropic stream rejects malformed and incomplete events" {
+    const Fake = @import("host_transport_testing.zig").FakeTransport;
+    var fake: Fake = .{ .responses = &.{} };
+    defer fake.deinit();
+    const cases = [_]struct { body: []const u8, expected: anyerror }{
+        .{ .body = "data: {\"type\":\"content_block_start\",\"index\":0}\n\n", .expected = error.InvalidEvent },
+        .{ .body = "data: {\"type\":\"message_stop\"}\n\n", .expected = error.IncompleteStream },
+        .{ .body = "data: {\"type\":\"content_block_start\",\"index\":256}\n\n", .expected = error.TooManyTools },
+        .{ .body = "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\n", .expected = error.UnsupportedProviderContent },
+        .{ .body = "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n", .expected = error.IncompleteStream },
+    };
+    for (cases) |case| {
+        var reader: std.Io.Reader = .fixed(case.body);
+        try std.testing.expectError(case.expected, consume(std.testing.allocator, &reader, fake.request(.host_managed), null));
+    }
+}

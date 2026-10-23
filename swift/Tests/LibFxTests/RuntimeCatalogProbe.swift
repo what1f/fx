@@ -60,6 +60,7 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
                 + "\n\nFacts:\nnone\nRules:\nnone\nDecisions:\nnone\nStatus:\nnone\nOpen:\nnone"
             delta = .object(["role": .string("assistant"), "content": .string(notes)])
         } else {
+            if summaries > 0 { guard text.contains("Available actions (current catalog") else { throw RuntimeCatalogProbeError.failed("Catalog missing after compaction") } }
             let rawTools = try catalogRawArray("tools", in: request.httpBody!)
             if let toolBytes, toolBytes != rawTools { throw RuntimeCatalogProbeError.failed("Tool bytes changed") }
             toolBytes = rawTools
@@ -70,7 +71,10 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
             previousMessages = rawMessages
             conversations += 1
             let lastRole = messages.last?["role"]?.string
-            let afterSearch = messages.last?["name"] == .string("tool_search")
+            let afterSearch: Bool
+            if lastRole == "tool", case .array(let calls) = messages.dropLast().last?["tool_calls"] {
+                afterSearch = calls.last?["function"]?["name"] == .string("tool_search")
+            } else { afterSearch = false }
             if lastRole == "user" || afterSearch {
                 let name = afterSearch || removed ? "call_action" : "tool_search"
                 if afterSearch && !removed {

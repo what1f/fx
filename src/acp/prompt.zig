@@ -1154,6 +1154,7 @@ pub fn handlePrompt(
         .advertised_functions = tool_projection.advertised_functions,
         .custom_tool_guidance = tool_projection.custom_guidance,
     });
+    if (state.host_tools.search_enabled) agent_config.catalog_reminder = try state.host_tools.reminder(dynamic_tool_arena.allocator());
     agent_config.session_child_capability = sessionChildCapability(session);
     maybeStartAcpTitleTask(state, session, owned_prompt, recovery_checkpoint != null, ctx.observer);
     defer if (session.title_task != null) completeAcpTitleTask(state, session);
