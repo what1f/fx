@@ -588,4 +588,4 @@ The native Swift package supports deferred host tool catalogs and idle catalog u
 Deferred host actions no longer enter the top-level tool list when selected.
 Chat Completions uses `tool_search` and `call_action`; Responses returns definitions
 in conversation output items. The Swift engine also supports persisted, appended
-context reminders. Native Anthropic Messages transport remains unsupported.
+context reminders. Anthropic Messages uses inline tool additions and supports text and tools.

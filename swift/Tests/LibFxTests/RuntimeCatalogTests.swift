@@ -32,13 +32,17 @@ private actor CatalogHTTP: FxHTTPClient {
             if codex {
                 if let (name, input) = action {
                     let arguments = String(decoding: try JSONEncoder().encode(input), as: UTF8.self)
-                    let item: JSONValue = .object(["type": .string("function_call"), "id": .string("fc_\(posts.count)"), "call_id": .string("call-\(posts.count)"), "name": .string(name), "arguments": .string(arguments)])
+                    var item: JSONValue = .object(["type": .string("function_call"), "id": .string("fc_\(posts.count)"), "call_id": .string("call-\(posts.count)"), "name": .string(name), "arguments": .string(arguments)])
+                    if name == "tool_search" {
+                        item = .object(["type": .string("tool_search_call"), "id": .string("ts_\(posts.count)"), "call_id": .string("call-\(posts.count)"), "execution": .string("client"), "arguments": input])
+                    }
                     events = [
                         .object(["type": .string("response.output_item.added"), "output_index": .number(0), "item": item]),
                         .object(["type": .string("response.function_call_arguments.done"), "output_index": .number(0), "arguments": .string(arguments)]),
                         .object(["type": .string("response.output_item.done"), "output_index": .number(0), "item": item]),
                         .object(["type": .string("response.completed"), "response": .object(["status": .string("completed"), "output": .array([item])])]),
                     ]
+                    if name == "tool_search" { events.remove(at: 1) }
                 } else {
                     events = [
                         .object(["type": .string("response.output_item.added"), "output_index": .number(0), "item": .object(["type": .string("message")])]),
@@ -85,8 +89,8 @@ private func drainCatalogTurn(_ turn: FxTurn) async throws {
     try await drainCatalogTurn(first)
     let posts = await http.posts
     guard case .array(let initial) = posts.first?["tools"] else { Issue.record("Missing initial tools"); try await engine.close(); return }
-    #expect(initial.count == 1)
-    #expect(initial.first?["name"] == .string("tool_search"))
+    #expect(initial.count == 2)
+    #expect(initial.contains { $0["name"] == .string("tool_search") })
     #expect(await calls.inputs == [.object(["value": .string("old")])])
     try await engine.upsertTools([catalogTool("action_42", key: "updated", calls: calls)])
     try await drainCatalogTurn(try await engine.prompt("run updated action"))
@@ -99,7 +103,7 @@ private func drainCatalogTurn(_ turn: FxTurn) async throws {
     try await engine.close()
 }
 
-@Test func runtimeCatalogCodexUsesOrdinaryToolsAndRestoresLoadedTools() async throws {
+@Test func runtimeCatalogCodexUsesInlineDefinitionsAndRestoresLoadedTools() async throws {
     let calls = CatalogCalls()
     let http = CatalogHTTP(actions: [
         ("tool_search", .object(["query": .string("action_42")])),
@@ -119,9 +123,9 @@ private func drainCatalogTurn(_ turn: FxTurn) async throws {
         Issue.record("Missing ordinary function tools"); try await engine.close(); return
     }
     #expect(initial.count == 1)
-    #expect(loaded.count == 2)
-    #expect(loaded.contains { $0["name"] == .string("action_42") })
-    #expect(!String(describing: before).contains("tool_search_output"))
+    #expect(loaded == initial)
+    #expect(!loaded.contains { $0["name"] == .string("action_42") })
+    #expect(String(describing: before).contains("tool_search_output"))
     let checkpoint = try await engine.checkpoint()
     try await engine.close()
     let restored = try await FxEngine.open(configuration: config, checkpoint: checkpoint)

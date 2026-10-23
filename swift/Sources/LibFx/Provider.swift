@@ -13,6 +13,11 @@ public enum FxProvider: Sendable {
 
 /// An OpenAI Chat Completions service. Credentials belong to the host, not its definition.
 public struct FxCustomProvider: Sendable {
+    public enum APIProtocol: String, Sendable {
+        case chatCompletions = "openai-chat-completions"
+        case anthropicMessages = "anthropic-messages"
+    }
+    public let apiProtocol: APIProtocol
     public struct ModelCapabilities: Sendable {
         public var contextWindow: UInt32?
         public var maxOutputTokens: UInt32?
@@ -42,7 +47,7 @@ public struct FxCustomProvider: Sendable {
     public let models: [String: ModelCapabilities]
     let chatURL: URL
 
-    public init(name: String, baseURL: URL, models: [String: ModelCapabilities] = [:]) throws {
+    public init(name: String, baseURL: URL, models: [String: ModelCapabilities] = [:], apiProtocol: APIProtocol = .chatCompletions) throws {
         let letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
         let allowed = letters + "0123456789_-"
         guard (1...64).contains(name.utf8.count), let first = name.first, letters.contains(first),
@@ -70,11 +75,12 @@ public struct FxCustomProvider: Sendable {
                 throw FxError.invalidInput("Output token limit must be less than the context window")
             }
         }
+        self.apiProtocol = apiProtocol
         self.name = name
         self.baseURL = baseURL
         self.models = models
         let base = baseURL.absoluteString
-        guard let chatURL = URL(string: (base.hasSuffix("/") ? String(base.dropLast()) : base) + "/chat/completions") else {
+        guard let chatURL = URL(string: (base.hasSuffix("/") ? String(base.dropLast()) : base) + (apiProtocol == .anthropicMessages ? "/messages" : "/chat/completions")) else {
             throw FxError.invalidInput("Invalid provider URL")
         }
         self.chatURL = chatURL
@@ -82,7 +88,7 @@ public struct FxCustomProvider: Sendable {
 
     var definition: JSONValue {
         .object([name: .object([
-            "protocol": .string("openai-chat-completions"),
+            "protocol": .string(apiProtocol.rawValue),
             "base_url": .string(baseURL.absoluteString),
             "auth": .object(["type": .string("none")]),
             "model_metadata": .object(models.mapValues(\.json)),
@@ -119,7 +125,11 @@ actor ProviderHTTPClient: FxHTTPClient {
                 throw FxError.invalidInput("Invalid provider credentials")
             }
             credential = key
-            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            if definition.apiProtocol == .anthropicMessages {
+                request.setValue(key, forHTTPHeaderField: "x-api-key")
+            } else {
+                request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            }
         }
         let response = try await client.send(request)
         if let credential {

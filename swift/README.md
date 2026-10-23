@@ -485,4 +485,4 @@ persistence enabled, it waits for the journal write. Catalog updates also append
 reminders; they do not rewrite earlier messages. Compaction injects the current
 catalog again. Fetch definitions again when they are absent from the context.
 These paths have local fixtures; service acceptance and cache hits need separate
-provider validation. Native Anthropic Messages transport is not available yet.
+provider validation. Anthropic Messages supports text and tools with `apiProtocol: .anthropicMessages`; images and extended thinking are not supported in this path.

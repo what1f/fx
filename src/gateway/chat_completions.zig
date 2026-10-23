@@ -17,6 +17,8 @@ const types = @import("../core/shared/types.zig");
 const model_provider = @import("../core/config/model_provider.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
 const sse = @import("sse.zig");
+const anthropic = @import("anthropic_protocol.zig");
+
 const Allocator = std.mem.Allocator;
 
 /// Every callback borrows the immutable definition from the owning profile runtime.
@@ -54,6 +56,7 @@ fn build(raw: ?*anyopaque, alloc: Allocator, request: streams.RequestData) ![]u8
 /// The request body for `definition`, omitting replay parts recorded for
 /// another endpoint. Caller owns the result.
 pub fn build_for(definition: *const definitions.Definition, alloc: Allocator, request: streams.RequestData) ![]u8 {
+    if (definition.protocol == .@"anthropic-messages") return anthropic.build(alloc, request);
     const identity = bound_identity(definition);
     for (request.messages) |message| if (message.provider_replay) |replay| {
         if (!replay.matches(.{ .provider = identity, .model = request.model })) {
@@ -151,8 +154,13 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
     var operation = client_mod.PostOperation{
         .client = &client,
         .uri = uri,
-        .authorization = authorization,
-        .extra_headers = &.{.{ .name = "accept", .value = "text/event-stream" }},
+        .authorization = if (definition.protocol == .@"anthropic-messages") null else authorization,
+        .extra_headers = if (definition.protocol == .@"anthropic-messages") &.{
+            .{ .name = "x-api-key", .value = token orelse "" },
+            anthropic.headers[1],
+            anthropic.headers[2],
+            anthropic.headers[3],
+        } else &.{.{ .name = "accept", .value = "text/event-stream" }},
     };
     try request.admission.admit();
     var opened = try client_mod.openBoundedPost(alloc, request.cancel_flag, phase_deadline(30_000, request.deadline), &operation);
@@ -204,7 +212,7 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
 
         return .{ .failed = .{ .kind = failure_kind(response.head.status), .detail = detail, .retry_after_seconds = retry_after, .ownership = .owned } };
     }
-    var result = consume(alloc, reader, request, watch.progress()) catch |err| return watch.failure(err);
+    var result = (if (definition.protocol == .@"anthropic-messages") anthropic.consume(alloc, reader, request, watch.progress()) else consume(alloc, reader, request, watch.progress())) catch |err| return watch.failure(err);
     if (watch.finish()) |err| {
         result.deinit(alloc);
         return err;

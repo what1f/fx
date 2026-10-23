@@ -9,6 +9,8 @@ const definitions = @import("../core/config/configured_provider.zig");
 const chat_completions = @import("chat_completions.zig");
 const host_stream = @import("host_stream_provider.zig");
 
+const anthropic = @import("anthropic_protocol.zig");
+
 const Allocator = std.mem.Allocator;
 
 pub const Context = struct {
@@ -79,7 +81,7 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
         .{ .name = "accept", .value = "text/event-stream" },
     };
 
-    const opened = try host_stream.openPost(alloc, transport, request, endpoint, &headers, payload);
+    const opened = try host_stream.openPost(alloc, transport, request, endpoint, if (definition.protocol == .@"anthropic-messages") &anthropic.headers else &headers, payload);
     defer transport.close(opened.handle);
     if (opened.status != .ok) return .{ .failed = .{
         .kind = chat_completions.failure_kind(opened.status),
@@ -89,7 +91,7 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
 
     var reader: host_stream.HostStreamReader = undefined;
     reader.init(transport, opened.handle, request.cancel_flag, request.deadline, request.cooperative_pulse);
-    const result = chat_completions.consume(alloc, &reader.interface, request, null) catch |err| switch (err) {
+    const result = (if (definition.protocol == .@"anthropic-messages") anthropic.consume(alloc, &reader.interface, request, null) else chat_completions.consume(alloc, &reader.interface, request, null)) catch |err| switch (err) {
         error.ReadFailed => return host_stream.readFailure(&reader, request.cancel_flag),
         else => return err,
     };
