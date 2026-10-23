@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import LibFx
+import FxAgentKit
 
 private actor ApprovalNativeHTTP: FxHTTPClient {
     private var posts = 0

@@ -1,3 +1,5 @@
+import LibFx
+
 /// An effect classification assigned by the host to a tool implementation.
 public enum FxToolEffect: Sendable, Equatable {
     case readOnly, write, dangerous

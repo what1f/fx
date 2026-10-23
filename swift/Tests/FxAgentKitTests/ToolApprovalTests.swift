@@ -1,6 +1,7 @@
 import Foundation
 import Testing
-@testable import LibFx
+import LibFx
+@testable import FxAgentKit
 
 private let approvalInput = JSONValue.object(["value": .string("payload")])
 private let approvalContext = FxToolContext(executionID: "execution", sessionID: "session", turnID: "turn",
@@ -75,7 +76,9 @@ private actor PendingApproval {
         let approval = FxToolApproval { await probe.approve($0) }
         let original = await probe.tool(writes: writes)
         let tool = approval.wrap(tool: original, pluginID: "one", effect: .write)
-        #expect(tool.descriptor == original.descriptor)
+        #expect(tool.name == original.name)
+        #expect(tool.description == original.description)
+        #expect(tool.inputSchema == original.inputSchema)
         #expect(tool.isIdempotent == original.isIdempotent)
         #expect(tool.writes == original.writes)
         #expect(try await tool.execute(approvalInput, approvalContext) == FxToolResult(text: "result", isError: true))
