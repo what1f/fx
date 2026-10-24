@@ -81,7 +81,7 @@ private actor CompactionHTTP: FxHTTPClient {
     }
 }
 
-func runCompactionProbe() async throws -> CompactionProof {
+func runCompactionProbe(trigger: FxAutoCompaction? = nil) async throws -> CompactionProof {
     func require(_ condition: Bool, _ message: String) throws {
         if !condition { throw CompactionProbeError.failed(message) }
     }
@@ -104,8 +104,9 @@ func runCompactionProbe() async throws -> CompactionProof {
                                         models: ["small": .init(contextWindow: 8192, maxOutputTokens: 1024)])
     let lookup = FxTool(name: "fixture_lookup", description: "Look up the project code", inputSchema: .object(["type": .string("object")]),
                         isIdempotent: true) { _, _ in "Project code: alpha42" }
-    let config = FxConfiguration(provider: .custom(provider), model: "small", tools: [lookup], workspace: directory, httpClient: http,
+    var config = FxConfiguration(provider: .custom(provider), model: "small", tools: [lookup], workspace: directory, httpClient: http,
                                  checkpointAfterBytes: nil)
+    config.autoCompaction = trigger
     let engine = try await FxEngine.open(configuration: config, persistence: store)
     do {
         for index in 1...16 {

@@ -228,6 +228,7 @@ pub fn Runtime(comptime App: type) type {
                 .max_command_output_bytes = max_command_output_bytes,
                 .max_tool_result_bytes = agent_settings.max_tool_result_bytes,
                 .auto_compact_percent = agent_settings.auto_compact_percent,
+                .auto_compact = agent_settings.auto_compact,
                 .api_key = app.auth.apiKey() orelse "",
                 .agent_stream_provider = if (comptime @hasDecl(App, "agentStreamProvider"))
                     app.agentStreamProvider()
@@ -1110,7 +1111,7 @@ pub fn Runtime(comptime App: type) type {
                 .compactor = .{
                     .history = job.history,
                     .append_messages = session_runtime.appendHistoryChatMessages,
-                    .size = agent_runtime.compactionSize(&app.session.agent, capabilities, settings.auto_compact_percent, job.model),
+                    .size = agent_runtime.compactionSize(&app.session.agent, capabilities, settings.auto_compact orelse .{ .percent = settings.auto_compact_percent }, job.model),
                     .caller = summary_model.caller(),
                     .records = if (app_session_runtime.Runtime(App).childCapability(app)) |capability| result_store.compactorStore(capability) else null,
                     .cancel_flag = &app.worker.worker_cancel_requested,
@@ -1247,6 +1248,7 @@ pub fn Runtime(comptime App: type) type {
                 .agent_step_limit = app.agent_step_limit,
                 .max_tool_result_bytes = job.agent_settings.max_tool_result_bytes,
                 .auto_compact_percent = job.agent_settings.auto_compact_percent,
+                .auto_compact = job.agent_settings.auto_compact,
                 .cancel_flag = &app.worker.worker_cancel_requested,
                 .review_enabled = false,
                 .fast_mode = job.agent_settings.fast_mode,

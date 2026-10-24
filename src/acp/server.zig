@@ -348,6 +348,7 @@ pub const ServerState = struct {
     agent_step_limit: usize = 0,
     max_tool_result_bytes: usize = 64 * 1024,
     auto_compact_percent: u8 = compactor.default_percent,
+    auto_compact: ?compactor.Trigger = null,
     context_limits: config_runtime.context_limits.Values = .{},
     fast_mode: bool = false,
     ultrafast_mode: bool = false,
@@ -3017,6 +3018,7 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
     state.agent_step_limit = startup.agent_step_limit;
     state.max_tool_result_bytes = startup.max_tool_result_bytes;
     state.auto_compact_percent = startup.auto_compact_percent;
+    state.auto_compact = state.cfg.auto_compact;
     state.context_limits = startup.context_limits;
     state.context_limits.applyCommandLine(state.cfg.context_limit_overrides);
     state.fast_mode = startup.fast_mode and

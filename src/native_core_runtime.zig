@@ -1,5 +1,6 @@
 const std = @import("std");
 const acp_server = @import("acp/server.zig");
+const compactor = @import("core/compactor/compactor.zig");
 const jsonrpc = @import("acp/jsonrpc.zig");
 const gateway_provider = @import("core/gateway/gateway_provider.zig");
 const provider_set = @import("core/gateway/provider_set.zig");
@@ -653,6 +654,7 @@ pub const Runtime = struct {
     configured_providers: ?[]u8,
     model: ?[]u8,
     effort: ?[]u8,
+    auto_compact: ?compactor.Trigger,
     fast: ?bool,
     ultrafast: ?bool,
     home: []u8,
@@ -682,6 +684,7 @@ pub const Runtime = struct {
     }
 
     pub fn run(self: *Runtime) void {
+        @import("core/shared/debug_trace.zig").configureFromEnv(self.alloc, self.workspace_root);
         const provider = gateway_provider.Provider{
             .oauth_transport = oauth_transport.unavailable_provider,
             .chat_url = builtin_gateway.provider.chat_url,
@@ -738,6 +741,7 @@ pub const Runtime = struct {
                 .configured_providers_json = self.configured_providers,
                 .model_override = self.model,
                 .effort_override = self.effort,
+                .auto_compact = self.auto_compact,
                 .fast_override = self.fast,
                 .ultrafast_override = self.ultrafast,
                 .home_override = self.home,
@@ -825,6 +829,7 @@ const Options = struct {
     configured_providers: ?[]u8 = null,
     model: ?[]u8 = null,
     effort: ?[]u8 = null,
+    auto_compact: ?compactor.Trigger = null,
     fast: ?bool = null,
     ultrafast: ?bool = null,
     home: []u8,
@@ -855,6 +860,7 @@ pub fn createOwned(alloc: Allocator, options: Options) !*Runtime {
         .configured_providers = configured_providers,
         .model = model,
         .effort = effort,
+        .auto_compact = options.auto_compact,
         .fast = fast,
         .ultrafast = ultrafast,
         .home = home,

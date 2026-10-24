@@ -1,6 +1,28 @@
 import Foundation
 
+/// Automatic compaction uses either a share of usable input or a token limit.
+public enum FxAutoCompaction: Sendable, Equatable {
+    case percent(Int)
+    case tokens(Int)
+
+    var nativeOption: JSONValue {
+        get throws {
+            switch self {
+            case .percent(let value):
+                guard (10...80).contains(value) else { throw FxError.invalidInput("Compaction percentage must be between 10 and 80") }
+                return .object(["percent": .number(Double(value))])
+            case .tokens(let value):
+                guard value > 0, value <= 9_007_199_254_740_991 else { throw FxError.invalidInput("Invalid compaction token limit") }
+                return .object(["tokens": .number(Double(value))])
+            }
+        }
+    }
+}
+
 public struct FxConfiguration: Sendable {
+    /// Nil preserves the core default. Token limits are capped by the core's window limit.
+    public var autoCompaction: FxAutoCompaction? = nil
+
     /// Checks input without opening an engine or running image preparation.
     public func validatePrompt(_ content: [FxPromptContent]) throws {
         _ = try PreparedPrompt(content, deferringImageLimits: prepareImage != nil)
@@ -95,6 +117,7 @@ public struct FxConfiguration: Sendable {
                 "home": .string(FileManager.default.homeDirectoryForCurrentUser.path),
                 "workspaceRoot": .string(workspace.path), "gatewayChatUrl": .string(gatewayURL.absoluteString),
             ]
+            if let autoCompaction { fields["autoCompact"] = try autoCompaction.nativeOption }
             if let id = model.id { fields["model"] = .string(id) }
             switch provider {
             case .gateway(let apiKey): fields["apiKey"] = .string(apiKey)

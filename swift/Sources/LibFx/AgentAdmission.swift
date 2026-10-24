@@ -70,6 +70,7 @@ struct AgentDefinition: Sendable, Equatable {
         let gatewayURL: URL
         let tools: [Tool]
         let providerTools: [FxProviderTool]
+        let autoCompaction: FxAutoCompaction?
         let toolSearchEnabled: Bool
         let catalog: FxModelCatalog?
         let imageWindow: FxImageWindow?
@@ -90,6 +91,7 @@ struct AgentDefinition: Sendable, Equatable {
                      idempotent: $0.isIdempotent, writes: $0.writes, deferred: $0.deferred)
             }
             providerTools = configuration.providerTools
+            autoCompaction = configuration.autoCompaction
             toolSearchEnabled = configuration.toolSearchEnabled
             catalog = configuration.modelCatalog
             imageWindow = configuration.imageWindow

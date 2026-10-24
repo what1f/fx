@@ -125,6 +125,7 @@ pub const Context = struct {
     max_tool_result_bytes: usize = tool_result_limits.default_max_tool_result_bytes,
     /// Passed to subagent turns. See `Config.auto_compact_percent`.
     auto_compact_percent: u8 = compactor.default_percent,
+    auto_compact: ?compactor.Trigger = null,
     api_key: []const u8,
     agent_stream_provider: agent_stream_provider.Provider = agent_stream_provider.unavailable_provider,
     gateway_team: ?[]const u8 = null,

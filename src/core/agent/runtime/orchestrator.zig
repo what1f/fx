@@ -6392,8 +6392,8 @@ pub const BeforeSummary = struct {
 /// The sizes compaction works with for `model`, including what `agent`
 /// measured of its recent requests: their fixed part, and how far fx's token
 /// estimate ran from the provider's count.
-pub fn compactionSize(agent: *const runtime_agent.Agent, capabilities: model_capabilities.Capabilities, percent: u8, model: []const u8) compactor.Size {
-    var size = compactor.Size.of(capabilities, percent);
+pub fn compactionSize(agent: *const runtime_agent.Agent, capabilities: model_capabilities.Capabilities, trigger: compactor.Trigger, model: []const u8) compactor.Size {
+    var size = compactor.Size.of(capabilities, trigger);
     size.fixed_tokens = agent.request_fixed_tokens;
     if (agent.request_token_calibration) |*calibration| {
         const cost = calibration.cost;
@@ -7624,7 +7624,7 @@ fn processQueuedPromptLoop(
                     const fixed = if (applicable_calibration) |calibration| runtime_prompt_context.calibrateProviderRequest(measured, calibration) else measured;
                     break :fixed fixed.estimated_input_tokens;
                 } else null;
-                var size = compactionSize(agent, request_capabilities, config.auto_compact_percent, gateway_model);
+                var size = compactionSize(agent, request_capabilities, config.auto_compact orelse .{ .percent = config.auto_compact_percent }, gateway_model);
                 size.request_tokens = request_cost.estimated_input_tokens;
                 size.overflow = overflow_pending;
                 if (just_rebuilt_request) compactor.traceLog(false, "request after compaction estimated_tokens={d} fixed_tokens={any} usable_tokens={any} after_tokens={d}", .{ request_cost.estimated_input_tokens, size.fixed_tokens, size.usable_tokens, size.afterTokens() });

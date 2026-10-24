@@ -2,6 +2,7 @@ const std = @import("std");
 // The embedding host owns signal stacks, including those installed by sanitizers.
 pub const std_options: std.Options = .{ .signal_stack_size = null };
 const native = @import("native_core_runtime.zig");
+const compactor = @import("core/compactor/compactor.zig");
 const io_mod = @import("core/shared/io.zig");
 const model_provider = @import("core/config/model_provider.zig");
 const configured_provider = @import("core/config/configured_provider.zig");
@@ -34,6 +35,21 @@ fn boolean(value: std.json.Value, name: []const u8) !?bool {
     if (v != .bool) return error.InvalidOption;
     return v.bool;
 }
+fn autoCompact(value: std.json.Value) !?compactor.Trigger {
+    const option = value.object.get("autoCompact") orelse return null;
+    if (option == .null) return null;
+    if (option != .object or option.object.count() != 1) return error.InvalidAutoCompact;
+    if (option.object.get("percent")) |percent| {
+        if (percent != .integer or percent.integer < 0 or !compactor.isValidPercent(@intCast(percent.integer))) return error.InvalidAutoCompact;
+        return .{ .percent = @intCast(percent.integer) };
+    }
+    if (option.object.get("tokens")) |tokens| {
+        if (tokens != .integer or tokens.integer <= 0) return error.InvalidAutoCompact;
+        return .{ .tokens = std.math.cast(usize, tokens.integer) orelse return error.InvalidAutoCompact };
+    }
+    return error.InvalidAutoCompact;
+}
+
 fn create(data: []const u8) !*Core {
     const alloc = std.heap.c_allocator;
     if (data.len > 2 * 1024 * 1024) return error.OptionsTooLarge;
@@ -76,6 +92,7 @@ fn create(data: []const u8) !*Core {
         .configured_providers = providers,
         .model = model,
         .effort = effort,
+        .auto_compact = try autoCompact(value),
         .fast = try boolean(value, "fast"),
         .ultrafast = try boolean(value, "ultrafast"),
         .home = home,

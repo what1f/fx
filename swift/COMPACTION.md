@@ -15,10 +15,15 @@ let provider = try FxCustomProvider(
         "local-model": .init(contextWindow: 32768, maxOutputTokens: 4096),
     ]
 )
-let configuration = FxConfiguration(provider: .custom(provider), model: "local-model")
+var configuration = FxConfiguration(provider: .custom(provider), model: "local-model")
+configuration.autoCompaction = .tokens(131072)
 ```
 
-Use the model's actual limits in a host application. The small limits below belong to a deterministic fixture. No compaction threshold override is needed for this proof.
+Use the model's actual limits in a host application. Set `configuration.autoCompaction` to `.percent(80)` or `.tokens(positiveCount)`; percentages must be between 10 and 80. Leave it `nil` to preserve the core default and existing CLI percentage configuration. Invalid values throw `FxError.invalidInput` before the native engine opens.
+
+The Zig core caps a token limit at 80% of usable input, which reserves room for output. For the model above, `.tokens(131072)` therefore triggers at 22937 tokens. If the context window is unknown, the specified token limit applies directly. Reopening a conversation uses the configuration supplied at open; the trigger is not part of the persisted conversation.
+
+The Swift option travels through the existing C ABI JSON configuration as `autoCompact: {"percent": 80}` or `autoCompact: {"tokens": 131072}`. No C function signature changes. CLI configuration and `FX_AUTO_COMPACT_PERCENT` keep their existing behavior; there is no new CLI token setting.
 
 ## Run the proof
 
@@ -32,7 +37,7 @@ swift/scripts/test-compaction-consumer.sh
 
 The consumer script creates a separate Swift package, imports the public `LibFx` product, builds a release executable, and runs it. It reuses [CompactionProbe.swift](Tests/LibFxTests/CompactionProbe.swift) without `@testable`, SPI, or an injected engine transport. It fails if the executable exits unsuccessfully or writes to stderr.
 
-The fixture replaces the model service through the public `FxHTTPClient` API. It uses `FxCustomProvider.ModelCapabilities(contextWindow: 8192, maxOutputTokens: 1024)` and the default 80% trigger. There are no live model calls or credentials. Each initial turn calls one static host tool and receives a long final reply. The tool exchange provides intermediate work for the compactor's model to summarize.
+The fixture replaces the model service through the public `FxHTTPClient` API. It uses `FxCustomProvider.ModelCapabilities(contextWindow: 8192, maxOutputTokens: 1024)` and a 3000-token trigger, below the default 5734-token threshold. Swift tests also run the default trigger and explicit `.percent(80)` setting. There are no live model calls or credentials. Each initial turn calls one static host tool and receives a long final reply. The tool exchange provides intermediate work for the compactor's model to summarize.
 
 The probe checks that:
 
@@ -46,6 +51,8 @@ The probe checks that:
 The unique note appears only in the model's compaction response. User prompts, tool results, and ordinary replies do not contain it. The fixture rejects continuation requests that omit it and checks that neither continuation nor recovery generates a new note.
 
 `checkpointAfterBytes` is `nil` throughout this run. The probe also checks that no automatic journal snapshot exists before exporting a checkpoint. Journal snapshot creation therefore cannot satisfy the compaction assertions.
+
+The consumer enables the existing `context_compaction` trace through `FX_TRACE_LOG` and checks the native request token count against the 3000-token threshold. It also checks that requests rebuilt after compaction use fewer than 3000 tokens. Trace files contain only fixture data and are removed with the temporary package. Native embeddings honor the same trace environment variables as the CLI.
 
 ## Scope of the evidence
 
