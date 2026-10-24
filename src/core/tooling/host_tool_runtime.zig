@@ -395,25 +395,38 @@ fn rawInputDeinit(raw: *anyopaque, alloc: Allocator) void {
     alloc.destroy(input);
 }
 
+/// Caller owns the returned model-facing failure.
+pub fn unknownToolFailure(alloc: Allocator, name: []const u8) Allocator.Error![]u8 {
+    return std.json.Stringify.valueAlloc(alloc, .{ .@"error" = .{
+        .type = "tool_not_found",
+        .tool_name = name,
+        .message = "No tool with this name exists. Use tool_search to find available tools.",
+    } }, .{});
+}
+
+fn argumentFailure(ctx: tool_dispatch.DispatchContext, message: []const u8) Allocator.Error![]u8 {
+    if (ctx.host_tool_catalog) |catalog| {
+        for (catalog.definitions) |definition| {
+            if (!std.mem.eql(u8, definition.name, ctx.tool_call_name)) continue;
+            return std.json.Stringify.valueAlloc(ctx.allocator, .{ .@"error" = .{
+                .type = "invalid_tool_arguments",
+                .tool_name = definition.name,
+                .message = message,
+                .definition = .{ .name = definition.name, .description = definition.description, .parameters = definition.input_schema },
+            } }, .{});
+        }
+    }
+    return ctx.allocator.dupe(u8, message);
+}
+
 fn decode(
     ctx: tool_dispatch.DispatchContext,
     arguments_json: []const u8,
 ) tool_dispatch.DispatchError!tool_dispatch.DecodeResult {
-    if (ctx.host_tool_catalog) |catalog| {
-        for (catalog.descriptors, 0..) |entry, index| {
-            if (std.mem.eql(u8, ctx.tool_call_name, entry.object.get("name").?.string) and catalog.deferred[index]) {
-                var advertised = false;
-                for (ctx.advertised_host_tool_names) |name| if (std.mem.eql(u8, name, ctx.tool_call_name)) {
-                    advertised = true;
-                };
-                if (!advertised) return error.InvalidToolArguments;
-            }
-        }
-    }
     const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, arguments_json, .{}) catch
-        return error.InvalidToolArguments;
+        return .{ .failure = try argumentFailure(ctx, "Arguments must be a valid JSON object") };
     defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidToolArguments;
+    if (parsed.value != .object) return .{ .failure = try argumentFailure(ctx, "Arguments must be an object") };
 
     const input = try ctx.allocator.create(RawInput);
     errdefer ctx.allocator.destroy(input);
@@ -436,21 +449,16 @@ fn call(
         const catalog = ctx.host_tool_catalog orelse return error.InvalidToolArguments;
         const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, input.as(RawInput).json, .{}) catch return error.InvalidToolArguments;
         defer parsed.deinit();
-        const name = parsed.value.object.get("name") orelse return error.InvalidToolArguments;
-        const args = parsed.value.object.get("args") orelse return error.InvalidToolArguments;
-        if (name != .string or args != .object) return error.InvalidToolArguments;
+        const name = parsed.value.object.get("name") orelse return .{ .failure = try ctx.allocator.dupe(u8, "name is required and must be a tool name") };
+        const args = parsed.value.object.get("args") orelse return .{ .failure = try ctx.allocator.dupe(u8, "args is required; supply the tool arguments") };
+        if (name != .string) return .{ .failure = try ctx.allocator.dupe(u8, "name must be a tool name string") };
         for (catalog.descriptors, 0..) |entry, index| {
             if (!catalog.deferred[index] or !std.mem.eql(u8, entry.object.get("name").?.string, name.string)) continue;
-            var advertised = false;
-            for (ctx.advertised_host_tool_names) |current| if (std.mem.eql(u8, current, name.string)) {
-                advertised = true;
-            };
-            if (!catalog.loaded[index] or !advertised) return .{ .failure = try ctx.allocator.dupe(u8, "Fetch the action definition with tool_search before calling it") };
             const json = std.json.Stringify.valueAlloc(ctx.allocator, args, .{}) catch return error.OutOfMemory;
             defer ctx.allocator.free(json);
             return provider.call(ctx.allocator, name.string, ctx.tool_call_id, json, ctx.max_tool_result_bytes, ctx.cancel_flag);
         }
-        return .{ .failure = try ctx.allocator.dupe(u8, "Action is no longer available") };
+        return .{ .failure = try unknownToolFailure(ctx.allocator, name.string) };
     }
     return provider.call(
         ctx.allocator,
@@ -464,8 +472,8 @@ fn call(
 
 const call_action_tool: tool_dispatch.Tool = .{
     .name = "call_action",
-    .description = "Call an action after fetching its definition with tool_search.",
-    .model_schema = .{ .name = "call_action", .description = "Call an action after fetching its definition with tool_search.", .input_schema = .{ .properties = &.{ .{ .name = "name", .json_type = .string }, .{ .name = "args", .json_type = .object } }, .required = &.{ "name", "args" } } },
+    .description = "Call an action by name with its arguments.",
+    .model_schema = .{ .name = "call_action", .description = "Call an action by name with its arguments.", .input_schema = .{ .properties = &.{ .{ .name = "name", .json_type = .string }, .{ .name = "args", .json_type = .object } }, .required = &.{ "name", "args" } } },
     .executor_kind = .host,
     .activity_kind = .command,
     .decode = decode,
@@ -725,4 +733,43 @@ test "repeated broad search retains one active tool per name" {
     try std.testing.expectEqual(@as(usize, 1), read_count);
     try std.testing.expect(std.mem.find(u8, result.success, "notes_read") != null);
     try std.testing.expect(std.mem.find(u8, result.success, "notes_write") != null);
+}
+
+test "unloaded host calls execute without activation and report invalid or missing tools" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc,
+        \\[{"name":"action","description":"Current action","inputSchema":{"type":"object"},"deferred":true}]
+    , .{});
+    var runtime = try Runtime.init(alloc, parsed.value);
+    defer runtime.deinit();
+    const Fixture = struct {
+        fn execute(_: *anyopaque, a: Allocator, name: []const u8, _: []const u8, json: []const u8, _: usize, _: ?*std.atomic.Value(bool)) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+            if (!std.mem.eql(u8, "action", name) or !std.mem.eql(u8, "{}", json)) return error.InvalidToolArguments;
+            return .{ .success = try a.dupe(u8, "executed") };
+        }
+    };
+    const ctx: tool_dispatch.DispatchContext = .{
+        .allocator = alloc,
+        .tool_call_name = "action",
+        .host_tool_catalog = &runtime,
+        .host_tool_provider = .{ .context = &runtime, .call_fn = Fixture.execute },
+    };
+    const input = try decode(ctx, "{}");
+    const result = try call(ctx, input.input);
+    try std.testing.expectEqualStrings("executed", result.success);
+    try std.testing.expect(!runtime.loaded[0]);
+    const invalid = try decode(ctx, "[]");
+    try std.testing.expect(std.mem.find(u8, invalid.failure, "Arguments must be an object") != null);
+    try std.testing.expect(std.mem.find(u8, invalid.failure, "\"definition\"") != null);
+    var action_ctx = ctx;
+    action_ctx.tool_call_name = "call_action";
+    const action = try decode(action_ctx, "{\"name\":\"action\",\"args\":{}}");
+    try std.testing.expectEqualStrings("executed", (try call(action_ctx, action.input)).success);
+    const missing = try decode(action_ctx, "{\"name\":\"removed\",\"args\":{}}");
+    const failure = (try call(action_ctx, missing.input)).failure;
+    try std.testing.expect(std.mem.find(u8, failure, "tool_not_found") != null);
+    try std.testing.expect(std.mem.find(u8, failure, "tool_search") != null);
+    try std.testing.expect(!runtime.loaded[0]);
 }

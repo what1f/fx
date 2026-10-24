@@ -730,7 +730,9 @@ public actor FxEngine {
                         try Task.checkCancellation()
                         response = try await PersistedImages.tool(value, name: name, store: self.imagePersistence)
                     } catch {
-                        let message = (error as? any LocalizedError)?.errorDescription ?? String(describing: error)
+                        let message: String
+                        if case FxError.invalidInput(let reason) = error { message = reason }
+                        else { message = (error as? any LocalizedError)?.errorDescription ?? String(describing: error) }
                         response = .object(["content": .string(message.isEmpty ? "Tool \(name) failed without a message" : message), "isError": .bool(true)])
                     }
                     guard !Task.isCancelled, await self.isActive(expectedTurn) else { return }

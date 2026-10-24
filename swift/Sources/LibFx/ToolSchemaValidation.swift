@@ -8,7 +8,13 @@ func validateHostToolInput(_ input: JSONValue, tool: FxTool) throws {
     guard let schema = schema as? [String: Any] else { throw FxError.invalidInput("Tool schema must be an object") }
     let result: ValidationResult = try JSONSchema.validate(instance, schema: schema)
     guard result.valid else {
-        let definition = String(decoding: try encoder.encode(tool.descriptor), as: UTF8.self)
-        throw FxError.invalidInput("Arguments do not match the current tool definition. Use this definition: \(definition)")
+        let issues = try JSONDecoder().decode(JSONValue.self, from: encoder.encode(result.errors ?? []))
+        let failure: JSONValue = .object(["error": .object([
+            "type": .string("invalid_tool_arguments"), "tool_name": .string(tool.name),
+            "message": .string("Correct the arguments using the field errors and current tool definition."),
+            "issues": issues,
+            "definition": .object(["name": .string(tool.name), "description": .string(tool.description), "parameters": tool.inputSchema]),
+        ])])
+        throw FxError.invalidInput(String(decoding: try encoder.encode(failure), as: UTF8.self))
     }
 }

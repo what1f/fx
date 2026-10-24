@@ -467,6 +467,9 @@ The agent/session surface is still partial. Remote service integrations and full
 
 ## Update deferred host tools
 
+A registered deferred tool can be called before discovery. Each call uses the current full schema before the host closure runs, including its approval handler. Invalid arguments return field errors and the current name, description, and parameter schema. Unknown or removed tools return `tool_not_found` and suggest `tool_search`. Direct calls do not activate a tool or change the request's top-level tool list.
+
+
 Set `deferred: true` on an `FxTool` to keep its definition out of the initial model request. The core exposes `tool_search` and loads matching definitions when the model searches. Use `try await engine.upsertTools([tool])` to add or replace deferred tools, and `try await engine.removeTools(named: [name])` to remove them. Set `configuration.toolSearchEnabled = true` before opening an empty catalog that you plan to populate later.
 
 Updates require an idle engine and reject a concurrent prompt, checkpoint, or catalog update with `FxError.busy`. A rejected batch leaves the previous catalog in place. Resident tools and provider tools cannot be replaced through these methods. Calls use the current host closure and validate arguments against its current JSON Schema. A schema mismatch returns a tool error with the current definition; a removed tool cannot invoke its old closure.

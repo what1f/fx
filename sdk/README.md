@@ -583,7 +583,7 @@ libfx is developed in the [fx repository](https://github.com/vercel-labs/fx), un
 
 ### Native Swift deferred tools
 
-The native Swift package supports deferred host tool catalogs and idle catalog updates. See [Update deferred host tools](../swift/README.md#update-deferred-host-tools) for activation, schema validation, persistence, and capacity limits. Repeated discovery does not duplicate native declarations. Outgoing requests project saved discovery results onto the current catalog, replacing changed schemas and omitting removed tools. Schema changes can invalidate an earlier cache prefix. The JavaScript SDK does not expose catalog mutation methods.
+The native Swift package supports deferred host tool catalogs and idle catalog updates. See [Update deferred host tools](../swift/README.md#update-deferred-host-tools) for activation, schema validation, persistence, and capacity limits. Registered deferred tools can be called before discovery; invalid arguments return field errors and the current definition. Direct calls leave the top-level tool list unchanged. Repeated discovery does not duplicate native declarations. Outgoing requests project saved discovery results onto the current catalog, replacing changed schemas and omitting removed tools. Schema changes can invalidate an earlier cache prefix. The JavaScript SDK does not expose catalog mutation methods.
 
 Deferred host actions no longer enter the top-level tool list when selected.
 Chat Completions uses `tool_search` and `call_action`; Responses returns definitions

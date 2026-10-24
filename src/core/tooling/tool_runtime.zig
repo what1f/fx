@@ -360,7 +360,10 @@ pub fn validateToolCall(ctx: Context, arena: Allocator, call: ToolCall) !tool_co
         }, arena, call.name, call.arguments_json)) {
             .valid => |generation| .{ .valid = .{ .mcp_runtime_generation = generation } },
             .invalid => |reason| .{ .failure = reason },
-            .not_available => .not_registered,
+            .not_available => if (ctx.host_tool_catalog != null)
+                .{ .failure = try @import("host_tool_runtime.zig").unknownToolFailure(arena, call.name) }
+            else
+                .not_registered,
         };
     };
     switch (spec.executor_kind) {
@@ -371,7 +374,7 @@ pub fn validateToolCall(ctx: Context, arena: Allocator, call: ToolCall) !tool_co
         else => {},
     }
 
-    var dispatch_ctx = typedDispatchContext(ctx, arena);
+    var dispatch_ctx = typedDispatchContextForCall(ctx, arena, call);
     dispatch_ctx.captured_command_host = spec.captured_command_host;
     return switch (try tool_dispatch.validateRegisteredToolCall(dispatch_ctx, ctx.tool_registry, call)) {
         .not_registered => .not_registered,
@@ -610,7 +613,7 @@ pub fn executeHostToolCallAuthorized(
     request: tool_contracts.ToolExecutionRequest,
 ) !ToolExecutionResult {
     const spec = ctx.tool_registry.lookup(request.call.name) orelse
-        return error.InvalidToolArguments;
+        return semanticFailure(try @import("host_tool_runtime.zig").unknownToolFailure(request.result_allocator, request.call.name));
     if (spec.executor_kind != .host) return error.InvalidToolArguments;
 
     var execution_ctx = ctx;
@@ -7995,4 +7998,29 @@ test "vision cancellation stops later batches and does not surface the outage ti
         ),
     );
     try std.testing.expectEqual(@as(usize, 1), fixture.call_count);
+}
+
+test "host catalog validates unloaded calls and explains malformed or unknown calls" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const host_tools = @import("host_tool_runtime.zig");
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena,
+        \\[{"name":"action","description":"Current action","inputSchema":{"type":"object"},"deferred":true}]
+    , .{});
+    var catalog = try host_tools.Runtime.init(arena, parsed.value);
+    defer catalog.deinit();
+    var rt = TestRuntime{ .tool_registry = catalog.toolSet().registry };
+    defer rt.deinit(arena);
+    var ctx = rt.context();
+    ctx.host_tool_catalog = &catalog;
+    const valid = try validateToolCall(ctx, arena, .{ .id = "direct", .name = "action", .arguments_json = "{}" });
+    try std.testing.expect(valid == .valid);
+    const invalid = try validateToolCall(ctx, arena, .{ .id = "invalid", .name = "action", .arguments_json = "[]" });
+    try std.testing.expect(std.mem.find(u8, invalid.failure, "invalid_tool_arguments") != null);
+    try std.testing.expect(std.mem.find(u8, invalid.failure, "\"definition\"") != null);
+    const missing = try validateToolCall(ctx, arena, .{ .id = "unknown", .name = "removed", .arguments_json = "{}" });
+    try std.testing.expect(std.mem.find(u8, missing.failure, "tool_not_found") != null);
+    try std.testing.expect(std.mem.find(u8, missing.failure, "tool_search") != null);
+    try std.testing.expect(!catalog.loaded[0]);
 }
