@@ -2,6 +2,10 @@ import Foundation
 import LibFx
 
 enum RuntimeCatalogProbeError: Error { case failed(String) }
+private func probeFailure(_ message: String) -> RuntimeCatalogProbeError {
+    print("Catalog probe violation: \(message)")
+    return .failed(message)
+}
 
 private actor RuntimeProbeCalls {
     var values: [JSONValue] = []
@@ -25,7 +29,7 @@ func catalogRawArray(_ key: String, in data: Data) throws -> Data {
             else if byte == 93 || byte == 125 { level -= 1 }
         }
     }
-    guard let start = found else { throw RuntimeCatalogProbeError.failed("Missing raw array: \(key)") }
+    guard let start = found else { throw probeFailure("Missing raw array: \(key)") }
     let begin = start + marker.count - 1
     var depth = 0, quoted = false, escaped = false
     for index in begin..<bytes.count {
@@ -39,7 +43,7 @@ func catalogRawArray(_ key: String, in data: Data) throws -> Data {
             if depth == 0 { return Data(bytes[begin...index]) }
         }
     }
-    throw RuntimeCatalogProbeError.failed("Unterminated raw array")
+    throw probeFailure("Unterminated raw array")
 }
 
 func catalogDiagnose(_ before: Data, _ after: Data) {
@@ -56,17 +60,15 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
     var removed = false
     var requests: [JSONValue] = []
     var toolBytes: Data?
+    var previousFields: [String: JSONValue]?
     var previousMessages: Data?
     func resetPrefix() { previousMessages = nil }
     func update(key: String, removed: Bool = false) {
-        // Schema replacement and removal rewrite the original discovery record
-        // in the outgoing request. Only unchanged catalogs preserve the prefix.
-        if self.key != key || self.removed != removed { previousMessages = nil }
         self.key = key; self.removed = removed
     }
     func send(_ request: URLRequest) async throws -> FxHTTPResponse {
         let body = try JSONDecoder().decode(JSONValue.self, from: request.httpBody ?? Data())
-        guard case .array(let messages) = body["messages"] else { throw RuntimeCatalogProbeError.failed("Missing messages") }
+        guard case .array(let messages) = body["messages"] else { throw probeFailure("Missing messages") }
         requests.append(body)
         let text = messages.map { message in
             if let value = message["content"]?.string { return value }
@@ -77,6 +79,14 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
         let delta: JSONValue
         var reason = "stop"
         if summary {
+            if let previousMessages {
+                let messages = try catalogRawArray("messages", in: request.httpBody!)
+                guard messages.starts(with: previousMessages.dropLast()) else { catalogDiagnose(Data(previousMessages.dropLast()), messages); throw probeFailure("Summary changed the parent history prefix") }
+            }
+            if case .object(var fields) = body {
+                fields.removeValue(forKey: "messages")
+                if let previousFields, fields != previousFields { throw probeFailure("Summary changed parent configuration or tools") }
+            }
             previousMessages = nil
             summaries += 1
             let headings = text.split(separator: "\n").filter { $0.hasPrefix("Turn ") && $0.contains(" (") }
@@ -84,15 +94,19 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
                 + "\n\nFacts:\nnone\nRules:\nnone\nDecisions:\nnone\nStatus:\nnone\nOpen:\nnone"
             delta = .object(["role": .string("assistant"), "content": .string(notes)])
         } else {
-            if summaries > 0 { guard text.contains("Available actions (current catalog") else { throw RuntimeCatalogProbeError.failed("Catalog missing after compaction") } }
+            if summaries > 0 {
+                guard text.contains("Available actions (current catalog") else { throw probeFailure("Catalog missing after compaction") }
+                guard text.contains("Preference marker") else { throw probeFailure("Named context missing after compaction") }
+            }
             let rawTools = try catalogRawArray("tools", in: request.httpBody!)
-            if let toolBytes, toolBytes != rawTools { throw RuntimeCatalogProbeError.failed("Tool bytes changed") }
+            if let toolBytes, toolBytes != rawTools { throw probeFailure("Tool bytes changed") }
             toolBytes = rawTools
             let rawMessages = try catalogRawArray("messages", in: request.httpBody!)
             if let previousMessages {
-                guard rawMessages.starts(with: previousMessages.dropLast()) else { catalogDiagnose(Data(previousMessages.dropLast()), rawMessages); throw RuntimeCatalogProbeError.failed("Prior message bytes changed") }
+                guard rawMessages.starts(with: previousMessages.dropLast()) else { catalogDiagnose(Data(previousMessages.dropLast()), rawMessages); throw probeFailure("Prior message bytes changed") }
             }
             previousMessages = rawMessages
+            if case .object(var fields) = body { fields.removeValue(forKey: "messages"); previousFields = fields }
             conversations += 1
             let lastRole = messages.last?["role"]?.string
             let afterSearch: Bool
@@ -102,7 +116,7 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
             if lastRole == "user" || afterSearch {
                 let name = afterSearch || removed ? "call_action" : "tool_search"
                 if afterSearch && !removed {
-                    guard text.contains("\"required\":[\"\(key)\"]") else { throw RuntimeCatalogProbeError.failed("Search omitted current definition") }
+                    guard text.contains("\"required\":[\"\(key)\"]") else { throw probeFailure("Search omitted current definition") }
                 }
                 if name == "tool_search" { searches += 1 }
                 let args: JSONValue = name == "tool_search"
@@ -126,7 +140,7 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
 
 /// Runs through the public SDK, including the native core and SQLite store.
 func runRuntimeCatalogProbe() async throws -> Int {
-    func require(_ value: Bool, _ message: String) throws { if !value { throw RuntimeCatalogProbeError.failed(message) } }
+    func require(_ value: Bool, _ message: String) throws { if !value { throw probeFailure(message) } }
     func prompt(_ engine: FxEngine) async throws {
         let turn = try await engine.prompt("Use probe_action with the current definition.")
         for try await _ in turn {}
@@ -139,7 +153,7 @@ func runRuntimeCatalogProbe() async throws -> Int {
     let calls = RuntimeProbeCalls()
     let http = RuntimeProbeHTTP()
     let provider = try FxCustomProvider(name: "runtimefixture", baseURL: URL(string: "https://runtime.example/v1")!,
-        models: ["small": .init(contextWindow: 8192, maxOutputTokens: 1024)])
+        models: ["small": .init(contextWindow: 65536, maxOutputTokens: 1024)])
     func tool(_ key: String) -> FxTool {
         FxTool(name: "probe_action", description: "Probe action", inputSchema: .object([
             "type": .string("object"), "properties": .object([key: .object(["type": .string("string")])]),
@@ -150,11 +164,18 @@ func runRuntimeCatalogProbe() async throws -> Int {
         var configuration = FxConfiguration(provider: .custom(provider), model: "small", tools: [FxTool(name: "resident", description: "Always available", inputSchema: .object(["type": .string("object")]), isIdempotent: true) { _, _ in "resident" }] + tools, workspace: directory,
             httpClient: http, checkpointAfterBytes: nil)
         configuration.toolSearchEnabled = true
+        // Trigger before capacity is tight, matching hosts that reserve room
+        // for the cache-preserving summary fork.
+        configuration.autoCompaction = .tokens(5000)
         return configuration
     }
     let store = try FxSQLitePersistence(url: database)
     let engine = try await FxEngine.open(configuration: config([tool("value")]), persistence: store)
     do {
+        try await engine.setContext(name: "preferences", text: "Preference marker: concise answers.")
+        let beforeDuplicate = try await engine.checkpoint()
+        try await engine.setContext(name: "preferences", text: "Preference marker: concise answers.")
+        try require(try await engine.checkpoint() == beforeDuplicate, "Unchanged context appended twice")
         for _ in 0..<16 { try await prompt(engine); if await http.summaries > 0 { break } }
         try require(await http.summaries > 0, "Automatic compaction never ran")
         try await engine.flushPersistence()
@@ -174,7 +195,7 @@ func runRuntimeCatalogProbe() async throws -> Int {
         await http.update(key: "updated")
         try await prompt(engine)
         try require(await calls.values.last == .object(["updated": .string("current")]), "Updated schema did not execute")
-        try await engine.appendContext("Preference marker: concise answers.")
+        try await engine.setContext(name: "preferences", text: "Preference marker: concise answers.")
         let checkpoint = try await engine.checkpoint()
         try require(String(decoding: checkpoint, as: UTF8.self).contains("Preference marker"), "Context missing from checkpoint")
         try require(String(decoding: checkpoint, as: UTF8.self).contains("host_state_json"), "Compaction activation state missing")

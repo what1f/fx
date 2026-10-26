@@ -544,9 +544,7 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
             } else {
                 const definitions = if (message.role == .tool and message.tool_result_memory != null) message.tool_result_memory.?.loaded_tools_json else null;
                 if (definitions) |saved| {
-                    var definitions_projection = @import("deferred_definitions.zig").Projection.init(alloc);
-                    defer definitions_projection.deinit();
-                    const current = try definitions_projection.project(alloc, saved, request.tools.selected_dynamic);
+                    const current = try @import("deferred_definitions.zig").snapshot(alloc, saved);
                     defer alloc.free(current);
                     try std.json.Stringify.value(current, .{}, writer);
                 } else {
@@ -2645,7 +2643,7 @@ test "chat completions preserves cache and reasoning usage across final trailers
     try std.testing.expectEqual(@as(?u64, 4), result.completed.completion.usage.reasoning_tokens);
 }
 
-test "deferred Chat Completions replay updates schema text and removes deleted tools" {
+test "deferred Chat Completions replay keeps saved schema text after catalog replacement and removal" {
     const alloc = std.testing.allocator;
     var request = test_request();
     request.instructions = &.{};
@@ -2663,13 +2661,13 @@ test "deferred Chat Completions replay updates schema text and removes deleted t
     const content = parsed.value.object.get("messages").?.array.items[1].object.get("content").?.string;
     const definitions = try std.json.parseFromSlice(std.json.Value, alloc, content, .{});
     defer definitions.deinit();
-    try std.testing.expectEqual(@as(usize, 1), definitions.value.array.items.len);
-    try std.testing.expect(std.mem.find(u8, content, "updated") != null);
-    try std.testing.expect(std.mem.find(u8, content, "old") == null);
+    try std.testing.expectEqual(@as(usize, 3), definitions.value.array.items.len);
+    try std.testing.expect(std.mem.find(u8, content, "updated") == null);
+    try std.testing.expect(std.mem.find(u8, content, "old") != null);
     request.tools.selected_dynamic = &.{};
     const removed = try build_request(alloc, request, .{});
     defer alloc.free(removed);
     const removed_parsed = try std.json.parseFromSlice(std.json.Value, alloc, removed, .{});
     defer removed_parsed.deinit();
-    try std.testing.expectEqualStrings("[]", removed_parsed.value.object.get("messages").?.array.items[1].object.get("content").?.string);
+    try std.testing.expectEqualStrings(content, removed_parsed.value.object.get("messages").?.array.items[1].object.get("content").?.string);
 }

@@ -2105,7 +2105,7 @@ fn checkStatusLabel(status: doctor_runtime.CheckStatus) []const u8 {
 
 fn writeSessionHistoryTurnText(writer: *std.Io.Writer, turn: types.HistoryTurn) !void {
     switch (turn) {
-        .host_context => |text| try writeTextBlock(writer, text),
+        .host_context => |entry| try writeTextBlock(writer, entry.text),
         .compacted_summary => |entry| {
             try writer.print("[compacted] removed_turns={d} compactions={d}\n", .{ entry.removed_turn_count, entry.compaction_count });
             var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
@@ -2199,9 +2199,11 @@ fn writeTextBlock(writer: *std.Io.Writer, text: []const u8) !void {
 
 fn writeSessionHistoryTurnJson(writer: *std.Io.Writer, turn: types.HistoryTurn) !void {
     switch (turn) {
-        .host_context => |text| {
+        .host_context => |entry| {
             try writer.writeAll("{\"kind\":\"host_context\",\"text\":");
-            try std.json.Stringify.value(text, .{}, writer);
+            try std.json.Stringify.value(entry.text, .{}, writer);
+            try writer.writeAll(",\"name\":");
+            try std.json.Stringify.value(entry.name, .{}, writer);
             try writer.writeByte('}');
         },
         .compacted_summary => |entry| {

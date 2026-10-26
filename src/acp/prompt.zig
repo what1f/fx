@@ -1155,7 +1155,11 @@ pub fn handlePrompt(
         .advertised_functions = tool_projection.advertised_functions,
         .custom_tool_guidance = tool_projection.custom_guidance,
     });
-    if (state.host_tools.search_enabled) agent_config.catalog_reminder = try state.host_tools.reminder(dynamic_tool_arena.allocator());
+    const context_snapshots = try types.latestHostContexts(dynamic_tool_arena.allocator(), session.session_rt.agent.history.items);
+    // Compaction frees the old canonical history before the in-flight request
+    // is rebuilt. Its baseline must own bytes for the whole running turn.
+    for (context_snapshots) |*entry| entry.* = try types.dupeHistoryTurn(dynamic_tool_arena.allocator(), entry.*);
+    agent_config.context_snapshots = context_snapshots;
     agent_config.session_child_capability = sessionChildCapability(session);
     maybeStartAcpTitleTask(state, session, owned_prompt, recovery_checkpoint != null, ctx.observer);
     defer if (session.title_task != null) completeAcpTitleTask(state, session);
@@ -3045,11 +3049,13 @@ fn commitContextCompaction(
     var prepared = try session_runtime.prepareCompactedHistory(ctx.alloc, session.session_rt.agent.history.items, retained_summary, retained_from orelse .{ .turns = history_range.rawHistoryTurnCount(session.session_rt.agent.history.items) });
     var prepared_owned = true;
     defer if (prepared_owned) types.freeHistoryTurnSlice(ctx.alloc, prepared);
-    if (ctx.state.host_tools.search_enabled) {
-        const reminder = try ctx.state.host_tools.reminder(ctx.alloc);
-        errdefer ctx.alloc.free(reminder);
+    const snapshots = try types.latestHostContexts(ctx.alloc, session.session_rt.agent.history.items);
+    defer ctx.alloc.free(snapshots);
+    for (snapshots) |entry| {
+        const copy = try types.dupeHistoryTurn(ctx.alloc, entry);
+        errdefer types.freeHistoryTurn(ctx.alloc, copy);
         prepared = try ctx.alloc.realloc(prepared, prepared.len + 1);
-        prepared[prepared.len - 1] = .{ .host_context = reminder };
+        prepared[prepared.len - 1] = copy;
     }
     if (session.v2) |v2| {
         v2.commitCompaction(retained_summary, active_prefix != null, retained_from) catch |err| {

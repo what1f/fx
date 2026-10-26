@@ -192,7 +192,7 @@ fn selectRecentContext(
         if (selected_any and turns_used >= max_turns) break;
         raw_count -= 1;
         const user = switch (turn) {
-            .host_context => |text| text,
+            .host_context => |entry| entry.text,
             .assistant => |entry| entry.user.text,
             .interrupted => |entry| entry.user.text,
             .compacted_summary => unreachable,

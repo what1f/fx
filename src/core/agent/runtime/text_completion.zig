@@ -82,34 +82,44 @@ pub fn complete(alloc: Allocator, request: Request) Error!Outcome {
     defer capture.deinit();
     var delivery = runtime_gateway_step.DeliveryCertainty.init();
     var attempt_evidence: agent_stream_provider.AttemptEvidence = .{};
+    var model_request: agent_stream_provider.ModelRequest = .{
+        .observer = request.observer,
+        .purpose = request.purpose,
+        .credential = request.credential,
+        .session_id = request.session_id,
+        .model = request.model,
+        .retry_count = request.retry_count,
+        .instructions = if (conversation) |sent| sent.instructions else &instructions,
+        .messages = messages,
+        .tools = if (conversation) |sent| sent.tools else .{},
+        .tool_choice = if (conversation) |sent| sent.tool_choice else .none,
+        .vision_mode = if (conversation) |sent| sent.vision_mode else .unavailable,
+        .verified_images = if (conversation) |sent| sent.verified_images else null,
+        .response_format = if (conversation) |sent| sent.response_format else null,
+        .provider_options = request.provider_options,
+        .max_output_tokens = request.max_output_tokens,
+        .budget = .{ .cancel_flag = request.cancel_flag },
+        .content_capture_limit = request.max_bytes,
+        .delivery = &delivery,
+        .attempt_evidence = &attempt_evidence,
+        .events = .{ .context = &capture, .emit_fn = onEvent },
+        .admission = .{},
+        .cancel_flag = request.cancel_flag,
+        .trace_ctx = request.trace_ctx,
+        .cooperative_pulse = request.cooperative_pulse,
+    };
+    if (conversation) |sent| {
+        // Copy every request-data field, so future fields cannot silently
+        // diverge between an agent call and its compaction fork.
+        inline for (@typeInfo(agent_stream_provider.RequestData).@"struct".field_names) |name| {
+            @field(model_request, name) = @field(sent, name);
+        }
+        model_request.messages = messages;
+    }
     var streamed = runtime_gateway_step.streamModelCompletion(
         request.stream_provider,
         alloc,
-        .{
-            .observer = request.observer,
-            .purpose = request.purpose,
-            .credential = request.credential,
-            .session_id = request.session_id,
-            .model = request.model,
-            .retry_count = request.retry_count,
-            .instructions = if (conversation) |sent| sent.instructions else &instructions,
-            .messages = messages,
-            .tools = if (conversation) |sent| sent.tools else .{},
-            .tool_choice = if (conversation) |sent| sent.tool_choice else .none,
-            .vision_mode = if (conversation) |sent| sent.vision_mode else .unavailable,
-            .verified_images = if (conversation) |sent| sent.verified_images else null,
-            .provider_options = request.provider_options,
-            .max_output_tokens = request.max_output_tokens,
-            .budget = .{ .cancel_flag = request.cancel_flag },
-            .content_capture_limit = request.max_bytes,
-            .delivery = &delivery,
-            .attempt_evidence = &attempt_evidence,
-            .events = .{ .context = &capture, .emit_fn = onEvent },
-            .admission = .{},
-            .cancel_flag = request.cancel_flag,
-            .trace_ctx = request.trace_ctx,
-            .cooperative_pulse = request.cooperative_pulse,
-        },
+        model_request,
     ) catch |err| switch (err) {
         error.Cancelled => return error.Cancelled,
         error.OutOfMemory => return error.OutOfMemory,
@@ -242,7 +252,7 @@ pub const CompactorCaller = struct {
             .provider_strict = self.provider_options.provider_strict,
         };
         if (conversation == null) options.reasoning = call.reasoning;
-        options.ultrafast = false;
+        if (conversation == null) options.ultrafast = false;
         var usage: types.Usage = .{};
         const outcome = try complete(alloc, .{
             .observer = self.observer,
@@ -348,7 +358,7 @@ test "a compactor request after the conversation sends it unchanged, then the re
     try testing.expectEqualStrings("write the notes", fake.last_message);
     try testing.expectEqual(@as(usize, 1), fake.tools);
     try testing.expectEqual(types.ToolChoice.auto, fake.tool_choice);
-    try testing.expect(!fake.ultrafast);
+    try testing.expect(fake.ultrafast);
     // The provider reuses its cache only for the agent's own reasoning.
     try testing.expect(fake.reasoning.?.eql(types.ReasoningEffort.literal("high")));
 

@@ -2228,8 +2228,14 @@ pub const CompactedSummaryHistoryTurn = struct {
     permission_feedback_complete: bool = true,
 };
 
+pub const HostContext = struct {
+    text: []u8,
+    /// Named snapshots are folded from durable history, never from request overlays.
+    name: ?[]u8 = null,
+};
+
 pub const HistoryTurn = union(enum) {
-    host_context: []u8,
+    host_context: HostContext,
     compacted_summary: CompactedSummaryHistoryTurn,
     assistant: AssistantHistoryTurn,
     interrupted: InterruptedHistoryTurn,
@@ -2512,7 +2518,10 @@ pub const ResolveMode = enum {
 
 pub fn freeHistoryTurn(alloc: std.mem.Allocator, turn: HistoryTurn) void {
     switch (turn) {
-        .host_context => |text| alloc.free(text),
+        .host_context => |entry| {
+            alloc.free(entry.text);
+            if (entry.name) |name| alloc.free(name);
+        },
         .compacted_summary => |entry| {
             alloc.free(entry.summary);
             if (entry.host_state_json) |json| alloc.free(json);
@@ -2553,7 +2562,11 @@ pub fn freeFinishedPrompt(alloc: std.mem.Allocator, finished: FinishedPrompt) vo
 
 pub fn dupeHistoryTurn(alloc: std.mem.Allocator, turn: HistoryTurn) !HistoryTurn {
     return switch (turn) {
-        .host_context => |text| .{ .host_context = try alloc.dupe(u8, text) },
+        .host_context => |entry| blk: {
+            const text = try alloc.dupe(u8, entry.text);
+            errdefer alloc.free(text);
+            break :blk .{ .host_context = .{ .text = text, .name = if (entry.name) |name| try alloc.dupe(u8, name) else null } };
+        },
         .compacted_summary => |entry| blk: {
             const summary = try alloc.dupe(u8, entry.summary);
             errdefer alloc.free(summary);
@@ -3875,4 +3888,44 @@ test "host activation metadata duplication preserves allocation ownership" {
         }
     };
     try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, Case.run, .{});
+}
+
+/// Borrowed latest named snapshots, in their original chronological order.
+/// The caller owns only the returned slice.
+pub fn latestHostContexts(alloc: std.mem.Allocator, history: []const HistoryTurn) ![]HistoryTurn {
+    var contexts: std.ArrayList(HistoryTurn) = .empty;
+    errdefer contexts.deinit(alloc);
+    for (history, 0..) |turn, index| {
+        if (turn != .host_context) continue;
+        const name = turn.host_context.name orelse continue;
+        var superseded = false;
+        for (history[index + 1 ..]) |later| {
+            if (later == .host_context) if (later.host_context.name) |other| {
+                if (std.mem.eql(u8, name, other)) {
+                    superseded = true;
+                    break;
+                }
+            };
+        }
+        if (!superseded) try contexts.append(alloc, turn);
+    }
+    return contexts.toOwnedSlice(alloc);
+}
+
+test "latest host contexts fold by metadata and preserve chronology" {
+    const alloc = std.testing.allocator;
+    const history = [_]HistoryTurn{
+        .{ .host_context = .{ .name = @constCast("skills"), .text = @constCast("old") } },
+        .{ .host_context = .{ .text = @constCast("anonymous") } },
+        .{ .host_context = .{ .name = @constCast("plugins"), .text = @constCast("plugin list") } },
+        .{ .host_context = .{ .name = @constCast("skills"), .text = @constCast("empty catalog") } },
+    };
+    const latest = try latestHostContexts(alloc, &history);
+    defer alloc.free(latest);
+    try std.testing.expectEqual(@as(usize, 2), latest.len);
+    try std.testing.expectEqualStrings("plugins", latest[0].host_context.name.?);
+    try std.testing.expectEqualStrings("empty catalog", latest[1].host_context.text);
+    const copy = try dupeHistoryTurn(alloc, latest[1]);
+    defer freeHistoryTurn(alloc, copy);
+    try std.testing.expect(copy.host_context.name.?.ptr != latest[1].host_context.name.?.ptr);
 }

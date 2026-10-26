@@ -145,9 +145,8 @@ private func drainCatalogTurn(_ turn: FxTurn) async throws {
     let raw = await http.rawPosts
     let tools = try catalogRawArray("tools", in: raw[0])
     for body in raw { let value = try catalogRawArray("tools", in: body); if value != tools { catalogDiagnose(tools, value) }; #expect(value == tools) }
-    // Catalog mutations rewrite prior declarations so the provider sees the
-    // current schema once. An unchanged catalog retains its input prefix.
-    for index in [1, 2, 4, 6, 8] {
+    // Replacements, removal, and recovery preserve every historical declaration.
+    for index in 1..<raw.count {
         let prefix = try catalogRawArray("input", in: raw[index - 1])
         #expect(try catalogRawArray("input", in: raw[index]).starts(with: prefix.dropLast()))
     }
@@ -157,10 +156,9 @@ private func drainCatalogTurn(_ turn: FxTurn) async throws {
             guard case .array(let tools) = item["tools"] else { return [] }
             return tools
         }.filter { $0["name"] == .string("action_42") }
-        #expect(definitions.count == (index == 0 || index >= 7 ? 0 : 1))
-        if index >= 3 && index < 7 {
-            #expect(definitions.first?["parameters"]?["required"] == .array([.string("updated")]))
-        }
+        #expect(definitions.count == (index == 0 ? 0 : index < 4 ? 1 : 2))
+        if index > 0 { #expect(definitions.first?["parameters"]?["required"] == .array([.string("value")])) }
+        if index >= 4 { #expect(definitions.last?["parameters"]?["required"] == .array([.string("updated")])) }
     }
     try await restored.close()
 }
@@ -288,7 +286,7 @@ private actor MessagesCatalogHTTP: FxHTTPClient {
     }
 }
 
-@Test func runtimeCatalogRepeatedBroadSearchDeclaresEachNameOnce() async throws {
+@Test func runtimeCatalogRepeatedBroadSearchPreservesEachSearchSnapshot() async throws {
     let calls = CatalogCalls()
     let http = CatalogHTTP(actions: [
         ("tool_search", .object(["query": .string("notes")])),
@@ -307,8 +305,8 @@ private actor MessagesCatalogHTTP: FxHTTPClient {
             guard case .array(let tools) = item["tools"] else { return [] }
             return tools.compactMap { $0["name"] }
         }
-        #expect(Set(names.map { String(describing: $0) }).count == names.count)
-        #expect(names.count == (index == 0 ? 0 : 2))
+        #expect(Set(names.map { String(describing: $0) }).count == (index == 0 ? 0 : 2))
+        #expect(names.count == (index == 0 ? 0 : index == 1 ? 2 : 4))
         if index > 0 {
             #expect(names.contains(.string("notes_read")))
             #expect(names.contains(.string("notes_write")))

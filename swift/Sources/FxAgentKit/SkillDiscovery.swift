@@ -1,4 +1,5 @@
 import Foundation
+import LibFx
 import CryptoKit
 import Yams
 
@@ -14,6 +15,7 @@ public struct FxSkillDiscovery: Sendable {
     public struct Catalog: Sendable {
         public let skills: [Entry]
         public let diagnostics: [String]
+        let watchedDirectories: [URL]
         public var prompt: String {
             let visible = skills.filter { !$0.disableModelInvocation }
             return """
@@ -35,7 +37,7 @@ public struct FxSkillDiscovery: Sendable {
     public let roots: [URL]
     public init(roots: [URL]) { self.roots = roots }
 
-    /// Rescan on each model request, including after tool execution. No session reset or watcher lifetime.
+    /// Initial discovery and event-driven refresh share the same deterministic scan.
     public func discover() -> Catalog {
         var visited: Set<String> = [], names: Set<String> = []
         var skills: [Entry] = [], diagnostics: [String] = []
@@ -85,6 +87,6 @@ public struct FxSkillDiscovery: Sendable {
             } catch { diagnostics.append("\(canonical.path): \(error)") }
         }
         for root in roots { scan(root, root: true) }
-        return Catalog(skills: skills.sorted { $0.name < $1.name }, diagnostics: diagnostics)
+        return Catalog(skills: skills.sorted { $0.name < $1.name }, diagnostics: diagnostics, watchedDirectories: visited.sorted().map { URL(fileURLWithPath: $0) })
     }
 }

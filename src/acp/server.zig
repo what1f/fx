@@ -1739,33 +1739,57 @@ const invalid_checkpoint_meta: jsonrpc.RpcError = .{
 };
 
 pub fn appendHostContext(state: *ServerState, active: *ActiveSessionState, text: []const u8) !void {
-    const prepared = try active.session_rt.prepareHistoryEntry(state.alloc, .{ .host_context = @constCast(text) });
-    errdefer types.freeHistoryTurn(state.alloc, prepared);
+    try appendHostContexts(state, active, &.{.{ .text = @constCast(text) }});
+}
+
+/// Commit a batch atomically through the canonical journal. Names are metadata,
+/// so updates never need to inspect or repair rendered provider messages.
+fn appendHostContexts(state: *ServerState, active: *ActiveSessionState, entries: []const types.HostContext) !void {
+    var prepared: std.ArrayList(types.HistoryTurn) = .empty;
+    defer {
+        for (prepared.items) |entry| types.freeHistoryTurn(state.alloc, entry);
+        prepared.deinit(state.alloc);
+    }
+    for (entries) |entry| {
+        if (entry.name) |name| {
+            var same = false;
+            var index = active.session_rt.agent.history.items.len;
+            while (index > 0) {
+                index -= 1;
+                const turn = active.session_rt.agent.history.items[index];
+                if (turn == .host_context) if (turn.host_context.name) |prior| {
+                    if (std.mem.eql(u8, name, prior)) {
+                        same = std.mem.eql(u8, entry.text, turn.host_context.text);
+                        break;
+                    }
+                };
+            }
+            if (same) continue;
+        }
+        const owned = try active.session_rt.prepareHistoryEntry(state.alloc, .{ .host_context = entry });
+        prepared.append(state.alloc, owned) catch |err| {
+            types.freeHistoryTurn(state.alloc, owned);
+            return err;
+        };
+    }
+    if (prepared.items.len == 0) return;
+    try active.session_rt.agent.history.ensureUnusedCapacity(state.alloc, prepared.items.len);
     if (active.journal) |*journal| {
         var snapshot: std.ArrayList(types.HistoryTurn) = .empty;
         defer snapshot.deinit(state.alloc);
         try snapshot.appendSlice(state.alloc, active.session_rt.agent.history.items);
-        try snapshot.append(state.alloc, prepared);
+        try snapshot.appendSlice(state.alloc, prepared.items);
         try journal.appendMarked(state.alloc, active.session_id, .{ .history_replaced = snapshot.items }, true);
     }
-    active.session_rt.commitPreparedHistoryEntry(state.alloc, prepared);
+    for (prepared.items) |entry| active.session_rt.commitPreparedHistoryEntry(state.alloc, entry);
+    prepared.clearRetainingCapacity();
 }
 
 pub fn ensureCatalogReminder(state: *ServerState, active: *ActiveSessionState) !void {
     if (!state.host_tools.search_enabled) return;
     const text = try state.host_tools.reminder(state.alloc);
     defer state.alloc.free(text);
-    var index = active.session_rt.agent.history.items.len;
-    while (index > 0) {
-        index -= 1;
-        const turn = active.session_rt.agent.history.items[index];
-        if (turn == .compacted_summary) break;
-        if (turn == .host_context and std.mem.startsWith(u8, turn.host_context, "<system-reminder>\nAvailable actions")) {
-            if (std.mem.eql(u8, turn.host_context, text)) return;
-            break;
-        }
-    }
-    try appendHostContext(state, active, text);
+    try appendHostContexts(state, active, &.{.{ .name = @constCast("tool_catalog"), .text = text }});
 }
 
 fn handleKernelContext(state: *ServerState, alloc: Allocator, msg: *const jsonrpc.Message) !void {
@@ -1778,7 +1802,13 @@ fn handleKernelContext(state: *ServerState, alloc: Allocator, msg: *const jsonrp
     if (text != .string or text.string.len == 0 or text.string.len > 65536) return state.writer.writeError(alloc, msg.id, invalid);
     const reminder = try alloc.print("<system-reminder>\n{s}\n</system-reminder>", .{text.string});
     defer alloc.free(reminder);
-    try appendHostContext(state, active, reminder);
+    const name_value = parsed.value.object.get("name");
+    var name: ?[]u8 = null;
+    if (name_value) |value| {
+        if (value != .string or value.string.len == 0 or value.string.len > 128) return state.writer.writeError(alloc, msg.id, invalid);
+        name = @constCast(value.string);
+    }
+    try appendHostContexts(state, active, &.{.{ .name = name, .text = reminder }});
     try state.writer.writeResponse(alloc, msg.id, "null");
 }
 
@@ -1821,7 +1851,31 @@ fn handleKernelCatalog(state: *ServerState, alloc: Allocator, msg: *const jsonrp
     candidate.validateActiveBudget() catch return state.writer.writeError(alloc, msg.id, invalid);
     const reminder = try candidate.reminder(alloc);
     defer alloc.free(reminder);
-    try appendHostContext(state, active, reminder);
+    var update_arena = std.heap.ArenaAllocator.init(alloc);
+    defer update_arena.deinit();
+    const update_alloc = update_arena.allocator();
+    var updates: std.ArrayList(types.HostContext) = .empty;
+    defer updates.deinit(update_alloc);
+    try updates.append(update_alloc, .{ .name = @constCast("tool_catalog"), .text = reminder });
+    for (state.host_tools.descriptors, 0..) |prior, index| {
+        if (!state.host_tools.deferred[index] or !state.host_tools.loaded[index]) continue;
+        const name = prior.object.get("name").?.string;
+        var replacement: ?std.json.Value = null;
+        for (candidate.descriptors) |entry| {
+            if (std.mem.eql(u8, name, entry.object.get("name").?.string)) {
+                replacement = entry;
+                break;
+            }
+        }
+        const old = try std.json.Stringify.valueAlloc(update_alloc, prior, .{});
+        const current = if (replacement) |entry| try std.json.Stringify.valueAlloc(update_alloc, entry, .{}) else "unavailable";
+        if (std.mem.eql(u8, old, current)) continue;
+        try updates.append(update_alloc, .{
+            .name = try update_alloc.print("tool.{s}", .{name}),
+            .text = try update_alloc.print("<system-reminder>\nActive tool {s} changed. Current definition: {s}\nUse tool_search to obtain its current native declaration before the next call. Earlier search results are historical snapshots.\n</system-reminder>", .{ name, current }),
+        });
+    }
+    try appendHostContexts(state, active, updates.items);
     state.host_tools.deinit();
     state.host_tools = candidate;
     candidate_owned = false;

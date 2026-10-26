@@ -278,14 +278,26 @@ public actor FxEngine {
         }
     }
 
-    /// Appends context without changing earlier messages. Returns after persistence accepts it.
+    /// Appends anonymous context without changing earlier messages.
     public func appendContext(_ text: String) async throws {
+        try await updateContext(name: nil, text: text)
+    }
+
+    /// Appends a durable named snapshot only when its current value differs.
+    public func setContext(name: String, text: String) async throws {
+        guard !name.isEmpty, name.utf8.count <= 128 else { throw FxError.invalidInput("Context name must contain 1–128 UTF-8 bytes") }
+        try await updateContext(name: name, text: text)
+    }
+
+    private func updateContext(name: String?, text: String) async throws {
         try checkCatalogUpdate()
         guard !text.isEmpty, text.utf8.count <= 65536 else {
             throw FxError.invalidInput("Context must contain 1–65536 UTF-8 bytes")
         }
         let task = Task {
-            _ = try await rpc.request("libfx/context", .object(["sessionId": .string(sessionID), "text": .string(text)]))
+            var params: [String: JSONValue] = ["sessionId": .string(sessionID), "text": .string(text)]
+            if let name { params["name"] = .string(name) }
+            _ = try await rpc.request("libfx/context", .object(params))
             try await journal?.check()
         }
         runtimeUpdateTask = task

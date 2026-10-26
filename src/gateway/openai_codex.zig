@@ -80,7 +80,7 @@ pub fn buildRequest(
     try writer.writeAll(",\"store\":false,\"stream\":true,\"instructions\":");
     try std.json.Stringify.value(instructions.written(), .{}, writer);
     try writer.writeAll(",\"input\":[");
-    try writeResponsesInput(writer, std.heap.c_allocator, projected orelse request.messages, request.verified_images, budget, request.tools.selected_dynamic);
+    try writeResponsesInput(writer, std.heap.c_allocator, projected orelse request.messages, request.verified_images, budget);
     try writer.writeByte(']');
 
     _ = try responses_protocol.writeTools(writer, alloc, request.tools);
@@ -130,14 +130,13 @@ fn writeResponsesInput(
     messages: []const types.ChatMessage,
     images: ?[]const image_attachments.VerifiedSnapshot,
     budget: image_attachments.CaptureBudget,
-    current: []const stream_provider.DynamicFunctionTool,
 ) !void {
-    return responses_protocol.writeInputWithTools(writer, alloc, messages, images, .{
+    return responses_protocol.writeInput(writer, alloc, messages, images, .{
         .tool_calls = max_tool_calls,
         .tool_identity_bytes = max_tool_identity_bytes,
         .tool_arguments_bytes = max_tool_arguments_bytes,
         .provider_state_bytes = max_provider_state_bytes,
-    }, budget, current) catch |err| switch (err) {
+    }, budget) catch |err| switch (err) {
         error.ProviderStateTooLarge => error.OpenAICodexProviderStateTooLarge,
         error.InvalidProviderState => error.InvalidOpenAICodexProviderState,
         error.ToolCallLimitExceeded => error.OpenAICodexToolCallLimitExceeded,

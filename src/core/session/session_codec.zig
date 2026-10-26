@@ -766,9 +766,11 @@ pub fn writeHistoryTurnNamingImages(writer: *std.Io.Writer, turn: session.Histor
 /// so durable writers keep their error set.
 fn writeHistoryTurnTo(writer: *std.Io.Writer, turn: session.HistoryTurn, image_blobs: anytype) !void {
     switch (turn) {
-        .host_context => |text| {
+        .host_context => |entry| {
             try writer.writeAll("{\"kind\":\"host_context\",\"text\":");
-            try writeDurableBytes(writer, text);
+            try writeDurableBytes(writer, entry.text);
+            try writer.writeAll(",\"name\":");
+            try std.json.Stringify.value(entry.name, .{}, writer);
             try writer.writeByte('}');
         },
         .compacted_summary => |entry| {
@@ -878,8 +880,12 @@ pub fn parseHistoryTurnWithImages(
 ) !session.HistoryTurn {
     const kind = try requireString(try requireObject(value), "kind");
     if (std.mem.eql(u8, kind, "host_context")) {
-        const object = try exactObject(value, &.{ "kind", "text" });
-        return .{ .host_context = try parseRequiredDurableBytes(alloc, object, "text") };
+        const object = try exactObject(value, &.{ "kind", "text", "name" });
+        const text = try parseRequiredDurableBytes(alloc, object, "text");
+        errdefer alloc.free(text);
+        const name = object.get("name").?;
+        if (name != .null and name != .string) return error.InvalidSessionFormat;
+        return .{ .host_context = .{ .text = text, .name = if (name == .string) try alloc.dupe(u8, name.string) else null } };
     }
     if (std.mem.eql(u8, kind, "compacted_summary")) {
         const raw_object = try requireObject(value);
@@ -5354,7 +5360,10 @@ fn expectPermissionStateEqual(
 fn expectHistoryTurnEqual(expected: session.HistoryTurn, actual: session.HistoryTurn) !void {
     try std.testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(actual));
     switch (expected) {
-        .host_context => |text| try std.testing.expectEqualStrings(text, actual.host_context),
+        .host_context => |entry| {
+            try std.testing.expectEqualStrings(entry.text, actual.host_context.text);
+            try std.testing.expectEqualDeep(entry.name, actual.host_context.name);
+        },
         .compacted_summary => |entry| {
             try std.testing.expectEqualSlices(u8, entry.summary, actual.compacted_summary.summary);
             try std.testing.expectEqual(entry.removed_turn_count, actual.compacted_summary.removed_turn_count);
@@ -6199,7 +6208,7 @@ test "compacted host activation metadata survives allocation failures" {
 
 test "host context roundtrips separately from user turns" {
     const alloc = std.testing.allocator;
-    const original: types.HistoryTurn = .{ .host_context = @constCast("<system-reminder>Preference</system-reminder>") };
+    const original: types.HistoryTurn = .{ .host_context = .{ .text = @constCast("<system-reminder>Preference</system-reminder>"), .name = @constCast("preference") } };
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     try writeHistoryTurn(&out.writer, original);
@@ -6207,13 +6216,13 @@ test "host context roundtrips separately from user turns" {
     defer parsed.deinit();
     const restored = try parseHistoryTurn(alloc, parsed.value);
     defer types.freeHistoryTurn(alloc, restored);
-    try std.testing.expectEqualStrings(original.host_context, restored.host_context);
+    try std.testing.expectEqualStrings(original.host_context.text, restored.host_context.text);
     const copy = try types.dupeHistoryTurn(alloc, restored);
     defer types.freeHistoryTurn(alloc, copy);
-    try std.testing.expect(copy.host_context.ptr != restored.host_context.ptr);
+    try std.testing.expect(copy.host_context.text.ptr != restored.host_context.text.ptr);
     var messages: std.ArrayList(types.ChatMessage) = .empty;
     defer messages.deinit(alloc);
     try session.appendHistoryChatMessages(alloc, &messages, &.{restored});
-    try std.testing.expectEqualStrings(original.host_context, messages.items[0].content.?);
+    try std.testing.expectEqualStrings(original.host_context.text, messages.items[0].content.?);
     try std.testing.expect(messages.items[0].context_origin == .ordinary);
 }

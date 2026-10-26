@@ -2139,7 +2139,7 @@ fn appendHistoryMessagesImpl(
 ) !void {
     for (history) |turn| {
         switch (turn) {
-            .host_context => |text| try messages.append(alloc, message.Message.userText(text)),
+            .host_context => |entry| try messages.append(alloc, message.Message.userText(entry.text)),
             .compacted_summary => |entry| {
                 const text = try formatCompactedContinuationMessage(alloc, entry.summary);
                 errdefer alloc.free(text);
@@ -2374,7 +2374,7 @@ fn appendHistoryChatMessagesImpl(
 ) !void {
     for (history) |turn| {
         switch (turn) {
-            .host_context => |text| try messages.append(alloc, .{ .role = .user, .content = text }),
+            .host_context => |entry| try messages.append(alloc, .{ .role = .user, .content = entry.text }),
             .compacted_summary => |entry| {
                 const text = try formatCompactedContinuationMessage(alloc, entry.summary);
                 errdefer alloc.free(text);

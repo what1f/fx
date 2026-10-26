@@ -496,6 +496,10 @@ provider validation. Anthropic Messages supports text, tools, and streamed think
 
 `FxSkillDiscovery(roots:)` scans host-selected directories for `SKILL.md`, including nested groups and symlinked directories. It parses YAML name, description and disable-model-invocation metadata. `discover()` returns the current catalog plus diagnostics; duplicate names keep the first entry, invalid files are skipped, and directory cycles are visited once. The catalog prompt lists names, descriptions, absolute paths and content revisions. Bodies and supporting files remain on disk for the `read` tool.
 
-Call `discovery.prepare(request, api:)` at the provider HTTP boundary to refresh the catalog before every request, including requests after a tool call. It updates only the marked skill section in the system lane for Responses, Chat Completions and Anthropic Messages. Reusing the same discovery value still observes additions, edits and deletions. This does not rebuild the session or inject skill bodies. Read a skill again when its revision changes.
+Pass `skillRoots` to `Agent.open` to enable automatic discovery. FxAgentKit watches filesystem events with FSEvents, refreshes its cached catalog after changes, and appends the latest named snapshot at the next idle turn boundary. Requests read the cache without scanning files. The native journal deduplicates identical snapshots and retains their latest state across recovery and compaction. `agent.skillCatalog` exposes the live catalog and an update stream. Close the agent to stop its watcher. No HTTP prompt injection or catalog sidecar is needed.
 
 Programmatic tool orchestration can use `FxTool.invoke(_:context:)` to validate current input schemas before executing a tool, including its existing approval wrapper.
+
+### Context snapshot ownership
+
+Agent SDK owns Skill discovery, filesystem watching, and the live catalog cache. Hosts select roots; they do not rewrite HTTP instructions. `setContext(name:text:)` appends a named snapshot to native history only when its value changes. Native history is the source of truth across recovery and compaction. Older snapshots and tool-search definitions remain immutable. Active deferred tool changes append a schema notice; providers that require a real search for native definitions still require that search. New provider declaration capabilities are deferred.

@@ -49,8 +49,6 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
         try w.writeByte('}');
     }
     try w.writeAll("],\"tools\":[");
-    var definitions_projection = @import("deferred_definitions.zig").Projection.init(alloc);
-    defer definitions_projection.deinit();
     var count: usize = 0;
     var deferred = false;
     if (parsed.value.object.get("tools")) |tools| for (tools.array.items) |entry| {
@@ -102,9 +100,7 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
             try w.writeAll(",\"content\":");
             const definitions = if (message.tool_result_memory) |memory| memory.loaded_tools_json else null;
             if (mode == .call_action and definitions != null) {
-                var text_projection = @import("deferred_definitions.zig").Projection.init(alloc);
-                defer text_projection.deinit();
-                const current = try text_projection.project(alloc, definitions.?, request.tools.selected_dynamic);
+                const current = try @import("deferred_definitions.zig").snapshot(alloc, definitions.?);
                 defer alloc.free(current);
                 try json(w, current);
             } else {
@@ -139,7 +135,7 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
         var group_start = message_index;
         while (group_start > 0 and request.messages[group_start - 1].role == .tool) group_start -= 1;
         for (request.messages[group_start .. message_index + 1]) |result| if (result.tool_result_memory) |memory| if (memory.loaded_tools_json) |definitions| {
-            const current = try definitions_projection.project(alloc, definitions, request.tools.selected_dynamic);
+            const current = try @import("deferred_definitions.zig").snapshot(alloc, definitions);
             defer alloc.free(current);
             const loaded = try std.json.parseFromSlice(std.json.Value, alloc, current, .{});
             defer loaded.deinit();
@@ -370,8 +366,8 @@ test "deferred tools preserve Anthropic prefix and append definitions" {
     defer compatible.deinit();
     try std.testing.expectEqual(@as(usize, 2), compatible.value.object.get("tools").?.array.items.len);
     const content = compatible.value.object.get("messages").?.array.items[2].object.get("content").?.array.items[0].object.get("content").?.string;
-    try std.testing.expect(std.mem.find(u8, content, "Changed") != null);
-    try std.testing.expect(std.mem.find(u8, content, "Act\"") == null);
+    try std.testing.expect(std.mem.find(u8, content, "Changed") == null);
+    try std.testing.expect(std.mem.find(u8, content, "Act\"") != null);
 }
 
 test "Anthropic stream rejects malformed and incomplete events" {
@@ -449,7 +445,7 @@ test "Anthropic content block indices map to contiguous tool ordinals" {
     try std.testing.expectEqualStrings("{}", result.completed.completion.tool_calls[0].arguments_json);
 }
 
-test "deferred Messages native and callAction replay current schemas after repeated search" {
+test "deferred Messages native and callAction preserve saved schemas after repeated search" {
     const alloc = std.testing.allocator;
     const types = @import("../core/shared/types.zig");
     const saved = "[{\"name\":\"action\",\"description\":\"old\",\"inputSchema\":{}},{\"name\":\"removed\",\"description\":\"removed\",\"inputSchema\":{}}]";
@@ -465,16 +461,16 @@ test "deferred Messages native and callAction replay current schemas after repea
     for ([_]@import("../core/config/configured_provider.zig").DeferredToolMode{ .native, .call_action }) |mode| {
         const body = try buildConfigured(alloc, request, null, mode);
         defer alloc.free(body);
-        try std.testing.expect(std.mem.find(u8, body, "updated") != null);
-        try std.testing.expect(std.mem.find(u8, body, "removed") == null);
-        try std.testing.expect(std.mem.find(u8, body, "old") == null);
-        if (mode == .native) try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "\"type\":\"tool_addition\""));
+        try std.testing.expect(std.mem.find(u8, body, "updated") == null);
+        try std.testing.expect(std.mem.find(u8, body, "removed") != null);
+        try std.testing.expect(std.mem.find(u8, body, "old") != null);
+        if (mode == .native) try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, body, "\"type\":\"tool_addition\""));
     }
     request.tools.selected_dynamic = &.{};
     for ([_]@import("../core/config/configured_provider.zig").DeferredToolMode{ .native, .call_action }) |mode| {
         const body = try buildConfigured(alloc, request, null, mode);
         defer alloc.free(body);
-        try std.testing.expect(std.mem.find(u8, body, "action") == null);
-        try std.testing.expect(std.mem.find(u8, body, "removed") == null);
+        try std.testing.expect(std.mem.find(u8, body, "action") != null);
+        try std.testing.expect(std.mem.find(u8, body, "removed") != null);
     }
 }

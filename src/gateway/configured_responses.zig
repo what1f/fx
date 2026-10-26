@@ -25,12 +25,12 @@ pub fn build(alloc: std.mem.Allocator, request: streams.RequestData, provider: m
     }
     try std.json.Stringify.value(instructions.written(), .{}, w);
     try w.writeAll(",\"input\":[");
-    try protocol.writeInputWithTools(w, alloc, projected orelse request.messages, request.verified_images, .{
+    try protocol.writeInput(w, alloc, projected orelse request.messages, request.verified_images, .{
         .tool_calls = 64,
         .tool_identity_bytes = 1024,
         .tool_arguments_bytes = 1024 * 1024,
         .provider_state_bytes = types.ProviderReplay.max_bytes,
-    }, if (request.budget) |budget| .{ .deadline = budget.deadline, .cancel_flag = budget.cancel_flag } else .{}, request.tools.selected_dynamic);
+    }, if (request.budget) |budget| .{ .deadline = budget.deadline, .cancel_flag = budget.cancel_flag } else .{});
     try w.writeByte(']');
     _ = try protocol.writeTools(w, alloc, request.tools);
     try w.writeAll(",\"tool_choice\":");

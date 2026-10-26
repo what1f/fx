@@ -16,7 +16,7 @@ let package = Package(
         .binaryTarget(name: "CFx", path: "Artifacts/CFx.xcframework"),
         .systemLibrary(name: "CSQLite"),
         .target(name: "LibFx", dependencies: [.product(name: "JSONSchema", package: "JSONSchema.swift"), "CFx", "CSQLite", .product(name: "Yams", package: "Yams")]),
-        .target(name: "FxAgentKit", dependencies: ["LibFx"]),
+        .target(name: "FxAgentKit", dependencies: ["LibFx", .product(name: "Yams", package: "Yams")]),
         .testTarget(name: "FxAgentKitTests", dependencies: ["FxAgentKit", "LibFx"]),
         .target(name: "LibFxHTTP", dependencies: ["LibFx", .product(name: "HTTPTypes", package: "swift-http-types")]),
         .testTarget(name: "LibFxHTTPTests", dependencies: ["LibFx", "LibFxHTTP", .product(name: "HTTPTypes", package: "swift-http-types")]),
