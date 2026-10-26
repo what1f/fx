@@ -65,11 +65,11 @@ private actor ApprovalProbe {
         let plugin = FxTool(name: "plugin_echo", description: "Echo a plugin result", inputSchema: .object(["type": .string("object")]),
                             isIdempotent: true, writes: false) { _, _ in "PLUGIN_OK" }
         let http = FixtureHTTP([
-            ("write_file", args(["path": "note.txt", "content": "before\n"])),
-            ("read_file", args(["path": "note.txt"])),
-            ("edit_file", args(["path": "note.txt", "old_string": "before", "new_string": "after"])),
-            ("read_file", args(["path": "note.txt"])),
-            ("shell", args(["command": "pwd; printf SHELL_OK; printf err >&2; printf shell > shell.txt"])),
+            ("write", args(["path": "note.txt", "content": "before\n"])),
+            ("read", args(["path": "note.txt"])),
+            ("edit", args(["path": "note.txt", "oldText": "before", "newText": "after"])),
+            ("read", args(["path": "note.txt"])),
+            ("bash", args(["command": "pwd; printf SHELL_OK; printf err >&2; printf shell > shell.txt"])),
             ("plugin_echo", .object([:])),
         ])
         let configuration = FxConfiguration(apiKey: "fixture", model: "fixture/workspace", tools: tools + [plugin], workspace: workspace, httpClient: http)
@@ -88,7 +88,7 @@ private actor ApprovalProbe {
         try require(outputs.contains("before") && outputs.contains("after") && outputs.contains("SHELL_OK") && outputs.contains("PLUGIN_OK"), "Tool outputs were not consumed by the model fixture")
         try require(await probe.effects == [.write, .write, .dangerous], "Approval effects mismatch")
 
-        let deniedHTTP = FixtureHTTP([("shell", args(["command": "printf forbidden > denied.txt"]))])
+        let deniedHTTP = FixtureHTTP([("bash", args(["command": "printf forbidden > denied.txt"]))])
         let deniedTools = FxWorkspaceTools(workspace: workspace, approval: FxToolApproval { _ in .deny }, pluginID: "denied").tools([.shell])
         let denied = try await FxEngine.open(configuration: FxConfiguration(apiKey: "fixture", model: "fixture/workspace", tools: deniedTools, workspace: workspace, httpClient: deniedHTTP))
         do {
@@ -100,7 +100,7 @@ private actor ApprovalProbe {
         catch { try? await denied.close(); throw error }
         try require(!FileManager.default.fileExists(atPath: workspace.appendingPathComponent("denied.txt").path), "Denied command had a side effect")
         try require(await deniedHTTP.results.first?["output"]?["type"] == .string("error-text"), "Denial was not returned to the model")
-        let cancelledHTTP = FixtureHTTP([("shell", args(["command": "echo $$ > cancel-pid; trap '' TERM; while :; do :; done"]))])
+        let cancelledHTTP = FixtureHTTP([("bash", args(["command": "echo $$ > cancel-pid; trap '' TERM; while :; do :; done"]))])
         let cancelledTools = FxWorkspaceTools(workspace: workspace, approval: approval, pluginID: "cancel").tools([.shell])
         let cancelled = try await FxEngine.open(configuration: FxConfiguration(apiKey: "fixture", model: "fixture/workspace", tools: cancelledTools, workspace: workspace, httpClient: cancelledHTTP))
         do {

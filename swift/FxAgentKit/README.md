@@ -20,7 +20,7 @@ let result = try await turn.result
 try await agent.close()
 ```
 
-By default, the agent includes `read_file`, `write_file`, `edit_file`, and `shell`. Reads run without approval. Writes, edits, and shell calls are denied until the host grants approval. Relative file paths resolve from `configuration.workspace`; shell commands use it as their working directory. Workspace tools also accept absolute file paths.
+By default, the agent includes `read`, `write`, `edit`, and `shell`. Reads run without approval. Writes, edits, and shell calls are denied until the host grants approval. Relative file paths resolve from `configuration.workspace`; shell commands use it as their working directory. Workspace tools also accept absolute file paths.
 
 Consume the `FxTurn` event stream before awaiting its result, as shown above, so the runtime can drain streamed output. `await turn.cancel()` cancels a running turn. Always await `agent.close()` when the host stops using the agent, including after an error. Concurrent and repeated calls share one teardown, which closes the engine before closing the owned SQLite connection. New prompts and resume calls fail with `FxError.closed` once closing begins.
 

@@ -26,7 +26,7 @@ private func input(_ fields: [String: String]) -> JSONValue { .object(fields.map
         _ = try await fixture.tool(.writeFile).execute(input(["path": "note.txt", "content": "one\r\ntwo\r\n"]), context)
         let read = try await fixture.tool(.readFile).execute(input(["path": "note.txt"]), context)
         #expect(read.text.contains("1: one\r\n"))
-        _ = try await fixture.tool(.editFile).execute(input(["path": "note.txt", "old_string": "two", "new_string": "three"]), context)
+        _ = try await fixture.tool(.editFile).execute(input(["path": "note.txt", "oldText": "two", "newText": "three"]), context)
         #expect(try String(contentsOf: fixture.url.appendingPathComponent("note.txt"), encoding: .utf8) == "one\r\nthree\r\n")
     }
 
@@ -37,7 +37,7 @@ private func input(_ fields: [String: String]) -> JSONValue { .object(fields.map
         let file = fixture.url.appendingPathComponent("note.txt")
         try Data("aaa".utf8).write(to: file)
         await #expect(throws: (any Error).self) {
-            _ = try await fixture.tool(.editFile).execute(input(["path": "note.txt", "old_string": old, "new_string": "changed"]), context)
+            _ = try await fixture.tool(.editFile).execute(input(["path": "note.txt", "oldText": old, "newText": "changed"]), context)
         }
         #expect(try String(contentsOf: file, encoding: .utf8) == "aaa")
     }
@@ -49,7 +49,7 @@ private func input(_ fields: [String: String]) -> JSONValue { .object(fields.map
         try Data("keep".utf8).write(to: fixture.url.appendingPathComponent("keep.txt"))
         for (selection, args) in [
             (FxWorkspaceTools.Tool.writeFile, input(["path": "new.txt", "content": "bad"])),
-            (.editFile, input(["path": "keep.txt", "old_string": "keep", "new_string": "bad"])),
+            (.editFile, input(["path": "keep.txt", "oldText": "keep", "newText": "bad"])),
             (.shell, input(["command": "printf bad > shell.txt"])),
         ] {
             await #expect(throws: FxToolApproval.Failure.denied) {
@@ -116,7 +116,7 @@ private func input(_ fields: [String: String]) -> JSONValue { .object(fields.map
         defer { fixture.close() }
         try Data((1...600).map { "line-\($0)" }.joined(separator: "\n").utf8).write(to: fixture.url.appendingPathComponent("lines"))
         let range = try await fixture.tool(.readFile).execute(.object([
-            "path": .string("lines"), "start_line": .number(500), "line_count": .number(2),
+            "path": .string("lines"), "offset": .number(500), "limit": .number(2),
         ]), context)
         #expect(range.text.hasPrefix("500: line-500\n501: line-501\n"))
         try Data(String(repeating: "中", count: 30000).utf8).write(to: fixture.url.appendingPathComponent("long"))
@@ -188,5 +188,36 @@ extension WorkspaceToolsTests {
             try bytes.write(to: fixture.url.appendingPathComponent(name))
             await #expect(throws: (any Error).self) { _ = try await read.execute(input(["path": name]), context) }
         }
+    }
+}
+
+extension WorkspaceToolsTests {
+    @Test func bashTimeoutStopsItsProcessAndWriteCreatesParents() async throws {
+        let fixture = try WorkspaceFixture()
+        defer { fixture.close() }
+        _ = try await fixture.tool(.writeFile).invoke(input(["path": "nested/note.txt", "content": "created"]), context: context)
+        #expect(try String(contentsOf: fixture.url.appendingPathComponent("nested/note.txt"), encoding: .utf8) == "created")
+        await #expect(throws: (any Error).self) {
+            _ = try await fixture.tool(.shell).invoke(.object([
+                "command": .string("echo $$ > timeout-pid; sleep 20; touch escaped"), "timeout": .number(0.2)
+            ]), context: context)
+        }
+        let pid = try #require(Int32(String(contentsOf: fixture.url.appendingPathComponent("timeout-pid"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        #expect(kill(pid, 0) == -1 && errno == ESRCH)
+        #expect(!FileManager.default.fileExists(atPath: fixture.url.appendingPathComponent("escaped").path))
+        await #expect(throws: (any Error).self) {
+            _ = try await fixture.tool(.shell).invoke(.object(["command": .string("touch invalid"), "timeout": .number(-1)]), context: context)
+        }
+        #expect(!FileManager.default.fileExists(atPath: fixture.url.appendingPathComponent("invalid").path))
+    }
+
+    @Test func readReturnsImageContent() async throws {
+        let fixture = try WorkspaceFixture()
+        defer { fixture.close() }
+        let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL1kAAAAASUVORK5CYII=")!
+        try png.write(to: fixture.url.appendingPathComponent("image.png"))
+        let result = try await fixture.tool(.readFile).invoke(input(["path": "image.png"]), context: context)
+        #expect(result.images.count == 1 && result.images.first?.format == .png)
+        #expect(result.text.contains("1 × 1"))
     }
 }

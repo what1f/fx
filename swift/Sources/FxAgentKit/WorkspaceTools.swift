@@ -33,12 +33,13 @@ public struct FxWorkspaceTools: Sendable {
     }
 
     private var readFile: FxTool {
-        tool("read_file", description: "Read a UTF-8 text file, with numbered lines. Output is limited to 400 lines and 50 KiB. Paths may be relative to the workspace or absolute.",
-             properties: ["path": Self.stringSchema, "start_line": Self.positiveIntegerSchema,
-                          "line_count": Self.positiveIntegerSchema], required: ["path"], effect: .readOnly) { input, _ in
+        tool("read", description: "Read a text file or image. Text has numbered lines, limited to 400 lines and 50 KiB; use offset and limit to continue. Paths may be relative to the workspace or absolute.",
+             properties: ["path": Self.stringSchema, "offset": Self.positiveIntegerSchema,
+                          "limit": Self.positiveIntegerSchema], required: ["path"], effect: .readOnly) { input, _ in
             let path = try resolve(input)
-            let start = try Self.positiveInteger(input, "start_line", default: 1)
-            let count = min(try Self.positiveInteger(input, "line_count", default: 400), 400)
+            if let image = try workspaceImage(at: path) { return image }
+            let start = try Self.positiveInteger(input, "offset", default: 1)
+            let count = min(try Self.positiveInteger(input, "limit", default: 400), 400)
             let text = try Self.read(path)
             let lines = text.components(separatedBy: "\n")
             let upper = min(lines.count, start - 1 + count)
@@ -51,37 +52,38 @@ public struct FxWorkspaceTools: Sendable {
             }
             let truncated = output.utf8.count > Self.outputLimit || upper < lines.count
             output = Self.prefix(output, bytes: Self.outputLimit)
-            if truncated { output += "\n[Output truncated. Use start_line and line_count to read another range.]" }
+            if truncated { output += "\n[Output truncated. Use offset and limit to read another range.]" }
             return FxToolResult(text: output)
         }
     }
 
     private var writeFile: FxTool {
-        tool("write_file", description: "Create or overwrite a UTF-8 file with complete content. Parent directories must exist.",
+        tool("write", description: "Create or overwrite a UTF-8 file with complete content. Missing parent directories are created.",
              properties: ["path": Self.stringSchema, "content": Self.stringSchema],
              required: ["path", "content"], effect: .write) { input, _ in
             let path = try resolve(input)
             let content = try Self.string(input, "content")
             guard content.utf8.count <= Self.fileLimit else { throw FxError.invalidInput("File content exceeds 4 MiB") }
             try Task.checkCancellation()
+            try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data(content.utf8).write(to: path, options: .atomic)
             return FxToolResult(text: "Wrote \(content.utf8.count) bytes")
         }
     }
 
     private var editFile: FxTool {
-        tool("edit_file", description: "Replace one exact, unique old_string occurrence with new_string in a UTF-8 file. Read the file before editing. Ambiguous matches are rejected.",
-             properties: ["path": Self.stringSchema, "old_string": Self.stringSchema, "new_string": Self.stringSchema],
-             required: ["path", "old_string", "new_string"], effect: .write) { input, _ in
+        tool("edit", description: "Replace one exact, unique oldText occurrence with newText in a UTF-8 file. Read the file before editing. Ambiguous matches are rejected.",
+             properties: ["path": Self.stringSchema, "oldText": Self.stringSchema, "newText": Self.stringSchema],
+             required: ["path", "oldText", "newText"], effect: .write) { input, _ in
             let path = try resolve(input)
-            let old = try Self.string(input, "old_string"), new = try Self.string(input, "new_string")
-            guard !old.isEmpty else { throw FxError.invalidInput("old_string must not be empty") }
+            let old = try Self.string(input, "oldText"), new = try Self.string(input, "newText")
+            guard !old.isEmpty else { throw FxError.invalidInput("oldText must not be empty") }
             let text = try Self.read(path)
             // Literal UTF-8 matching preserves line endings and rejects overlapping matches too.
             let data = Data(text.utf8), needle = Data(old.utf8)
-            guard let match = data.range(of: needle) else { throw FxError.invalidInput("old_string was not found") }
+            guard let match = data.range(of: needle) else { throw FxError.invalidInput("oldText was not found") }
             if data.range(of: needle, in: (match.lowerBound + 1)..<data.count) != nil {
-                throw FxError.invalidInput("old_string matches more than once")
+                throw FxError.invalidInput("oldText matches more than once")
             }
             var edited = data
             edited.replaceSubrange(match, with: new.utf8)
@@ -93,13 +95,24 @@ public struct FxWorkspaceTools: Sendable {
     }
 
     private var shell: FxTool {
-        tool("shell", description: "Run a foreground command with /bin/sh in the workspace. No TTY or background handles. stdout and stderr are combined and limited to 50 KiB. Nonzero exit codes report failure.",
-             properties: ["command": Self.stringSchema], required: ["command"], effect: .dangerous) { input, _ in
+        tool("bash", description: "Run a foreground command with /bin/bash in the workspace. Optional timeout is in seconds. No TTY or background handles. stdout and stderr are combined and limited to 50 KiB. Nonzero exit codes report failure.",
+             properties: ["command": Self.stringSchema, "timeout": .object(["type": .string("number"), "exclusiveMinimum": .number(0), "maximum": .number(86400)])], required: ["command"], effect: .dangerous) { input, _ in
             let command = try Self.string(input, "command")
             guard !command.isEmpty, !command.utf8.contains(0), command.utf8.count <= 64 * 1024 else {
                 throw FxError.invalidInput("Command must contain 1 to 65536 bytes without NUL")
             }
             let execution = WorkspaceCommand(command: command, workspace: workspace, limit: Self.outputLimit)
+            if let value = input["timeout"] {
+                guard case .number(let timeout) = value, timeout.isFinite, timeout > 0, timeout <= 86400 else {
+                    throw FxError.invalidInput("timeout must be between 0 and 86400 seconds")
+                }
+                return try await withThrowingTaskGroup(of: FxToolResult.self) { group in
+                    group.addTask { try await execution.run() }
+                    group.addTask { try await Task.sleep(for: .seconds(timeout)); throw FxError.transport("Command timed out") }
+                    defer { group.cancelAll() }
+                    return try await group.next()!
+                }
+            }
             return try await execution.run()
         }
     }
@@ -119,6 +132,7 @@ public struct FxWorkspaceTools: Sendable {
         guard workspace.isFileURL, !path.isEmpty, !path.utf8.contains(0) else {
             throw FxError.invalidInput("A file URL workspace and a nonempty path are required")
         }
+        if path == "~" || path.hasPrefix("~/") { return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(String(path.dropFirst(min(2, path.count)))).standardizedFileURL }
         if path.hasPrefix("/") { return URL(fileURLWithPath: path).standardizedFileURL }
         return workspace.appendingPathComponent(path).standardizedFileURL
     }
@@ -177,9 +191,9 @@ private final class WorkspaceCommand: @unchecked Sendable {
     private var cancellationScheduled = false
 
     init(command: String, workspace: URL, limit: Int) {
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
         // Wait until the owner has verified the group, then replace this shell.
-        process.arguments = ["-c", "IFS= read -r launch || exit; exec /bin/sh -c \"$1\"", "workspace-shell", command]
+        process.arguments = ["-c", "IFS= read -r launch || exit; exec /bin/bash -c \"$1\"", "workspace-shell", command]
         process.currentDirectoryURL = workspace
         process.standardInput = launch
         process.standardOutput = pipe

@@ -33,18 +33,18 @@ Read-only tools do not prompt. File writes and edits use the `.write` effect, wh
 
 ## Tool contracts
 
-Names follow fx's existing builtins. These tools expose a smaller parameter surface:
+Model-facing names and parameters follow pi's read/bash/edit/write surface:
 
 | Selection | Model tool | Input | Result |
 | --- | --- | --- | --- |
-| `.readFile` | `read_file` | `path`, optional 1-based `start_line` and `line_count` | Numbered UTF-8 lines; at most 400 lines and 50 KiB, with a truncation notice |
-| `.writeFile` | `write_file` | `path`, `content` | Writes the complete UTF-8 content atomically; parent directories must exist |
-| `.editFile` | `edit_file` | `path`, `old_string`, `new_string` | Replaces one exact byte match atomically; empty, missing, duplicate, and overlapping matches are rejected |
-| `.shell` | `shell` | `command` | JSON text containing `exit_code`, combined `output`, and `output_truncated`; nonzero exit marks the tool result as an error |
+| `.readFile` | `read` | `path`, optional 1-based `offset` and `limit` | Numbered UTF-8 lines (at most 400 lines and 50 KiB), or typed image content resized to at most 1568 pixels per side |
+| `.writeFile` | `write` | `path`, `content` | Writes the complete UTF-8 content atomically; missing parent directories are created |
+| `.editFile` | `edit` | `path`, `oldText`, `newText` | Replaces one exact byte match atomically; empty, missing, duplicate, and overlapping matches are rejected |
+| `.shell` | `bash` | `command`, optional positive `timeout` in seconds (at most 86400) | JSON text containing `exit_code`, combined `output`, and `output_truncated`; nonzero exit marks the tool result as an error |
 
-Files are limited to 4 MiB. Reads reject invalid UTF-8 and NUL bytes. Edits preserve unmatched bytes, including line endings. No whitespace normalization or fuzzy matching occurs.
+Text files are limited to 4 MiB. Reads reject invalid UTF-8 and NUL bytes. Edits preserve unmatched bytes, including line endings. No whitespace normalization or fuzzy matching occurs.
 
-Shell uses `/bin/sh`, inherits the host process environment, and starts in the configured workspace. It does not read interactive shell startup files. It supplies no interactive input, TTY, or background session handle. stdout and stderr share one pipe. The owner continues draining after the retained 50 KiB window fills. Invalid output bytes use replacement characters.
+Bash uses `/bin/bash`, inherits the host process environment, and starts in the configured workspace. It does not read interactive shell startup files. It supplies no interactive input, TTY, or background session handle. stdout and stderr share one pipe. The owner continues draining after the retained 50 KiB window fills. Invalid output bytes use replacement characters.
 
 Cancellation sends TERM to the verified process group, then KILL after 500 ms, including descendants whose shell has already exited. The call waits for its owned shell to exit and for the escalation before reporting cancellation. The launch waits until the owner has verified and recorded the group before executing the supplied command.
 

@@ -491,3 +491,11 @@ reminders; they do not rewrite earlier messages. Compaction injects the current
 catalog again. Fetch definitions again when they are absent from the context.
 These paths have local fixtures; service acceptance and cache hits need separate
 provider validation. Anthropic Messages supports text, tools, and streamed thinking with signature replay through `apiProtocol: .anthropicMessages`. Images and redacted thinking are not supported in this path. See [the AgentKit integration guide](FxAgentKit/DORA-INTEGRATION.md).
+
+## Discover skills on demand
+
+`FxSkillDiscovery(roots:)` scans host-selected directories for `SKILL.md`, including nested groups and symlinked directories. It parses YAML name, description and disable-model-invocation metadata. `discover()` returns the current catalog plus diagnostics; duplicate names keep the first entry, invalid files are skipped, and directory cycles are visited once. The catalog prompt lists names, descriptions, absolute paths and content revisions. Bodies and supporting files remain on disk for the `read` tool.
+
+Call `discovery.prepare(request, api:)` at the provider HTTP boundary to refresh the catalog before every request, including requests after a tool call. It updates only the marked skill section in the system lane for Responses, Chat Completions and Anthropic Messages. Reusing the same discovery value still observes additions, edits and deletions. This does not rebuild the session or inject skill bodies. Read a skill again when its revision changes.
+
+Programmatic tool orchestration can use `FxTool.invoke(_:context:)` to validate current input schemas before executing a tool, including its existing approval wrapper.

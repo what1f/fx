@@ -204,12 +204,12 @@ private actor AgentBlockingTool {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let http = AgentHTTP(tool: "write_file", input: .object(["path": .string("note.txt"), "content": .string("saved")]))
+        let http = AgentHTTP(tool: "write", input: .object(["path": .string("note.txt"), "content": .string("saved")]))
         let agent = try await Agent.open(configuration: agentConfiguration(http, workspace: directory))
         _ = try await finishAgentTurn(agent.prompt("save a note"))
         #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("note.txt").path))
         let body = String(decoding: try JSONEncoder().encode(await http.requests), as: UTF8.self)
-        #expect(body.contains("read_file") && body.contains("edit_file") && body.contains("shell"))
+        #expect(body.contains("read") && body.contains("edit") && body.contains("bash"))
         #expect(body.contains("error-text") && body.contains("denied"))
         try await agent.close()
     }
@@ -219,18 +219,18 @@ private actor AgentBlockingTool {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let approval = FxToolApproval { request in
-            #expect(request.pluginID == "workspace" && request.toolName == "write_file" && request.effect == .write)
+            #expect(request.pluginID == "workspace" && request.toolName == "write" && request.effect == .write)
             return .allowPlugin
         }
         let plugin = FxTool(name: "plugin_tool", description: "Plugin fixture", inputSchema: .object(["type": .string("object")]), isIdempotent: true) { _, _ in "plugin" }
-        let http = AgentHTTP(tool: "write_file", input: .object(["path": .string("note.txt"), "content": .string("saved")]))
+        let http = AgentHTTP(tool: "write", input: .object(["path": .string("note.txt"), "content": .string("saved")]))
         let agent = try await Agent.open(configuration: agentConfiguration(http, workspace: directory, tools: [plugin]), approval: approval, builtInTools: [.writeFile])
         #expect(agent.approval === approval)
         _ = try await finishAgentTurn(agent.prompt("save a note"))
         #expect(try String(contentsOf: directory.appendingPathComponent("note.txt"), encoding: .utf8) == "saved")
         #expect(await approval.allowedPlugins == ["workspace"])
         let body = String(decoding: try JSONEncoder().encode(await http.requests.first), as: UTF8.self)
-        #expect(body.contains("plugin_tool") && body.contains("write_file") && !body.contains("read_file"))
+        #expect(body.contains("plugin_tool") && body.contains("write") && !body.contains("read"))
         try await agent.close()
     }
 }

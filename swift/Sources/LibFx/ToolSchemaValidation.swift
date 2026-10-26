@@ -1,6 +1,15 @@
 import Foundation
 import JSONSchema
 
+extension FxTool {
+    /// Programmatic calls follow the same current-schema validation as native dispatch.
+    public func invoke(_ input: JSONValue, context: FxToolContext) async throws -> FxToolResult {
+        try Task.checkCancellation()
+        try validateHostToolInput(input, tool: self)
+        return try await execute(input, context)
+    }
+}
+
 func validateHostToolInput(_ input: JSONValue, tool: FxTool) throws {
     let encoder = JSONEncoder()
     let schema = try JSONSerialization.jsonObject(with: encoder.encode(tool.inputSchema))

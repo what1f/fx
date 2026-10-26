@@ -185,3 +185,18 @@ All six Release consumers passed: general package, tool approval, workspace tool
 Dora rebuilt against this framework and passed its 54 tests. Its broad-search M4 attempts 3 and 4 each passed all 18 persistent conversation turns, including two consecutive discovery/invocation turns for each plugin. Attempts 1 and 2 failed because a new harness stderr assertion treated the CLI's normal approval input prompt as an error; after allowing that prompt, both complete attempts were rerun from empty state. Core-3 attempt 1 passed all four live turns. The user-facing prompts supplied no exact tool names; the model sometimes selected names from the catalog itself. M4 attempt 3 additionally made the broad query `Quick Links open add link` after repeated discovery. Dora evidence, failure records, usage, and the architecture self-audit are in `docs/validation/m4.md` in the dora checkout.
 
 The final complete `FX_SOUND=0 zig build test` rerun exited zero. The final Swift rerun also passed all 463 tests after strengthening the repeated-search fixture to require both expected names exactly once. Pre-commit `git grep` checks over both repositories' worktrees and HEAD trees, plus exact in-memory scans of changed files, verification logs, and the relevant HTTP caches, found no credential. The acceptance and dora HTTP cache directories were absent. No credential file was created. The same audit is repeated after the local commits.
+
+## 2026-10-26: pi-style workspace tools and discoverable skills
+
+The model tools are now `read`, `bash`, `edit`, and `write`, with pi-style `offset`/`limit`, `oldText`/`newText`, and optional bash timeout parameters. Writes create missing parent directories. Read returns typed images when applicable. `FxTool.invoke` shares native current-schema validation with programmatic callers.
+
+`FxSkillDiscovery` discovers YAML metadata in host-selected roots, lists metadata and locations without loading bodies into the prompt, and refreshes the marked system section at each HTTP request. Responses, Chat Completions, and Anthropic Messages are covered. Tests exercise additions, edits, removal, duplicate names, malformed metadata, disabled automatic invocation, and directory symlink cycles.
+
+Validation performed locally on macOS arm64:
+
+- `swift test --package-path swift --scratch-path /tmp/fx-dora-tools-build --no-parallel`: 470 Swift tests passed across four test products. No compiler warnings were reported.
+- `swift/scripts/test-workspace-tools-consumer.sh`: the built Release consumer ran through the public native SDK and consumed file/bash/plugin results. Denial left no side effects, and cancellation joined the owned shell. The process exited normally.
+- Workspace tests verified bash timeout and descendant cancellation, parent creation, image reading, exact-match edits, and rejected mutations.
+- Dora's real DeepSeek Responses acceptance exercised discovered Skill reads, codemode nested tools, same-session Skill addition, tool_search, and deferred plugin Actions.
+
+The Swift SDK changed; the Zig kernel and C ABI did not. No new kernel artifact was needed for these checks. Remote CI, the standalone fx terminal UI, and real-window Dora interaction were not exercised. Nothing was pushed.

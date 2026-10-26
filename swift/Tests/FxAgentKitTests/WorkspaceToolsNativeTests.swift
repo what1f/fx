@@ -46,10 +46,10 @@ private actor WorkspaceHTTP: FxHTTPClient {
         func args(_ values: [String: String]) -> JSONValue { .object(values.mapValues(JSONValue.string)) }
         try Data("before".utf8).write(to: workspace.appendingPathComponent("existing"))
         let http = WorkspaceHTTP([
-            ("read_file", args(["path": "existing"])),
-            ("write_file", args(["path": "new", "content": "created"])),
-            ("edit_file", args(["path": "existing", "old_string": "before", "new_string": "after"])),
-            ("shell", args(["command": "printf SHELL_NATIVE; printf created > from-shell"])),
+            ("read", args(["path": "existing"])),
+            ("write", args(["path": "new", "content": "created"])),
+            ("edit", args(["path": "existing", "oldText": "before", "newText": "after"])),
+            ("bash", args(["command": "printf SHELL_NATIVE; printf created > from-shell"])),
             ("plugin", .object([:])),
         ])
         let approval = FxToolApproval { _ in allow ? .allowOnce : .deny }
@@ -80,7 +80,7 @@ extension WorkspaceToolsNativeTests {
         let workspace = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: workspace) }
-        let http = WorkspaceHTTP([("shell", .object(["command": .string("echo $$ > pid; trap '' TERM; while :; do :; done")]))])
+        let http = WorkspaceHTTP([("bash", .object(["command": .string("echo $$ > pid; trap '' TERM; while :; do :; done")]))])
         let tools = FxWorkspaceTools(workspace: workspace, approval: FxToolApproval { _ in .allowOnce }, pluginID: "fixture").tools([.shell])
         let engine = try await FxEngine.open(configuration: FxConfiguration(apiKey: "fixture", model: "fixture/workspace", tools: tools,
                                                                            workspace: workspace, httpClient: http))
