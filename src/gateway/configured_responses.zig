@@ -54,3 +54,37 @@ pub fn build(alloc: std.mem.Allocator, request: streams.RequestData, provider: m
 }
 
 pub const consume = @import("openai_codex.zig").completeFromStream;
+
+test "configured protocols serialize effort and omit unset effort" {
+    const alloc = std.testing.allocator;
+    const cc = @import("chat_completions_protocol.zig");
+    const anthropic = @import("anthropic_protocol.zig");
+    for ([_]?types.ReasoningEffort{ null, .literal("none"), .literal("low"), .literal("medium"), .literal("high"), .literal("xhigh"), .literal("max") }) |effort| {
+        const request: streams.RequestData = .{
+            .model = "model",
+            .instructions = &.{.{ .role = .system, .content = "Stable instructions" }},
+            .messages = &.{.{ .role = .user, .content = "hello" }},
+            .tools = .{},
+            .tool_choice = .auto,
+            .provider_options = .{ .reasoning = effort },
+        };
+        const bodies = [_][]u8{ try cc.build_request(alloc, request, .{}), try build(alloc, request, .gateway), try anthropic.build(alloc, request) };
+        defer for (bodies) |body| alloc.free(body);
+        for (bodies, 0..) |body, index| {
+            const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+            defer parsed.deinit();
+            const fields = parsed.value.object;
+            if (effort) |value| {
+                if (index == 0) try std.testing.expectEqualStrings(value.label(), fields.get("reasoning_effort").?.string);
+                if (index == 1) try std.testing.expectEqualStrings(value.label(), fields.get("reasoning").?.object.get("effort").?.string);
+                if (index == 2) {
+                    const disabled = std.mem.eql(u8, value.label(), "none");
+                    try std.testing.expectEqualStrings(if (disabled) "disabled" else "adaptive", fields.get("thinking").?.object.get("type").?.string);
+                    if (disabled) try std.testing.expect(!fields.contains("output_config")) else try std.testing.expectEqualStrings(value.label(), fields.get("output_config").?.object.get("effort").?.string);
+                }
+            } else {
+                for ([_][]const u8{ "reasoning_effort", "reasoning", "thinking", "output_config" }) |key| try std.testing.expect(!fields.contains(key));
+            }
+        }
+    }
+}

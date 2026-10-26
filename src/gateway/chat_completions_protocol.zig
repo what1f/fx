@@ -168,7 +168,7 @@ fn validate_request(request: stream_provider.RequestData) Error!void {
     try request.validatePrompt();
     configured_provider.validate_model_id(request.model) catch return error.InvalidModel;
     const options = request.provider_options;
-    if (options.reasoning != null or options.fast or options.prompt_caching) return error.UnsupportedProviderOption;
+    if (options.fast or options.prompt_caching) return error.UnsupportedProviderOption;
     if (options.provider_order.len != 0) return error.UnsupportedProviderOption;
     if (request.response_format != null) return error.UnsupportedResponseFormat;
     // The vision tool runs through a separate provider request; inline image
@@ -609,6 +609,10 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
             try writer.writeAll(",\"parallel_tool_calls\":");
             try std.json.Stringify.value(parallel, .{}, writer);
         }
+    }
+    if (request.provider_options.reasoning) |effort| {
+        try writer.writeAll(",\"reasoning_effort\":");
+        try std.json.Stringify.value(effort.label(), .{}, writer);
     }
     if (request.max_output_tokens) |limit| try writer.print(",\"max_tokens\":{d}", .{limit});
     try writer.writeByte('}');
@@ -2022,8 +2026,6 @@ test "chat completions serializes user message images as content parts" {
 test "chat completions rejects unsupported requests and ambiguous selection" {
     const alloc = std.testing.allocator;
     var request = test_request();
-    request.provider_options.reasoning = .auto;
-    try std.testing.expectError(error.UnsupportedProviderOption, build_request(alloc, request, .{}));
     request.provider_options = .{ .fast = true };
     try std.testing.expectError(error.UnsupportedProviderOption, build_request(alloc, request, .{}));
     request.provider_options = .{ .prompt_caching = true };

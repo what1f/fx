@@ -48,7 +48,17 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
         try json(w, message.content orelse "");
         try w.writeByte('}');
     }
-    try w.writeAll("],\"tools\":[");
+    try w.writeByte(']');
+    if (request.provider_options.reasoning) |effort| {
+        if (std.mem.eql(u8, effort.label(), "none")) {
+            try w.writeAll(",\"thinking\":{\"type\":\"disabled\"}");
+        } else {
+            try w.writeAll(",\"thinking\":{\"type\":\"adaptive\"},\"output_config\":{\"effort\":");
+            try json(w, effort.label());
+            try w.writeByte('}');
+        }
+    }
+    try w.writeAll(",\"tools\":[");
     var count: usize = 0;
     var deferred = false;
     if (parsed.value.object.get("tools")) |tools| for (tools.array.items) |entry| {

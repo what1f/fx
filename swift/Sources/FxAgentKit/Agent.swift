@@ -55,6 +55,16 @@ public actor Agent {
         return try await engine.prompt(content, id: id)
     }
 
+    public func setModel(_ id: String) async throws {
+        guard closingTask == nil else { throw FxError.closed }
+        try await engine.setModel(id)
+    }
+
+    public func setReasoningEffort(_ effort: String?) async throws {
+        guard closingTask == nil else { throw FxError.closed }
+        try await engine.setReasoningEffort(effort)
+    }
+
     /// Adds or replaces deferred definitions while the conversation is idle.
     public func upsertTools(_ tools: [FxTool]) async throws {
         guard closingTask == nil else { throw FxError.closed }

@@ -53,6 +53,7 @@ pub fn bundle(raw: ?*anyopaque, definition: *const definitions.Definition) provi
             .project_replay_fn = if (own.protocol == .@"openai-responses") @import("responses_protocol.zig").selectReplayParts else chat_completions.project_replay,
         },
         .model_catalog = chat_completions.model_catalog_provider(own),
+        .fallback_model_capabilities_fn = chat_completions.fallbackCapabilities,
     };
 }
 

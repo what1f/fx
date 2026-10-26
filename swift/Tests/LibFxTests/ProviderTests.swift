@@ -72,6 +72,52 @@ private actor CredentialLog {
         try await engine.close()
     }
 
+    @Test func idleModelAndEffortUpdatesKeepHistoryAndRejectBusyChanges() async throws {
+        let server = ProviderServer()
+        let provider = try FxCustomProvider(name: "updates", baseURL: URL(string: "https://models.example/v1")!,
+            models: ["first": .init(supportsToolUse: true)])
+        let store = FxMemoryPersistence()
+        let config = FxConfiguration(provider: .custom(provider), model: FxModel(id: "first", reasoningEffort: "high"),
+                                     instructions: "Stable prefix", httpClient: server)
+        let engine = try await FxEngine.open(configuration: config, persistence: store)
+        let sessionID = engine.sessionID
+        for index in 0..<4 {
+            if index == 2 { try await engine.setModel("second"); try await engine.setReasoningEffort("low") }
+            let turn = try await engine.prompt("Remember marker \(index)")
+            await #expect(throws: FxError.busy) { try await engine.setModel("first") }
+            for try await _ in turn {}
+            _ = try await turn.result
+        }
+        try await engine.setReasoningEffort(nil)
+        let last = try await engine.prompt("Default effort")
+        for try await _ in last {}
+        _ = try await last.result
+        let bodies = try await server.requests.map { try JSONDecoder().decode(JSONValue.self, from: #require($0.httpBody)) }
+        #expect(bodies.count == 5)
+        for index in 0..<4 {
+            #expect(bodies[index]["model"] == .string(index < 2 ? "first" : "second"))
+            #expect(bodies[index]["reasoning_effort"] == .string(index < 2 ? "high" : "low"))
+            if case .array(let messages)? = bodies[index]["messages"],
+               case .array(let initial)? = bodies[0]["messages"] { #expect(messages.first == initial.first) }
+            else { Issue.record("Missing messages") }
+        }
+        #expect(bodies[4]["reasoning_effort"] == nil)
+        #expect(String(decoding: try JSONEncoder().encode(bodies[3]), as: UTF8.self).contains("Remember marker 0"))
+        #expect(engine.sessionID == sessionID)
+        try await engine.close()
+        var restoredConfig = config
+        restoredConfig.model = FxModel(id: "second")
+        let restored = try await FxEngine.open(configuration: restoredConfig, sessionID: sessionID, persistence: store)
+        #expect(restored.sessionID == sessionID)
+        let next = try await restored.prompt("After recovery")
+        for try await _ in next {}
+        _ = try await next.result
+        let recovered = try JSONDecoder().decode(JSONValue.self, from: #require(await server.requests.last?.httpBody))
+        #expect(recovered["model"] == .string("second"))
+        #expect(recovered["reasoning_effort"] == nil)
+        try await restored.close()
+    }
+
     @Test func localProviderNeedsNoKeyAndUnauthorizedIsNotRetried() async throws {
         for status in [200, 401] {
             let server = ProviderServer(status: status)

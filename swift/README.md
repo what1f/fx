@@ -58,6 +58,11 @@ Omit `model` in a Gateway configuration to use the core's default model. To set 
 
 Reasoning effort names must fit in 64 UTF-8 bytes. An oversized name throws `FxError.invalidInput` before loading saved history or creating the runtime. The core validates effort names and model support.
 
+While the engine is idle, call `try await engine.setModel("provider/model")` or `try await engine.setReasoningEffort("high")`. Pass nil to restore the default effort. These methods use ACP configuration updates and keep the session's native history. They throw `FxError.busy` during a turn, recovery, checkpoint, or another runtime update. The host saves its selected model and effort and supplies them in `FxConfiguration` when reopening the journal.
+
+Configured endpoints serialize effort as `reasoning_effort` for Chat Completions, `reasoning.effort` for Responses, and adaptive `thinking` with `output_config.effort` for Messages. For Messages, `none` disables thinking and omits the output effort. Unset effort emits none of these fields. Labels pass through without provider-specific conversion; the endpoint determines which labels its selected model accepts.
+
+
 ## Connect MCP tools
 
 Add the `LibFxMCP` product when you need MCP. It uses the [official Swift MCP SDK](https://github.com/modelcontextprotocol/swift-sdk) for connection and protocol handling. Configure a fresh official transport with your server URL and authentication:

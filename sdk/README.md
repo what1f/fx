@@ -581,6 +581,10 @@ libfx is developed in the [fx repository](https://github.com/vercel-labs/fx), un
 
 [Apache-2.0](https://github.com/vercel-labs/fx/blob/main/LICENSE)
 
+### Native Swift model configuration
+
+The Swift engine and FxAgentKit expose idle `setModel` and `setReasoningEffort` calls through ACP. Configured endpoints support the standard effort fields for Chat Completions, Responses, and Messages. The host persists its selection and supplies it when reopening native history. See [libfx Swift](../swift/README.md).
+
 ### Native Swift deferred tools
 
 The native Swift package supports deferred host tool catalogs and idle catalog updates. See [Update deferred host tools](../swift/README.md#update-deferred-host-tools) for activation, schema validation, persistence, and capacity limits. Registered deferred tools can be called before discovery; invalid arguments return field errors and the current definition. Direct calls leave the top-level tool list unchanged. Repeated discovery does not duplicate native declarations. Outgoing requests project saved discovery results onto the current catalog, replacing changed schemas and omitting removed tools. Schema changes can invalidate an earlier cache prefix. The JavaScript SDK does not expose catalog mutation methods.

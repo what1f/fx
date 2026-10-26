@@ -278,6 +278,36 @@ public actor FxEngine {
         }
     }
 
+    /// Selects a model while idle without replacing the session or its history.
+    public func setModel(_ id: String) async throws {
+        guard !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, id.utf8.count <= 1024 else {
+            throw FxError.invalidInput("Invalid model identifier")
+        }
+        try await setConfigurationOption("model", value: id)
+    }
+
+    /// Nil restores the provider's default effort. The native core validates support.
+    public func setReasoningEffort(_ effort: String?) async throws {
+        try await setConfigurationOption("effort", value: effort ?? "default")
+    }
+
+    private func setConfigurationOption(_ name: String, value: String) async throws {
+        try checkCatalogUpdate()
+        let task = Task {
+            _ = try await rpc.request("session/set_config_option", .object([
+                "sessionId": .string(sessionID), "configId": .string(name), "value": .string(value),
+            ]))
+            if name == "model" {
+                self.checkpointMetadata.replaceModel(value)
+                await transport.setContext(sessionID: sessionID, modelID: value)
+            }
+            try await journal?.check()
+        }
+        runtimeUpdateTask = task
+        defer { runtimeUpdateTask = nil }
+        try await task.value
+    }
+
     /// Appends anonymous context without changing earlier messages.
     public func appendContext(_ text: String) async throws {
         try await updateContext(name: nil, text: text)

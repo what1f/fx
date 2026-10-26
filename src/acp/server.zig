@@ -3926,7 +3926,11 @@ fn commitActiveSessionModel(
         session.model = staged_model;
         return;
     }
-    return error.SessionPersistenceUnavailable;
+    // libfx/new sessions keep history in the host journal. The host supplies
+    // the selected model and effort when opening that history again.
+    const staged_model = try alloc.dupe(u8, value);
+    alloc.free(session.model);
+    session.model = staged_model;
 }
 
 fn commitActiveSessionEffort(
@@ -3945,8 +3949,7 @@ fn commitActiveSessionEffort(
     }
     session.session_write_mutex.lockUncancelable(io_mod.getIo());
     defer session.session_write_mutex.unlock(io_mod.getIo());
-    const v2 = session.v2 orelse return error.SessionPersistenceUnavailable;
-    try setV2Preferences(v2, session, session.provider, session.model, effort);
+    if (session.v2) |v2| try setV2Preferences(v2, session, session.provider, session.model, effort);
     session.effort = effort;
 }
 

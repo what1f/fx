@@ -18,6 +18,13 @@ struct CheckpointMetadata: Sendable {
         value = .object(fields)
     }
 
+    mutating func replaceModel(_ model: String) {
+        if case .object(var fields) = value {
+            fields["model"] = .string(model)
+            value = .object(fields)
+        }
+    }
+
     func replacingTools(_ descriptors: [JSONValue]) throws -> CheckpointMetadata {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]

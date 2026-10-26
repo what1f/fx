@@ -24,6 +24,10 @@ By default, the agent includes `read`, `write`, `edit`, and `shell`. Reads run w
 
 Consume the `FxTurn` event stream before awaiting its result, as shown above, so the runtime can drain streamed output. `await turn.cancel()` cancels a running turn. Always await `agent.close()` when the host stops using the agent, including after an error. Concurrent and repeated calls share one teardown, which closes the engine before closing the owned SQLite connection. New prompts and resume calls fail with `FxError.closed` once closing begins.
 
+## Change the model while idle
+
+`try await agent.setModel("provider/model")` and `try await agent.setReasoningEffort("high")` forward to the existing engine. Pass nil to restore the default effort. These calls preserve native history and reject updates while the engine is busy. Persist the selection in your host and use it in the configuration when reopening the conversation.
+
 ## Approve effects
 
 Pass an `FxToolApproval` actor to `Agent.open(configuration:persistenceURL:approval:builtInTools:)`. Its asynchronous handler receives plugin identity, tool name, input, tool context, and the effect classification. Return `.allowOnce`, `.allowPlugin`, or `.deny`. Your host supplies any approval interface.
