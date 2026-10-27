@@ -52,6 +52,13 @@ func catalogDiagnose(_ before: Data, _ after: Data) {
     print("WIRE DIFF", i, "BEFORE", String(decoding: a[max(0,i-80)..<min(a.count,i+240)], as: UTF8.self), "AFTER", String(decoding: b[max(0,i-80)..<min(b.count,i+240)], as: UTF8.self))
 }
 
+private actor ContextAppendProbe {
+    var texts: [String] = []
+    func receive(_ event: FxLifecycleEvent) {
+        if case .contextAppended(let name, let text) = event, name == "preferences" { texts.append(text) }
+    }
+}
+
 private actor RuntimeProbeHTTP: FxHTTPClient {
     var summaries = 0
     var searches = 0
@@ -169,15 +176,22 @@ func runRuntimeCatalogProbe() async throws -> Int {
         configuration.autoCompaction = .tokens(5000)
         return configuration
     }
+    let notices = ContextAppendProbe()
     let store = try FxSQLitePersistence(url: database)
-    let engine = try await FxEngine.open(configuration: config([tool("value")]), persistence: store)
+    var observed = config([tool("value")])
+    observed.onLifecycleEvent = { await notices.receive($0) }
+    let engine = try await FxEngine.open(configuration: observed, persistence: store)
     do {
         try await engine.setContext(name: "preferences", text: "Preference marker: concise answers.")
+        try require(await notices.texts.count == 1, "Missing initial context notification")
         let beforeDuplicate = try await engine.checkpoint()
         try await engine.setContext(name: "preferences", text: "Preference marker: concise answers.")
+        try require(await notices.texts.count == 1, "Duplicate context notification")
         try require(try await engine.checkpoint() == beforeDuplicate, "Unchanged context appended twice")
         for _ in 0..<16 { try await prompt(engine); if await http.summaries > 0 { break } }
         try require(await http.summaries > 0, "Automatic compaction never ran")
+        try require(await notices.texts.count > 1, "Compaction did not notify reinjected context")
+        try require(await notices.texts.allSatisfy { $0 == "<system-reminder>\nPreference marker: concise answers.\n</system-reminder>" }, "Context notification differs from model text")
         try await engine.flushPersistence()
         let persisted = try await store.load()
         let replacements = try persisted.journal.flatMap { record -> [JSONValue] in

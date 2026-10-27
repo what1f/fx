@@ -1746,8 +1746,9 @@ pub fn appendHostContext(state: *ServerState, active: *ActiveSessionState, text:
 /// so updates never need to inspect or repair rendered provider messages.
 fn appendHostContexts(state: *ServerState, active: *ActiveSessionState, entries: []const types.HostContext) !void {
     var prepared: std.ArrayList(types.HistoryTurn) = .empty;
+    var committed = false;
     defer {
-        for (prepared.items) |entry| types.freeHistoryTurn(state.alloc, entry);
+        if (!committed) for (prepared.items) |entry| types.freeHistoryTurn(state.alloc, entry);
         prepared.deinit(state.alloc);
     }
     for (entries) |entry| {
@@ -1782,7 +1783,15 @@ fn appendHostContexts(state: *ServerState, active: *ActiveSessionState, entries:
         try journal.appendMarked(state.alloc, active.session_id, .{ .history_replaced = snapshot.items }, true);
     }
     for (prepared.items) |entry| active.session_rt.commitPreparedHistoryEntry(state.alloc, entry);
-    prepared.clearRetainingCapacity();
+    committed = true;
+    for (prepared.items) |entry| try notifyHostContext(state, active.session_id, entry.host_context);
+}
+
+/// Sent only after the canonical history accepts the context, including reinjection after compaction.
+pub fn notifyHostContext(state: *ServerState, session_id: []const u8, entry: types.HostContext) !void {
+    const params = try std.json.Stringify.valueAlloc(state.alloc, .{ .sessionId = session_id, .name = entry.name, .text = entry.text }, .{});
+    defer state.alloc.free(params);
+    try state.writer.writeNotification(state.alloc, "libfx/context_appended", params);
 }
 
 pub fn ensureCatalogReminder(state: *ServerState, active: *ActiveSessionState) !void {

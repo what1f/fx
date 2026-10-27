@@ -3098,8 +3098,10 @@ fn commitContextCompaction(
         }
     }
     if (session.journal) |*journal| try journal.append(ctx.alloc, session.session_id, .{ .history_replaced = prepared });
+    const reinjected = prepared[prepared.len - snapshots.len ..];
     session.session_rt.commitCompactedHistory(ctx.alloc, prepared);
     prepared_owned = false;
+    for (reinjected) |entry| try server.notifyHostContext(ctx.state, session.session_id, entry.host_context);
     @memcpy(ctx.state.host_tools.loaded, declared);
 }
 

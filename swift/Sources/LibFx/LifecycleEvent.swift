@@ -1,7 +1,10 @@
-/// Host-owned lifecycle notifications. These do not enable runtime hooks or content capture.
+/// Host-owned lifecycle notifications. Context events carry host-supplied text.
+/// These do not enable runtime hooks or provider content capture.
 public enum FxLifecycleEvent: Sendable {
     case outputBackpressure(bufferedBytes: Int, bufferedEvents: Int)
     case sessionForwarded(sessionID: String, agent: String)
+    /// Content actually appended by the runtime, after deduplication or compaction.
+    case contextAppended(name: String?, text: String)
     case journalOpened(FxJournalRestoration)
     case checkpointSaved(sessionID: String, cursor: String, byteCount: Int)
     case checkpointFailed(sessionID: String, error: any Error)

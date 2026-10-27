@@ -697,7 +697,11 @@ public actor FxEngine {
 
     private func handle(_ message: RPCMessage) async {
         guard !closed else { return }
-        if message.method == "libfx/hook", message.params["rootSessionId"]?.string == sessionID {
+        if message.method == "libfx/context_appended", message.params["sessionId"]?.string == sessionID {
+            if let text = message.params["text"]?.string {
+                await onLifecycleEvent?(.contextAppended(name: message.params["name"]?.string, text: text))
+            }
+        } else if message.method == "libfx/hook", message.params["rootSessionId"]?.string == sessionID {
             guard let observation else { return }
             do {
                 var params = message.params
