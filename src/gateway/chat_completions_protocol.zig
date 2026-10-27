@@ -423,7 +423,7 @@ pub fn build_request(alloc: Allocator, input: stream_provider.RequestData, optio
     return out.toOwnedSlice();
 }
 
-fn toolResultDenied(message: types.ChatMessage) bool {
+pub fn toolResultDenied(message: types.ChatMessage) bool {
     const failed = if (message.tool_result_status) |status|
         status == .failure
     else

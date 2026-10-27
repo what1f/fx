@@ -1,9 +1,11 @@
-//! Messages text/tool transport. Inline tool additions follow pi's
+//! Messages transport for text, images, and tools. Inline tool additions follow pi's
 //! packages/ai/src/api/anthropic-messages.ts; definitions stay at discovery time.
 const std = @import("std");
 const streams = @import("../core/agent/stream_provider.zig");
 const cc = @import("chat_completions_protocol.zig");
 const sse = @import("sse.zig");
+const types = @import("../core/shared/types.zig");
+const image_attachments = @import("../core/images/image_attachments.zig");
 const Allocator = std.mem.Allocator;
 
 pub const headers = [_]std.http.Header{
@@ -17,6 +19,30 @@ fn json(w: *std.Io.Writer, value: anytype) !void {
     try std.json.Stringify.value(value, .{}, w);
 }
 
+fn imageBlockStart(w: *std.Io.Writer, media_type: []const u8) !void {
+    try w.writeAll("{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":");
+    try json(w, media_type);
+    try w.writeAll(",\"data\":\"");
+}
+
+/// Encodes in chunks so a large attachment is not duplicated in memory.
+fn writeImageBlock(w: *std.Io.Writer, media_type: []const u8, bytes: []const u8) !void {
+    try imageBlockStart(w, media_type);
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const end = @min(offset + 3 * 1024, bytes.len);
+        try std.base64.standard.Encoder.encodeWriter(w, bytes[offset..end]);
+        offset = end;
+    }
+    try w.writeAll("\"}}");
+}
+
+fn writeEncodedImageBlock(w: *std.Io.Writer, image: types.ToolImage) !void {
+    try imageBlockStart(w, image.mime_type);
+    try w.writeAll(image.data);
+    try w.writeAll("\"}}");
+}
+
 /// Caller owns the request. This first Messages surface accepts text and tools.
 pub fn build(alloc: Allocator, request: streams.RequestData) ![]u8 {
     return buildFor(alloc, request, null);
@@ -28,7 +54,6 @@ pub fn buildFor(alloc: Allocator, input: streams.RequestData, provider: ?@import
 
 pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?@import("../core/config/model_provider.zig").ProviderId, mode: @import("../core/config/configured_provider.zig").DeferredToolMode) ![]u8 {
     var request = input;
-    const types = @import("../core/shared/types.zig");
     const projected = if (provider) |identity| try types.projectProviderReplay(alloc, input.messages, .{ .provider = identity, .model = input.model }) else null;
     defer if (projected) |messages| alloc.free(messages);
     request.messages = projected orelse input.messages;
@@ -84,8 +109,6 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
     var declarations = @import("deferred_definitions.zig").Declarations.init(alloc);
     defer declarations.deinit();
     for (request.messages, 0..) |message, message_index| {
-        if (message.images.len > 0) return error.UnsupportedProviderContent;
-        if (message.tool_result_memory) |memory| if (memory.tool_images.len > 0) return error.UnsupportedProviderContent;
         if (count > 0) try w.writeByte(',');
         count += 1;
         try w.writeAll("{\"role\":");
@@ -110,12 +133,23 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
             try json(w, message.tool_call_id orelse "");
             try w.writeAll(",\"content\":");
             const definitions = if (message.tool_result_memory) |memory| memory.loaded_tools_json else null;
+            const tool_images = if (message.tool_result_memory) |memory| memory.tool_images else &.{};
+            const with_images = tool_images.len > 0 and !cc.toolResultDenied(message);
+            if (with_images) try w.writeAll("[{\"type\":\"text\",\"text\":");
             if (mode == .call_action and definitions != null) {
                 const current = try @import("deferred_definitions.zig").snapshot(alloc, definitions.?);
                 defer alloc.free(current);
                 try json(w, if (std.mem.eql(u8, current, "[]")) message.content orelse current else current);
             } else {
                 try json(w, message.content orelse "");
+            }
+            if (with_images) {
+                try w.writeByte('}');
+                for (tool_images) |image| {
+                    try w.writeByte(',');
+                    try writeEncodedImageBlock(w, image);
+                }
+                try w.writeByte(']');
             }
             if (message.tool_result_status == .failure) try w.writeAll(",\"is_error\":true");
             try w.writeByte('}');
@@ -125,6 +159,13 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
             try w.writeAll("{\"type\":\"text\",\"text\":");
             try json(w, text);
             try w.writeByte('}');
+            blocks += 1;
+        };
+        if (message.role == .user) for (message.images) |image| {
+            var snapshot = image_attachments.loadVerifiedSnapshot(alloc, image, .{}) catch return error.ImageUnavailable;
+            defer snapshot.deinit(alloc);
+            if (blocks > 0) try w.writeByte(',');
+            try writeImageBlock(w, snapshot.media_type, snapshot.bytes);
             blocks += 1;
         };
         for (message.tool_calls) |call| {
@@ -342,7 +383,6 @@ pub fn consume(alloc: Allocator, source: *std.Io.Reader, request: streams.ModelR
 
 test "deferred tools preserve Anthropic prefix and append definitions" {
     const alloc = std.testing.allocator;
-    const types = @import("../core/shared/types.zig");
     const messages = [_]types.ChatMessage{
         .{ .role = .user, .content = "Find action" },
         .{ .role = .assistant, .tool_calls = &.{.{ .id = "search-1", .name = "tool_search", .arguments_json = "{\"query\":\"action\"}" }} },
@@ -401,7 +441,6 @@ test "Anthropic stream rejects malformed and incomplete events" {
 test "Anthropic thinking signatures replay and cache usage survives message delta" {
     const alloc = std.testing.allocator;
     const Fake = @import("host_transport_testing.zig").FakeTransport;
-    const types = @import("../core/shared/types.zig");
     var fake = Fake{ .responses = &.{} };
     defer fake.deinit();
     const body =
@@ -458,7 +497,6 @@ test "Anthropic content block indices map to contiguous tool ordinals" {
 
 test "deferred Messages native and callAction preserve saved schemas after repeated search" {
     const alloc = std.testing.allocator;
-    const types = @import("../core/shared/types.zig");
     const saved = "[{\"name\":\"action\",\"description\":\"old\",\"inputSchema\":{}},{\"name\":\"removed\",\"description\":\"removed\",\"inputSchema\":{}}]";
     const messages = [_]types.ChatMessage{
         .{ .role = .assistant, .tool_calls = &.{.{ .id = "s1", .name = "tool_search", .arguments_json = "{}" }} },
@@ -484,4 +522,55 @@ test "deferred Messages native and callAction preserve saved schemas after repea
         try std.testing.expect(std.mem.find(u8, body, "action") != null);
         try std.testing.expect(std.mem.find(u8, body, "removed") != null);
     }
+}
+
+test "Anthropic messages carry user and tool-result images as image blocks" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const png = try alloc.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(png_b64));
+    defer alloc.free(png);
+    try std.base64.standard.Decoder.decode(png, png_b64);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pixel.png", .data = png });
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const abs = try @import("../core/shared/io.zig").dirRealpathAlloc(arena, tmp.dir, "pixel.png");
+    var attachment: types.ImageAttachment = .{ .id = 1, .path = try arena.dupe(u8, abs), .media_type = try arena.dupe(u8, "image/png") };
+    try image_attachments.captureImageSnapshot(arena, &attachment, std.Io.Dir.path.dirname(abs).?);
+    var tool_image: types.ToolImage = .{ .data = try arena.dupe(u8, png_b64), .mime_type = try arena.dupe(u8, "image/png") };
+    _ = &tool_image;
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "what is this", .images = &.{attachment} },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "read-1", .name = "read_file", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "read-1", .tool_name = "read_file", .content = "shot", .tool_result_memory = .{ .tool_images = &.{tool_image} } },
+        .{ .role = .user, .content = "again" },
+    };
+    const request: streams.RequestData = .{ .model = "claude-test", .instructions = &.{.{ .role = .system, .content = "Stable" }}, .messages = messages[0..1], .tool_choice = .auto, .provider_options = .{}, .tools = .{} };
+    const first = try build(alloc, request);
+    defer alloc.free(first);
+    var later = request;
+    later.messages = &messages;
+    const second = try build(alloc, later);
+    defer alloc.free(second);
+    // The image turn stays a byte-identical prefix of the next request.
+    try std.testing.expect(std.mem.startsWith(u8, second, first[0 .. first.len - 2]));
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, second, .{});
+    defer parsed.deinit();
+    const items = parsed.value.object.get("messages").?.array.items;
+    const user = items[0].object.get("content").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), user.len);
+    try std.testing.expectEqualStrings("what is this", user[0].object.get("text").?.string);
+    const source = user[1].object.get("source").?.object;
+    try std.testing.expectEqualStrings("image", user[1].object.get("type").?.string);
+    try std.testing.expectEqualStrings("base64", source.get("type").?.string);
+    try std.testing.expectEqualStrings("image/png", source.get("media_type").?.string);
+    try std.testing.expectEqualStrings(png_b64, source.get("data").?.string);
+    const result = items[2].object.get("content").?.array.items[0].object;
+    try std.testing.expectEqualStrings("tool_result", result.get("type").?.string);
+    const parts = result.get("content").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), parts.len);
+    try std.testing.expectEqualStrings("shot", parts[0].object.get("text").?.string);
+    try std.testing.expectEqualStrings(png_b64, parts[1].object.get("source").?.object.get("data").?.string);
 }
