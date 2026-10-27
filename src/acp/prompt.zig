@@ -1379,6 +1379,13 @@ fn connectHostChannelServers(session: *server.ActiveSessionState) void {
     };
 }
 
+fn hostDeclarations(ctx: *AcpContext, alloc: Allocator, history: []const types.HistoryTurn) ![]bool {
+    var messages: std.ArrayList(types.ChatMessage) = .empty;
+    defer messages.deinit(alloc);
+    try session_runtime.appendHistoryChatMessages(alloc, &messages, history);
+    return ctx.state.host_tools.declaredTools(alloc, messages.items);
+}
+
 /// Host tools plus every tool of the session's always-loaded MCP servers, so
 /// client-provided tools stay callable on each turn without a search. The
 /// result is allocated in `arena`, which must outlive the turn.
@@ -1387,22 +1394,9 @@ fn initialDynamicTools(
     arena: Allocator,
 ) ![]const agent_stream_provider.DynamicFunctionTool {
     if (ctx.state.active_session) |*active| {
-        for (active.session_rt.agent.history.items) |turn| if (turn == .compacted_summary) {
-            if (turn.compacted_summary.host_state_json) |json| try ctx.state.host_tools.loadState(arena, json);
-        };
-        var messages: std.ArrayList(types.ChatMessage) = .empty;
-        try session_runtime.appendHistoryChatMessages(arena, &messages, active.session_rt.agent.history.items);
-        for (messages.items) |message| if (message.tool_result_memory) |memory| if (memory.loaded_tools_json) |json| {
-            const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, json, .{}) catch continue;
-            var catalog = @import("../core/tooling/host_tool_runtime.zig").Runtime.init(arena, parsed) catch return error.InvalidToolSchema;
-            defer catalog.deinit();
-            for (catalog.definitions) |entry| {
-                const name = entry.name;
-                for (ctx.state.host_tools.descriptors, 0..) |descriptor, index| if (std.mem.eql(u8, name, descriptor.object.get("name").?.string)) {
-                    ctx.state.host_tools.loaded[index] = true;
-                };
-            }
-        };
+        const declared = try hostDeclarations(ctx, arena, active.session_rt.agent.history.items);
+        defer arena.free(declared);
+        @memcpy(ctx.state.host_tools.loaded, declared);
     }
     const host_tools = try ctx.state.host_tools.initialTools(arena);
     if (comptime host_target.is_wasm) return host_tools;
@@ -3057,6 +3051,9 @@ fn commitContextCompaction(
         prepared = try ctx.alloc.realloc(prepared, prepared.len + 1);
         prepared[prepared.len - 1] = copy;
     }
+    var declaration_arena = std.heap.ArenaAllocator.init(ctx.alloc);
+    defer declaration_arena.deinit();
+    const declared = try hostDeclarations(ctx, declaration_arena.allocator(), prepared);
     if (session.v2) |v2| {
         v2.commitCompaction(retained_summary, active_prefix != null, retained_from) catch |err| {
             if (session_adapter.writeMayHaveLanded(err) and active_prefix != null) {
@@ -3103,6 +3100,7 @@ fn commitContextCompaction(
     if (session.journal) |*journal| try journal.append(ctx.alloc, session.session_id, .{ .history_replaced = prepared });
     session.session_rt.commitCompactedHistory(ctx.alloc, prepared);
     prepared_owned = false;
+    @memcpy(ctx.state.host_tools.loaded, declared);
 }
 
 /// `recovery_checkpoint.set` for a journaled libfx session: the open turn

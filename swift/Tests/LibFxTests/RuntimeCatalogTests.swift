@@ -2,12 +2,12 @@ import Foundation
 import Testing
 @_spi(Conformance) @testable import LibFx
 
-private actor CatalogCalls {
+actor CatalogCalls {
     var inputs: [JSONValue] = []
     func record(_ value: JSONValue) { inputs.append(value) }
 }
 
-private actor CatalogHTTP: FxHTTPClient {
+actor CatalogHTTP: FxHTTPClient {
     var posts: [JSONValue] = []
     var rawPosts: [Data] = []
     let actions: [(String, JSONValue)?]
@@ -21,6 +21,13 @@ private actor CatalogHTTP: FxHTTPClient {
             } else { payload = #"{"data":[{"id":"swift/catalog","type":"language","tags":["tool-use"]}]}"# }
         } else {
             let body = try JSONDecoder().decode(JSONValue.self, from: request.httpBody ?? Data())
+            if codex, case .array(let input) = body["input"] {
+                let names = input.flatMap { item -> [String] in
+                    guard case .array(let tools) = item["tools"] else { return [] }
+                    return tools.compactMap { $0["name"]?.string }
+                }
+                #expect(names.count == Set(names).count)
+            }
             posts.append(body)
             rawPosts.append(request.httpBody!)
             let action = posts.count <= actions.count ? actions[posts.count - 1] : nil
@@ -59,7 +66,7 @@ private actor CatalogHTTP: FxHTTPClient {
     }
 }
 
-private func catalogTool(_ name: String, key: String = "value", calls: CatalogCalls) -> FxTool {
+func catalogTool(_ name: String, key: String = "value", calls: CatalogCalls) -> FxTool {
     FxTool(name: name, description: "Perform \(name)", inputSchema: .object([
         "type": .string("object"), "properties": .object([key: .object(["type": .string("string")])]),
         "required": .array([.string(key)]), "additionalProperties": .bool(false),
@@ -69,7 +76,7 @@ private func catalogTool(_ name: String, key: String = "value", calls: CatalogCa
     }
 }
 
-private func drainCatalogTurn(_ turn: FxTurn) async throws {
+func drainCatalogTurn(_ turn: FxTurn) async throws {
     for try await _ in turn {}
     #expect(try await turn.result.stopReason == .endTurn)
 }
@@ -111,7 +118,7 @@ private func drainCatalogTurn(_ turn: FxTurn) async throws {
         ("tool_search", .object(["query": .string("action_42")])),
         ("action_42", .object(["value": .string("first")])), nil,
         ("tool_search", .object(["query": .string("action_42")])), nil,
-        ("action_42", .object(["updated": .string("restored")])), nil,
+        ("call_action", .object(["name": .string("action_42"), "args": .object(["updated": .string("restored")])])), nil,
         ("action_42", .object(["updated": .string("removed")])), nil,
     ], codex: true)
     let credentials = try FxSubscriptionCredentials(accessToken: "fixture-token", accountID: "fixture-account", expiresAt: Date().addingTimeInterval(3600))
@@ -126,7 +133,8 @@ private func drainCatalogTurn(_ turn: FxTurn) async throws {
     guard case .array(let initial) = before[0]["tools"], case .array(let loaded) = before[1]["tools"] else {
         Issue.record("Missing ordinary function tools"); try await engine.close(); return
     }
-    #expect(initial.count == 1)
+    #expect(initial.count == 2)
+    #expect(initial.contains { $0["name"] == .string("call_action") })
     #expect(loaded == initial)
     #expect(!loaded.contains { $0["name"] == .string("action_42") })
     #expect(String(describing: before).contains("tool_search_output"))
@@ -156,9 +164,9 @@ private func drainCatalogTurn(_ turn: FxTurn) async throws {
             guard case .array(let tools) = item["tools"] else { return [] }
             return tools
         }.filter { $0["name"] == .string("action_42") }
-        #expect(definitions.count == (index == 0 ? 0 : index < 4 ? 1 : 2))
+        #expect(definitions.count == (index == 0 ? 0 : 1))
         if index > 0 { #expect(definitions.first?["parameters"]?["required"] == .array([.string("value")])) }
-        if index >= 4 { #expect(definitions.last?["parameters"]?["required"] == .array([.string("updated")])) }
+        if index >= 4 { #expect(String(describing: body).contains("updated")) }
     }
     try await restored.close()
 }
@@ -286,7 +294,7 @@ private actor MessagesCatalogHTTP: FxHTTPClient {
     }
 }
 
-@Test func runtimeCatalogRepeatedBroadSearchPreservesEachSearchSnapshot() async throws {
+@Test func runtimeCatalogRepeatedBroadSearchDeclaresEachToolOnce() async throws {
     let calls = CatalogCalls()
     let http = CatalogHTTP(actions: [
         ("tool_search", .object(["query": .string("notes")])),
@@ -306,7 +314,7 @@ private actor MessagesCatalogHTTP: FxHTTPClient {
             return tools.compactMap { $0["name"] }
         }
         #expect(Set(names.map { String(describing: $0) }).count == (index == 0 ? 0 : 2))
-        #expect(names.count == (index == 0 ? 0 : index == 1 ? 2 : 4))
+        #expect(names.count == (index == 0 ? 0 : 2))
         if index > 0 {
             #expect(names.contains(.string("notes_read")))
             #expect(names.contains(.string("notes_write")))
@@ -314,4 +322,46 @@ private actor MessagesCatalogHTTP: FxHTTPClient {
     }
     #expect(await calls.inputs == [.object(["value": .string("read")])])
     try await engine.close()
+}
+
+@Test func runtimeCatalogRediscoveryAfterRemovalAndCheckpointKeepsOneDeclaration() async throws {
+    let calls = CatalogCalls()
+    let http = CatalogHTTP(actions: [
+        ("tool_search", .object(["query": .string("select:notes_read")])), nil,
+        ("tool_search", .object(["query": .string("notes")])), nil,
+        ("tool_search", .object(["query": .string("select:notes_read")])),
+        ("call_action", .object(["name": .string("notes_read"), "args": .object(["updated": .string("new")])])), nil,
+    ], codex: true)
+    let credentials = try FxSubscriptionCredentials(accessToken: "fixture-token", accountID: "fixture-account", expiresAt: Date().addingTimeInterval(3600))
+    let auth = FxSubscription(provider: .codex, credentials: { _ in credentials })
+    func config(_ tools: [FxTool]) -> FxConfiguration {
+        FxConfiguration(provider: .subscription(auth), model: FxModel(id: "gpt-6.1-sol"), tools: tools, httpClient: http)
+    }
+    let engine = try await FxEngine.open(configuration: config([catalogTool("notes_read", calls: calls), catalogTool("notes_write", calls: calls)]))
+    try await drainCatalogTurn(try await engine.prompt("Find read"))
+    try await drainCatalogTurn(try await engine.prompt("Find all notes tools"))
+    try await engine.removeTools(named: ["notes_read"])
+    try await engine.upsertTools([catalogTool("notes_read", key: "updated", calls: calls)])
+    let checkpoint = try await engine.checkpoint()
+    try await engine.close()
+    let restored = try await FxEngine.open(configuration: config([catalogTool("notes_read", key: "updated", calls: calls), catalogTool("notes_write", calls: calls)]), checkpoint: checkpoint)
+    try await drainCatalogTurn(try await restored.prompt("Find updated read and call it"))
+    #expect(await calls.inputs == [.object(["updated": .string("new")])])
+    let requests = await http.rawPosts
+    for index in 1..<requests.count {
+        let prefix = try catalogRawArray("input", in: requests[index - 1])
+        #expect(try catalogRawArray("input", in: requests[index]).starts(with: prefix.dropLast()))
+        #expect(try catalogRawArray("tools", in: requests[index]) == catalogRawArray("tools", in: requests[0]))
+    }
+    let posts = await http.posts
+    guard case .array(let input) = posts.last?["input"] else { Issue.record("Missing input"); return }
+    let results = input.filter { $0["type"] == .string("tool_search_output") }
+    for (index, result) in results.enumerated() {
+        guard case .array(let tools) = result["tools"] else { Issue.record("Missing tools"); continue }
+        #expect(tools.count == (index == 2 ? 0 : 1))
+    }
+    #expect(results.count == 3)
+    #expect(results.last?["tools"] == .array([]))
+    #expect(String(describing: input).contains("updated"))
+    try await restored.close()
 }

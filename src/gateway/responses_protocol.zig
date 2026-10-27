@@ -69,6 +69,8 @@ pub fn writeInput(
     }
     var ids = try tool_call_ids.Projection.init(scratch_alloc, messages);
     defer ids.deinit(scratch_alloc);
+    var declarations = @import("deferred_definitions.zig").Declarations.init(scratch_alloc);
+    defer declarations.deinit();
     var first = true;
     for (messages) |message| {
         try budget.check();
@@ -174,11 +176,13 @@ pub fn writeInput(
                     try std.json.Stringify.value(ids.resolve(message.tool_call_id orelse ""), .{}, writer);
                     try writer.writeAll(",\"tools\":[");
                     const definitions = if (message.tool_result_memory) |memory| memory.loaded_tools_json else null;
+                    var declaration_count: usize = 0;
                     if (definitions) |json| {
-                        const projected_definitions = try @import("deferred_definitions.zig").snapshot(scratch_alloc, json);
+                        const projected_definitions = try declarations.first(scratch_alloc, json);
                         defer scratch_alloc.free(projected_definitions);
                         const parsed = try std.json.parseFromSlice(std.json.Value, scratch_alloc, projected_definitions, .{});
                         defer parsed.deinit();
+                        declaration_count = parsed.value.array.items.len;
                         for (parsed.value.array.items, 0..) |entry, index| {
                             if (index > 0) try writer.writeByte(',');
                             try writer.writeAll("{\"type\":\"function\",\"defer_loading\":true,\"name\":");
@@ -191,6 +195,13 @@ pub fn writeInput(
                         }
                     }
                     try writer.writeAll("]}");
+                    // An empty native result can still carry current schemas or errors.
+                    if (declaration_count == 0) if (message.content) |text| if (text.len > 0) {
+                        try writeComma(writer, &first);
+                        try writer.writeAll("{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":");
+                        try std.json.Stringify.value(text, .{}, writer);
+                        try writer.writeAll("}]}");
+                    };
                     continue;
                 }
                 try writer.writeAll("{\"type\":\"function_call_output\",\"call_id\":");
@@ -676,7 +687,6 @@ pub fn writeTools(
 
     for (tools.advertised_names) |name| {
         const tool = tools.advertisedFunction(name) orelse continue;
-        if (std.mem.eql(u8, name, "call_action")) continue;
         if (std.mem.eql(u8, name, "tool_search")) {
             if (count > 0) try out.writer.writeByte(',');
             try out.writer.writeAll("{\"type\":\"tool_search\",\"execution\":\"client\",\"description\":");
@@ -2847,7 +2857,7 @@ test "deferred tools preserve Responses tools and prior input bytes" {
     try std.testing.expectEqualStrings(before.written(), after.written());
 }
 
-test "deferred Responses replay preserves each saved search snapshot" {
+test "deferred Responses replay preserves first declarations and the append-only prefix" {
     const alloc = std.testing.allocator;
     const old = "[{\"name\":\"action\",\"description\":\"old\",\"inputSchema\":{}},{\"name\":\"removed\",\"description\":\"removed\",\"inputSchema\":{}}]";
     const current = "[{\"name\":\"action\",\"description\":\"updated\",\"inputSchema\":{}}]";
@@ -2855,7 +2865,7 @@ test "deferred Responses replay preserves each saved search snapshot" {
         .{ .role = .assistant, .tool_calls = &.{.{ .id = "s1", .name = "tool_search", .arguments_json = "{}" }} },
         .{ .role = .tool, .tool_call_id = "s1", .tool_name = "tool_search", .tool_result_memory = .{ .loaded_tools_json = old } },
         .{ .role = .assistant, .tool_calls = &.{.{ .id = "s2", .name = "tool_search", .arguments_json = "{}" }} },
-        .{ .role = .tool, .tool_call_id = "s2", .tool_name = "tool_search", .tool_result_memory = .{ .loaded_tools_json = current } },
+        .{ .role = .tool, .tool_call_id = "s2", .tool_name = "tool_search", .content = "Current definition: updated", .tool_result_memory = .{ .loaded_tools_json = current } },
     };
     var before: std.Io.Writer.Allocating = .init(alloc);
     defer before.deinit();
@@ -2864,8 +2874,8 @@ test "deferred Responses replay preserves each saved search snapshot" {
     try writeInput(&before.writer, alloc, messages[0..2], null, ImageInputTest.limits, .{});
     try writeInput(&after.writer, alloc, &messages, null, ImageInputTest.limits, .{});
     try std.testing.expect(std.mem.startsWith(u8, after.written(), before.written()));
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, after.written(), "\"name\":\"action\""));
-    try std.testing.expect(std.mem.find(u8, after.written(), "updated") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, after.written(), "\"name\":\"action\""));
+    try std.testing.expect(std.mem.find(u8, after.written(), "Current definition: updated") != null);
     try std.testing.expect(std.mem.find(u8, after.written(), "removed") != null);
     try std.testing.expect(std.mem.find(u8, after.written(), "old") != null);
 }

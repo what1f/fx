@@ -481,13 +481,13 @@ Updates require an idle engine and reject a concurrent prompt, checkpoint, or ca
 
 The catalog holds at most 256 tools. The combined resident, provider, and discovery-tool count is at most 64. Deferred actions do not consume that prefix budget. Each description and schema is limited to 65,536 bytes, and one search result can carry at most 65,536 bytes of definitions. Keep schema keywords compatible with [JSONSchema.swift](https://github.com/kylef/JSONSchema.swift), which validates host arguments. Remote schema references are unsupported, and newer draft keywords have incomplete coverage in that dependency.
 
-Journal events and checkpoints retain activation metadata, including across automatic context compaction. On reopen, provide the current catalog and closures in `FxConfiguration`. Catalog changes append persisted reminders, but the journal does not serialize the executable catalog or closures. Saved activation names that no longer exist are ignored. Definitions remain at their discovery position in the conversation; catalog changes do not rewrite the top-level tool list. This preserves the serialized tool prefix, but does not establish service-side cache hits.
+Journal events and checkpoints retain activation metadata, including across automatic context compaction. On reopen, provide the current catalog and closures in `FxConfiguration`. Catalog changes append persisted reminders, but the journal does not serialize the executable catalog or closures. Native declarations are rebuilt from retained search history on reopen. Each name keeps its first saved definition; later searches return current information without declaring it again. Compaction starts a new declaration baseline, so tools can be discovered again with their current schemas. Catalog changes do not rewrite the top-level tool list. This preserves the serialized tool prefix, but does not establish service-side cache hits.
 
 Run `swift/scripts/test-runtime-catalog-consumer.sh` after building the XCFramework to exercise automatic compaction, schema replacement, removal, SQLite reopen, and checkpoint restoration from a separate package using public APIs.
 
 Deferred actions keep the request's top-level tool list fixed. Chat Completions uses
 `tool_search` to fetch definitions and `call_action(name, args)` to invoke them.
-Responses sends definitions in `tool_search_output` items and calls actions natively.
+Responses sends first definitions in `tool_search_output` items and supports native calls. Responses and native Messages also keep `call_action` available: use it with the current arguments after a schema change, because the original native schema remains unchanged.
 The host still supplies current definitions and closures when reopening an engine.
 
 `try await engine.appendContext(text)` appends a system reminder while idle. With
@@ -507,4 +507,4 @@ Programmatic tool orchestration can use `FxTool.invoke(_:context:)` to validate 
 
 ### Context snapshot ownership
 
-Agent SDK owns Skill discovery, filesystem watching, and the live catalog cache. Hosts select roots; they do not rewrite HTTP instructions. `setContext(name:text:)` appends a named snapshot to native history only when its value changes. Native history is the source of truth across recovery and compaction. Older snapshots and tool-search definitions remain immutable. Active deferred tool changes append a schema notice; providers that require a real search for native definitions still require that search. New provider declaration capabilities are deferred.
+Agent SDK owns Skill discovery, filesystem watching, and the live catalog cache. Hosts select roots; they do not rewrite HTTP instructions. `setContext(name:text:)` appends a named snapshot to native history only when its value changes. Native history is the source of truth across recovery and compaction. Older snapshots and tool-search definitions remain immutable. Active deferred tool changes append a schema notice. Use `call_action` for updated arguments instead of redeclaring the native name. Request serialization also removes repeated native declarations from saved history without changing the stored records.

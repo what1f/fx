@@ -226,7 +226,7 @@ pub const Runtime = struct {
             defer alloc.free(schema);
             try out.writer.print("Definition version: {x}\n", .{std.hash.Wyhash.hash(0, schema)});
         }
-        try out.writer.writeAll("Fetch current definitions with tool_search(query: select:name or keywords). Removed actions cannot be called.\n</system-reminder>");
+        try out.writer.writeAll("Fetch current definitions with tool_search(query: select:name or keywords). Use call_action with the current arguments when a definition changes. Removed actions cannot be called.\n</system-reminder>");
         return out.toOwnedSlice();
     }
 
@@ -268,6 +268,28 @@ pub const Runtime = struct {
         if (count > max_tools) return error.TooManyHostTools;
     }
 
+    /// Caller owns the flags. Only declarations in retained history count;
+    /// activation metadata from a removed prefix is not a native declaration.
+    pub fn declaredTools(self: *const Runtime, alloc: Allocator, messages: []const @import("../shared/types.zig").ChatMessage) ![]bool {
+        const declared = try alloc.alloc(bool, self.loaded.len);
+        errdefer alloc.free(declared);
+        @memset(declared, false);
+        for (messages) |message| if (message.tool_result_memory) |memory| if (memory.loaded_tools_json) |json| {
+            const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+            defer parsed.deinit();
+            if (parsed.value != .array) return error.InvalidHostState;
+            for (parsed.value.array.items) |entry| {
+                if (entry != .object) return error.InvalidHostState;
+                const name = entry.object.get("name") orelse return error.InvalidHostState;
+                if (name != .string) return error.InvalidHostState;
+                for (self.descriptors, 0..) |descriptor, index| {
+                    if (std.mem.eql(u8, name.string, descriptor.object.get("name").?.string)) declared[index] = true;
+                }
+            }
+        };
+        return declared;
+    }
+
     pub fn initialTools(self: *Runtime, alloc: Allocator) ![]const stream_provider.DynamicFunctionTool {
         try self.validateActiveBudget();
         var result: std.ArrayList(stream_provider.DynamicFunctionTool) = .empty;
@@ -306,9 +328,11 @@ pub const Runtime = struct {
         defer output.deinit();
         var additions: std.Io.Writer.Allocating = .init(ctx.allocator);
         defer additions.deinit();
-        output.writer.writeAll("Definitions (use call_action with name and args on Chat Completions):") catch return error.OutOfMemory;
+        output.writer.writeAll("Definitions (use call_action with name and args for updated definitions):") catch return error.OutOfMemory;
         additions.writer.writeByte('[') catch return error.OutOfMemory;
         var count: usize = 0;
+        var result_bytes: usize = 2;
+        var matches: usize = 0;
         for (page.matches) |match| {
             const definition = self.definitions[match.document_index];
             if (exact and !std.mem.eql(u8, definition.name, search_query)) continue;
@@ -318,10 +342,13 @@ pub const Runtime = struct {
                 var schema: std.Io.Writer.Allocating = .init(ctx.allocator);
                 defer schema.deinit();
                 std.json.Stringify.value(entry, .{}, &schema.writer) catch return error.OutOfMemory;
-                if (additions.written().len + schema.written().len + @as(usize, if (count > 0) 1 else 0) + 1 > 64 * 1024) return .{ .failure = try ctx.allocator.dupe(u8, "Selected tool definitions exceed the 65536 byte limit") };
+                result_bytes += schema.written().len + @as(usize, if (matches > 0) 1 else 0);
+                if (result_bytes > 64 * 1024) return .{ .failure = try ctx.allocator.dupe(u8, "Selected tool definitions exceed the 65536 byte limit") };
+                matches += 1;
+                output.writer.print("\n{s}", .{schema.written()}) catch return error.OutOfMemory;
+                if (self.loaded[index]) continue;
                 if (count > 0) additions.writer.writeByte(',') catch return error.OutOfMemory;
                 additions.writer.writeAll(schema.written()) catch return error.OutOfMemory;
-                output.writer.print("\n{s}", .{schema.written()}) catch return error.OutOfMemory;
                 count += 1;
             }
         }
@@ -724,7 +751,7 @@ test "repeated broad search retains one active tool per name" {
     try std.testing.expectEqual(@as(usize, 2), loaded.value.array.items.len);
     var second: ?@import("../shared/types.zig").ToolResultMemory = null;
     const result = try runtime.search(.{ .allocator = alloc, .tool_result_memory_sink = &second }, "{\"query\":\"notes\"}");
-    try std.testing.expectEqualStrings(first.?.loaded_tools_json.?, second.?.loaded_tools_json.?);
+    try std.testing.expectEqualStrings("[]", second.?.loaded_tools_json.?);
     const active = try runtime.initialTools(alloc);
     var read_count: usize = 0;
     for (active) |tool| if (std.mem.eql(u8, tool.name, "notes_read")) {
@@ -733,6 +760,31 @@ test "repeated broad search retains one active tool per name" {
     try std.testing.expectEqual(@as(usize, 1), read_count);
     try std.testing.expect(std.mem.find(u8, result.success, "notes_read") != null);
     try std.testing.expect(std.mem.find(u8, result.success, "notes_write") != null);
+}
+
+test "deferred declarations rebuild from retained history rather than activation state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc,
+        \\[{"name":"notes_read","description":"Read notes","inputSchema":{},"deferred":true},
+        \\ {"name":"notes_write","description":"Write notes","inputSchema":{},"deferred":true}]
+    , .{});
+    var runtime = try Runtime.init(alloc, parsed.value);
+    defer runtime.deinit();
+    try runtime.loadState(alloc, "{\"loaded\":[\"notes_read\",\"notes_write\"]}");
+    const retained = try runtime.declaredTools(alloc, &.{.{ .role = .tool, .tool_result_memory = .{
+        .loaded_tools_json = "[{\"name\":\"notes_write\"},{\"name\":\"removed\"}]",
+    } }});
+    try std.testing.expect(!retained[0] and retained[1]);
+    @memcpy(runtime.loaded, retained);
+    var memory: ?@import("../shared/types.zig").ToolResultMemory = null;
+    _ = try runtime.search(.{ .allocator = alloc, .tool_result_memory_sink = &memory }, "{\"query\":\"notes\"}");
+    const declarations = try std.json.parseFromSlice(std.json.Value, alloc, memory.?.loaded_tools_json.?, .{});
+    try std.testing.expectEqual(@as(usize, 1), declarations.value.array.items.len);
+    try std.testing.expectEqualStrings("notes_read", declarations.value.array.items[0].object.get("name").?.string);
+    const compacted = try runtime.declaredTools(alloc, &.{});
+    try std.testing.expect(!compacted[0] and !compacted[1]);
 }
 
 test "unloaded host calls execute without activation and report invalid or missing tools" {

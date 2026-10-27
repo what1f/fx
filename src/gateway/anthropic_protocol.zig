@@ -64,7 +64,6 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
     if (parsed.value.object.get("tools")) |tools| for (tools.array.items) |entry| {
         const f = entry.object.get("function").?;
         const name = f.object.get("name").?.string;
-        if (mode == .native and std.mem.eql(u8, name, "call_action")) continue;
         if (std.mem.eql(u8, name, "tool_search")) deferred = true;
         if (count > 0) try w.writeByte(',');
         count += 1;
@@ -82,6 +81,8 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
     }
     try w.writeAll("],\"messages\":[");
     count = 0;
+    var declarations = @import("deferred_definitions.zig").Declarations.init(alloc);
+    defer declarations.deinit();
     for (request.messages, 0..) |message, message_index| {
         if (message.images.len > 0) return error.UnsupportedProviderContent;
         if (message.tool_result_memory) |memory| if (memory.tool_images.len > 0) return error.UnsupportedProviderContent;
@@ -112,7 +113,7 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
             if (mode == .call_action and definitions != null) {
                 const current = try @import("deferred_definitions.zig").snapshot(alloc, definitions.?);
                 defer alloc.free(current);
-                try json(w, current);
+                try json(w, if (std.mem.eql(u8, current, "[]")) message.content orelse current else current);
             } else {
                 try json(w, message.content orelse "");
             }
@@ -145,7 +146,7 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
         var group_start = message_index;
         while (group_start > 0 and request.messages[group_start - 1].role == .tool) group_start -= 1;
         for (request.messages[group_start .. message_index + 1]) |result| if (result.tool_result_memory) |memory| if (memory.loaded_tools_json) |definitions| {
-            const current = try @import("deferred_definitions.zig").snapshot(alloc, definitions);
+            const current = try declarations.first(alloc, definitions);
             defer alloc.free(current);
             const loaded = try std.json.parseFromSlice(std.json.Value, alloc, current, .{});
             defer loaded.deinit();
@@ -474,7 +475,7 @@ test "deferred Messages native and callAction preserve saved schemas after repea
         try std.testing.expect(std.mem.find(u8, body, "updated") == null);
         try std.testing.expect(std.mem.find(u8, body, "removed") != null);
         try std.testing.expect(std.mem.find(u8, body, "old") != null);
-        if (mode == .native) try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, body, "\"type\":\"tool_addition\""));
+        if (mode == .native) try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\"type\":\"tool_addition\""));
     }
     request.tools.selected_dynamic = &.{};
     for ([_]@import("../core/config/configured_provider.zig").DeferredToolMode{ .native, .call_action }) |mode| {

@@ -546,7 +546,7 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
                 if (definitions) |saved| {
                     const current = try @import("deferred_definitions.zig").snapshot(alloc, saved);
                     defer alloc.free(current);
-                    try std.json.Stringify.value(current, .{}, writer);
+                    try std.json.Stringify.value(if (std.mem.eql(u8, current, "[]")) message.content orelse current else current, .{}, writer);
                 } else {
                     try std.json.Stringify.value(message.content, .{}, writer);
                 }

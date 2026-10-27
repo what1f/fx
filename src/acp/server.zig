@@ -1872,7 +1872,7 @@ fn handleKernelCatalog(state: *ServerState, alloc: Allocator, msg: *const jsonrp
         if (std.mem.eql(u8, old, current)) continue;
         try updates.append(update_alloc, .{
             .name = try update_alloc.print("tool.{s}", .{name}),
-            .text = try update_alloc.print("<system-reminder>\nActive tool {s} changed. Current definition: {s}\nUse tool_search to obtain its current native declaration before the next call. Earlier search results are historical snapshots.\n</system-reminder>", .{ name, current }),
+            .text = try update_alloc.print("<system-reminder>\nActive tool {s} changed. Current definition: {s}\nUse call_action with the current arguments for changed definitions. Earlier native declarations are historical snapshots.\n</system-reminder>", .{ name, current }),
         });
     }
     try appendHostContexts(state, active, updates.items);
