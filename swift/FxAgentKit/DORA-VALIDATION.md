@@ -133,7 +133,7 @@ The generated XCFramework contains arm64 and x86_64 macOS slices. Its static arc
 | --- | --- |
 | `zig build` | Passed |
 | Complete `FX_SOUND=0 zig build test` | Passed |
-| `swift test --package-path swift --no-parallel` | Passed: LibFx 406, MCP 11, HTTP 14, AgentKit 31; total 462 |
+| `swift test --package-path . --no-parallel` | Passed: LibFx 406, MCP 11, HTTP 14, AgentKit 31; total 462 |
 | `test-consumer.sh` | Passed |
 | `test-tool-approval-consumer.sh` | Passed |
 | `test-workspace-tools-consumer.sh` | Passed, including real file and shell effects, denial, and cancellation |
@@ -194,7 +194,7 @@ The model tools are now `read`, `bash`, `edit`, and `write`, with pi-style `offs
 
 Validation performed locally on macOS arm64:
 
-- `swift test --package-path swift --scratch-path /tmp/fx-dora-tools-build --no-parallel`: 470 Swift tests passed across four test products. No compiler warnings were reported.
+- `swift test --package-path . --scratch-path /tmp/fx-dora-tools-build --no-parallel`: 470 Swift tests passed across four test products. No compiler warnings were reported.
 - `swift/scripts/test-workspace-tools-consumer.sh`: the built Release consumer ran through the public native SDK and consumed file/bash/plugin results. Denial left no side effects, and cancellation joined the owned shell. The process exited normally.
 - Workspace tests verified bash timeout and descendant cancellation, parent creation, image reading, exact-match edits, and rejected mutations.
 - Dora's real DeepSeek Responses acceptance exercised discovered Skill reads, codemode nested tools, same-session Skill addition, tool_search, and deferred plugin Actions.

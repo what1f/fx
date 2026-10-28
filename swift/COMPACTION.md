@@ -37,7 +37,7 @@ Requirements: macOS, Xcode, Swift 6.2 or later, and the XCFramework built from t
 
 ```sh
 swift/scripts/build-xcframework.sh
-swift test --package-path swift --no-parallel --filter CompactionTests
+swift test --package-path . --no-parallel --filter CompactionTests
 swift/scripts/test-compaction-consumer.sh
 ```
 

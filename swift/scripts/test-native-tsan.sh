@@ -10,10 +10,10 @@ esac
 task_tmp="$(mktemp -d)"
 trap 'rm -rf "$task_tmp"' EXIT
 zig build libfx-c -Dtarget="$task_target" -Dlibfx-tsan=true --prefix "$task_tmp/native"
-mkdir "$task_tmp/package"
-cp swift/Package.swift swift/Package.resolved "$task_tmp/package/"
-cp -R swift/Sources swift/Tests swift/Artifacts "$task_tmp/package/"
-task_archive="$task_tmp/package/Artifacts/CFx.xcframework/macos-arm64_x86_64/libfx_core.a"
+mkdir -p "$task_tmp/package/swift"
+cp Package.swift Package.resolved "$task_tmp/package/"
+cp -R swift/Sources swift/Tests swift/Artifacts "$task_tmp/package/swift/"
+task_archive="$task_tmp/package/swift/Artifacts/CFx.xcframework/macos-arm64_x86_64/libfx_core.a"
 cp "$task_tmp/native/lib/libfx_core.a" "$task_archive"
 nm -u "$task_archive" > "$task_tmp/native-symbols.txt"
 if ! rg -q '__tsan_(read|write|func_entry)' "$task_tmp/native-symbols.txt"; then

@@ -25,7 +25,7 @@ Local byte equality and provider cache counters are separate checks.
 
 - `zig build test-focused -Dtest-filter=deferred --summary all`: passed. Covers immutable first declarations, overlap, replacement, retained-context reconstruction, and native serializers.
 - `zig build test-focused -Dtest-filter='repeated broad search'`: passed. Repeated search returns both matches and an empty native declaration delta.
-- `swift test --package-path swift --no-parallel`: passed. Reported 413 LibFx, 11 MCP, 14 HTTP, and 36 FxAgentKit tests; the opt-in live test was skipped in this run.
+- `swift test --package-path . --no-parallel`: passed. Reported 413 LibFx, 11 MCP, 14 HTTP, and 36 FxAgentKit tests; the opt-in live test was skipped in this run.
 - The Swift catalog tests exercise duplicate-free native requests, exact and broad searches, overlapping matches, changed parameters through `call_action`, removal/re-addition, checkpoint reopen, native Messages, automatic compaction, and SQLite reopen.
 - A checksum-valid checkpoint fixture contains repeated full definitions. Reopening preserves its decoded checkpoint contents, and its next serialized request contains one declaration per name.
 - `bash swift/scripts/build-xcframework.sh`: passed for arm64 and x86_64. Archive SHA-256: `872f81986f10741a0175a1a6a1c955047f3cf501942ad769e8c1a38fb8906900`.

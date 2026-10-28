@@ -32,8 +32,8 @@ import LibFx
     }
 }
 SWIFT
-LIBFX_SWIFT_PACKAGE="$repo_root/swift" swift build --package-path "$task_tmp" -c release
-binary_directory="$(LIBFX_SWIFT_PACKAGE="$repo_root/swift" swift build --package-path "$task_tmp" -c release --show-bin-path)"
+LIBFX_SWIFT_PACKAGE="$repo_root" swift build --package-path "$task_tmp" -c release
+binary_directory="$(LIBFX_SWIFT_PACKAGE="$repo_root" swift build --package-path "$task_tmp" -c release --show-bin-path)"
 if ! FX_TRACE_LOG="$task_tmp/compaction.trace" FX_TRACE_SCOPES=context_compaction "$binary_directory/Consumer" 2> "$task_tmp/consumer.stderr"; then
     cat "$task_tmp/consumer.stderr" >&2
     exit 1

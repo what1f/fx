@@ -57,18 +57,18 @@ Run from the repository root with the package's native core archive available, a
 
 ```sh
 durable_scratch="$(mktemp -d "${TMPDIR:-/tmp}/libfx-durable.XXXXXX")"
-swift test --package-path swift --scratch-path "$durable_scratch/normal" \
+swift test --package-path . --scratch-path "$durable_scratch/normal" \
   --no-parallel --filter DurableFinalAcceptanceTests
-swift test --package-path swift --scratch-path "$durable_scratch/thread" \
+swift test --package-path . --scratch-path "$durable_scratch/thread" \
   --sanitize thread --no-parallel --filter DurableFinalAcceptanceTests
 ```
 
 To rerun the selected upstream assertions and native process companions, build the driver and discover its path through SwiftPM:
 
 ```sh
-swift build --package-path swift --scratch-path "$durable_scratch/driver" \
+swift build --package-path . --scratch-path "$durable_scratch/driver" \
   --product FxSwiftDriver
-export LIBFX_SWIFT_DRIVER="$(swift build --package-path swift \
+export LIBFX_SWIFT_DRIVER="$(swift build --package-path . \
   --scratch-path "$durable_scratch/driver" --show-bin-path)/FxSwiftDriver"
 node swift/Tests/Conformance/run.mjs
 ```

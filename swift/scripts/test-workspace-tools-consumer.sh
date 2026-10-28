@@ -15,4 +15,4 @@ let package = Package(name: "WorkspaceConsumer", platforms: [.macOS(.v14)],
         .product(name: "FxAgentKit", package: "swift"), .product(name: "LibFx", package: "swift"),
     ])])
 SWIFT
-FX_SWIFT_PACKAGE="$repo_root/swift" swift run --package-path "$task_tmp" -c release Consumer
+FX_SWIFT_PACKAGE="$repo_root" swift run --package-path "$task_tmp" -c release Consumer

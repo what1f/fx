@@ -738,7 +738,7 @@ struct SubscriptionHTTP: FxHTTPClient {
     }
 }
 SWIFT
-LIBFX_PROVIDER_PORT="$provider_port" LIBFX_SWIFT_PACKAGE="$repo_root/swift" swift run --package-path "$task_tmp" -c release Consumer
+LIBFX_PROVIDER_PORT="$provider_port" LIBFX_SWIFT_PACKAGE="$repo_root" swift run --package-path "$task_tmp" -c release Consumer
 
 node - "$task_tmp/requests.jsonl" "$task_tmp/queue-state.json" <<'JS'
 const assert = require('node:assert/strict');

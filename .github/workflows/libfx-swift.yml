@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'swift/**'
+      - 'Package.swift'
+      - 'Package.resolved'
       - 'src/c_core_main.zig'
       - 'src/native_core_runtime.zig'
       - 'src/napi_core_main.zig'
@@ -37,7 +39,7 @@ jobs:
       - name: Build C archive and XCFramework
         run: swift/scripts/build-xcframework.sh
       - name: Test Swift SDK
-        run: swift test --package-path swift --no-parallel
+        run: swift test --package-path . --no-parallel
       - name: Test independent release consumer
         run: swift/scripts/test-consumer.sh
       - name: Build Node comparison backend
@@ -54,9 +56,9 @@ jobs:
           if-no-files-found: ignore
       - name: Check Swift memory with Address Sanitizer
         run: |
-          swift test --package-path swift --no-parallel --sanitize=address
-          swift build --package-path swift --sanitize=address
-          export LIBFX_SWIFT_DRIVER="$(swift build --package-path swift --sanitize=address --show-bin-path)/FxSwiftDriver"
+          swift test --package-path . --no-parallel --sanitize=address
+          swift build --package-path . --sanitize=address
+          export LIBFX_SWIFT_DRIVER="$(swift build --package-path . --sanitize=address --show-bin-path)/FxSwiftDriver"
           node swift/Tests/Conformance/mcp-observation.mjs
           node swift/Tests/Conformance/input-observation.mjs
           node swift/Tests/Conformance/tool-observation.mjs
@@ -84,9 +86,9 @@ jobs:
           node --no-warnings --loader ./swift/Tests/Conformance/loader.mjs sdk/tests/test-hooks.mjs native
       - name: Check Swift concurrency with Thread Sanitizer
         run: |
-          swift test --package-path swift --no-parallel --sanitize=thread
-          swift build --package-path swift --sanitize=thread
-          export LIBFX_SWIFT_DRIVER="$(swift build --package-path swift --sanitize=thread --show-bin-path)/FxSwiftDriver"
+          swift test --package-path . --no-parallel --sanitize=thread
+          swift build --package-path . --sanitize=thread
+          export LIBFX_SWIFT_DRIVER="$(swift build --package-path . --sanitize=thread --show-bin-path)/FxSwiftDriver"
           node swift/Tests/Conformance/mcp-observation.mjs
           node swift/Tests/Conformance/input-observation.mjs
           node swift/Tests/Conformance/tool-observation.mjs

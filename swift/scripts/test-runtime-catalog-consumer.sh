@@ -21,7 +21,7 @@ cat > "$task_tmp/Sources/Consumer/Main.swift" <<'SWIFT'
     }
 }
 SWIFT
-export LIBFX_SWIFT_PACKAGE="$repo_root/swift"
+export LIBFX_SWIFT_PACKAGE="$repo_root"
 swift build --package-path "$task_tmp" -c release
 consumer_bin="$(swift build --package-path "$task_tmp" -c release --show-bin-path)/Consumer"
 "$consumer_bin" 2> "$task_tmp/consumer.stderr"

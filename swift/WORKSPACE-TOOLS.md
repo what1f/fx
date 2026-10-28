@@ -58,7 +58,7 @@ From the repository root:
 
 ```sh
 swift/scripts/build-xcframework.sh
-swift test --package-path swift --no-parallel --filter WorkspaceTools
+swift test --package-path . --no-parallel --filter WorkspaceTools
 swift/scripts/test-workspace-tools-consumer.sh
 ```
 

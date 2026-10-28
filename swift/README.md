@@ -12,14 +12,24 @@ From the repository root, build the macOS arm64 and x86_64 static libraries and 
 
 ```sh
 swift/scripts/build-xcframework.sh
-swift test --package-path swift --no-parallel
+swift test --package-path . --no-parallel
 swift/scripts/test-consumer.sh
 swift/scripts/test-consumer-x86_64.sh # Requires Rosetta on Apple silicon
 ```
 
 Run separate test cases serially because they share a native runtime with 64 slots. Concurrency tests still create parallel operations within each case.
 
-The generated XCFramework is in `swift/Artifacts/CFx.xcframework` and is excluded from Git. Add the prepared `swift` directory as a local Swift package dependency in Xcode, or use `.package(path: "../fx/swift")` in another package. The package uses a SwiftPM binary target and has no unsafe linker flags. A published remote package and other platform artifacts remain pending.
+The generated XCFramework is in `swift/Artifacts/CFx.xcframework` and is excluded from Git. `Package.swift` sits at the repository root: when the local XCFramework exists it is used, otherwise SwiftPM downloads the one attached to the matching GitHub Release.
+
+Depend on a release:
+
+```swift
+.package(url: "https://github.com/what1f/fx.git", exact: "0.4.5-swift.1")
+```
+
+To develop against a local checkout, build the XCFramework there and point the consumer at the repository root with `.package(path: "../fx")`, or drag the checkout into Xcode to override the remote package.
+
+Publish a release with `swift/scripts/release.sh <version>` (for example `0.4.5-swift.2`). It rebuilds the XCFramework, uploads it to a GitHub Release, writes the URL and checksum into `Package.swift`, and tags the commit.
 
 ## Run a conversation
 

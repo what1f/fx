@@ -157,7 +157,7 @@ actor HistoryHTTP: FxHTTPClient {
     }
 }
 SWIFT
-LIBFX_SWIFT_PACKAGE="$repo_root/swift" swift build --package-path "$task_tmp" --product ToolApprovalSmoke
+LIBFX_SWIFT_PACKAGE="$repo_root" swift build --package-path "$task_tmp" --product ToolApprovalSmoke
 FX_SOUND=0 "$task_tmp/.build/debug/ToolApprovalSmoke" 2> "$task_tmp/runtime.stderr"
 FX_SOUND=0 "$task_tmp/.build/debug/ToolApprovalSmoke" first "$task_tmp/conversation.sqlite" 2>> "$task_tmp/runtime.stderr"
 FX_SOUND=0 "$task_tmp/.build/debug/ToolApprovalSmoke" continue "$task_tmp/conversation.sqlite" 2>> "$task_tmp/runtime.stderr"
