@@ -1,4 +1,5 @@
 const std = @import("std");
+const compaction_activity = @import("../core/output/compaction_activity.zig");
 const observation = @import("../core/agent/runtime/observation.zig");
 const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const skill_contract = @import("../core/skills/skill_contract.zig");
@@ -247,6 +248,9 @@ const AcpContext = struct {
     /// card stands. Keys are owned copies of provider call ids so the ID
     /// stays stable from permission review through execution.
     published_tool_calls: std.StringHashMapUnmanaged(ToolCallCard) = .empty,
+    compaction: compaction_activity.State = .{},
+    compaction_id: acp_types.MessageIdBuffer = undefined,
+    compaction_announced: bool = false,
     message_id: acp_types.MessageIdBuffer = undefined,
     message_kind: ?AgentMessageKind = null,
     stop_reason: acp_types.StopReason = .end_turn,
@@ -1979,6 +1983,7 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
             null,
         .save_prompt_images = if (session.v2 != null) savePromptImages else null,
         .commit_context_compaction = .{ .commit = commitContextCompaction },
+        .compaction_activity = .{ .begin = beginCompaction, .running = runningCompaction, .settle = settleCompaction },
         .recovery_checkpoint = if (session.journal != null)
             .{
                 .set = setJournalProgress,
@@ -2005,6 +2010,45 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .record_tool_call_rejected = recordToolCallRejected,
         .record_tool_call_failed = recordToolCallFailed,
     };
+}
+
+// Display-only notifications never participate in model history or compaction errors.
+fn compactionUpdate(ctx: *AcpContext, status: []const u8) bool {
+    const session = if (ctx.state.active_session) |*active| active else return false;
+    if (session.cancel_flag.load(.seq_cst)) return false;
+    const op = ctx.compaction.snapshot.operation orelse return false;
+    var storage: [256]u8 = undefined;
+    const update = std.mem.print(
+        &storage,
+        "{{\"sessionUpdate\":\"context_compaction\",\"id\":\"{s}\",\"status\":\"{s}\",\"origin\":\"{s}\"}}",
+        .{ ctx.compaction_id, status, @tagName(op.origin) },
+    ) catch return false;
+    ctx.sendUpdate(update) catch return false;
+    return true;
+}
+
+fn beginCompaction(raw: *anyopaque, origin: compaction_activity.Origin, turn_id: ?u64) compaction_activity.OperationId {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw));
+    const id = ctx.compaction.begin(origin, turn_id, 0);
+    _ = acp_types.generateMessageId(&ctx.compaction_id);
+    ctx.compaction_announced = compactionUpdate(ctx, "in_progress");
+    return id;
+}
+
+fn runningCompaction(_: *anyopaque, _: compaction_activity.OperationId, _: compaction_activity.Stage) void {}
+
+fn settleCompaction(raw: *anyopaque, id: compaction_activity.OperationId, feedback: compaction_activity.Feedback) void {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw));
+    const op = ctx.compaction.snapshot.operation orelse return;
+    if (op.id != id or !op.active()) return;
+    ctx.compaction.settle(id, feedback, 0);
+    if (!ctx.compaction_announced) return;
+    ctx.compaction_announced = false;
+    _ = compactionUpdate(ctx, switch (feedback.outcome) {
+        .succeeded => "completed",
+        .cancelled, .no_op, .busy => "cancelled",
+        .failed => "failed",
+    });
 }
 
 /// Drains steering at a turn boundary. ACP clients steer by sending
@@ -5883,4 +5927,65 @@ test "ACP prompt agent config carries request options from active session" {
     try std.testing.expectEqualStrings(state.cfg.gateway_chat_url, state.web_search_runtime.gateway_chat_url);
     try std.testing.expectEqualStrings("/models", tool_ctx.gateway_models_path);
     try std.testing.expect(tool_ctx.ultrafast_mode);
+}
+
+test "ACP compaction notifications pair identities and ignore stale or inactive operations" {
+    const Capture = struct {
+        frames: std.ArrayList(u8) = .empty,
+        fail: bool = false,
+        fn write(raw: ?*anyopaque, frame: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (self.fail) return error.BrokenPipe;
+            try self.frames.appendSlice(std.testing.allocator, frame);
+        }
+    };
+    const alloc = std.testing.allocator;
+    var state = try initTestAcpState(alloc, "/tmp/workspace", .ask);
+    defer state.deinit();
+    var capture: Capture = .{};
+    defer capture.frames.deinit(alloc);
+    state.writer = jsonrpc.Writer.initCallback(&capture, Capture.write);
+    var ctx = AcpContext{ .alloc = alloc, .state = &state, .session_id = "session_1" };
+    const activity = agentRuntimeDeps(&ctx).compaction_activity.?;
+    activity.settle(&ctx, @fromBackingInt(1), .{ .outcome = .no_op });
+    try std.testing.expectEqual(@as(usize, 0), capture.frames.items.len);
+    const outcomes = [_]compaction_activity.Outcome{ .succeeded, .cancelled, .failed, .no_op, .busy };
+    const origins = [_]compaction_activity.Origin{ .automatic, .manual, .provider_overflow };
+    for (outcomes, 0..) |outcome, index| {
+        capture.frames.clearRetainingCapacity();
+        const origin = origins[index % origins.len];
+        const id = activity.begin(&ctx, origin, 1);
+        activity.running(&ctx, id, .summary);
+        activity.settle(&ctx, @fromBackingInt(100), .{ .outcome = .failed });
+        activity.settle(&ctx, id, .{ .outcome = outcome });
+        activity.settle(&ctx, id, .{ .outcome = outcome });
+        var lines = std.mem.splitScalar(u8, capture.frames.items, '\n');
+        var first = try std.json.parseFromSlice(std.json.Value, alloc, lines.next().?, .{});
+        defer first.deinit();
+        var last = try std.json.parseFromSlice(std.json.Value, alloc, lines.next().?, .{});
+        defer last.deinit();
+        const start = first.value.object.get("params").?.object.get("update").?.object;
+        const end = last.value.object.get("params").?.object.get("update").?.object;
+        try std.testing.expectEqualStrings("context_compaction", start.get("sessionUpdate").?.string);
+        try std.testing.expectEqualStrings("in_progress", start.get("status").?.string);
+        try std.testing.expectEqualStrings(start.get("id").?.string, end.get("id").?.string);
+        try std.testing.expectEqualStrings(@tagName(origin), end.get("origin").?.string);
+        try std.testing.expectEqualStrings(switch (outcome) {
+            .succeeded => "completed",
+            .failed => "failed",
+            .cancelled, .no_op, .busy => "cancelled",
+        }, end.get("status").?.string);
+        try std.testing.expectEqualStrings("", lines.next().?);
+        try std.testing.expect(lines.next() == null);
+    }
+    capture.frames.clearRetainingCapacity();
+    state.active_session.?.cancel_flag.store(true, .seq_cst);
+    var id = activity.begin(&ctx, .automatic, 1);
+    activity.settle(&ctx, id, .{ .outcome = .cancelled });
+    try std.testing.expectEqual(@as(usize, 0), capture.frames.items.len);
+    state.active_session.?.cancel_flag.store(false, .seq_cst);
+    capture.fail = true;
+    id = activity.begin(&ctx, .automatic, 1);
+    activity.settle(&ctx, id, .{ .outcome = .failed });
+    try std.testing.expectEqual(@as(usize, 0), capture.frames.items.len);
 }

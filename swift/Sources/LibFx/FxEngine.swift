@@ -837,6 +837,10 @@ public actor FxEngine {
 
     private func event(for update: JSONValue) throws -> FxEvent? {
         switch update["sessionUpdate"]?.string {
+        case "context_compaction":
+            guard let id = update["id"]?.string, let status = update["status"]?.string,
+                  let state = FxCompactionState(rawValue: status == "in_progress" ? "started" : status) else { return nil }
+            return .compaction(id: id, state: state)
         case "agent_message_chunk":
             guard let text = update["content"]?["text"]?.string, !text.hasPrefix("[context]") else { return nil }
             return .text(text)

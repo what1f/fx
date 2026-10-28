@@ -1194,6 +1194,8 @@ actor Driver: FxHTTPClient, FxPersistence {
 
     private func encode(_ event: FxEvent) -> JSONValue {
         switch event {
+        case .compaction(let id, let state):
+            return .object(["type": .string("compaction"), "id": .string(id), "state": .string(state.rawValue)])
         case .payload(let data): return .object(["type": .string("payload"), "data": .string(data.base64EncodedString())])
         case .text(let delta): return .object(["type": .string("text_delta"), "delta": .string(delta)])
         case .reasoning(let delta): return .object(["type": .string("reasoning_delta"), "delta": .string(delta)])

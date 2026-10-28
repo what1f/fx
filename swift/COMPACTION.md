@@ -25,6 +25,12 @@ The Zig core caps a token limit at 80% of usable input, which reserves room for 
 
 The Swift option travels through the existing C ABI JSON configuration as `autoCompact: {"percent": 80}` or `autoCompact: {"tokens": 131072}`. No C function signature changes. CLI configuration and `FX_AUTO_COMPACT_PERCENT` keep their existing behavior; there is no new CLI token setting.
 
+## Turn events
+
+The active turn emits `FxEvent.compaction(id:state:)` after the core selects content to compact. The state starts as `.started` and ends as `.completed`, `.cancelled`, or `.failed` with the same ID. A turn can contain more than one compaction. Requests that select no content emit no compaction events. Explicit turn cancellation or session closure can discard pending notifications along with the rest of that turn's output.
+
+ACP carries these updates as `session/update` with `sessionUpdate: "context_compaction"`, an `id`, a `status` (`in_progress`, `completed`, `cancelled`, or `failed`), and an `origin` (`automatic`, `manual`, or `provider_overflow`). Running-stage updates are omitted. Operations that settle as no-op or busy after starting end as cancelled. Swift drops updates when no turn is receiving output. These notifications do not change model requests or native conversation history. Durable Swift session event records can store and replay the new event case without changing existing cases.
+
 ## Run the proof
 
 Requirements: macOS, Xcode, Swift 6.2 or later, and the XCFramework built from this checkout. From the repository root:
@@ -41,12 +47,13 @@ The fixture replaces the model service through the public `FxHTTPClient` API. It
 
 The probe checks that:
 
-1. The native runtime sends a compaction-notes request to the configured model through the HTTP callback.
-2. The SQLite journal saves a `history_replaced` event containing a `compacted_summary`, a nonzero removed-turn count, and the model's unique note.
-3. The next conversation request has less context text than the largest earlier request.
-4. A new prompt succeeds with the model's note in its request.
-5. An exported kernel checkpoint contains the compacted state.
-6. After both the engine and SQLite store close, a new store and engine recover the note from disk and answer another prompt.
+1. Each compaction emits one started/completed pair before the next reply content.
+2. The native runtime sends a compaction-notes request to the configured model through the HTTP callback.
+3. The SQLite journal saves a `history_replaced` event containing a `compacted_summary`, a nonzero removed-turn count, and the model's unique note.
+4. The next conversation request has less context text than the largest earlier request.
+5. A new prompt succeeds with the model's note in its request.
+6. An exported kernel checkpoint contains the compacted state.
+7. After both the engine and SQLite store close, a new store and engine recover the note from disk and answer another prompt.
 
 The unique note appears only in the model's compaction response. User prompts, tool results, and ordinary replies do not contain it. The fixture rejects continuation requests that omit it and checks that neither continuation nor recovery generates a new note.
 

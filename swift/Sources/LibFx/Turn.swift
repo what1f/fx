@@ -1,6 +1,11 @@
 import Foundation
 
+public enum FxCompactionState: String, Sendable, Equatable, Codable {
+    case started, completed, cancelled, failed
+}
+
 public enum FxEvent: Sendable, Equatable, Codable {
+    case compaction(id: String, state: FxCompactionState)
     /// Encoded update emitted by a custom durable harness.
     case payload(Data)
     case text(String)
@@ -11,6 +16,7 @@ public enum FxEvent: Sendable, Equatable, Codable {
 
     // Keep the event record independent of the public display-input enum.
     private enum Record: Codable {
+        case compaction(id: String, state: FxCompactionState)
         case payload(Data)
         case text(String)
         case reasoning(String)
@@ -21,6 +27,7 @@ public enum FxEvent: Sendable, Equatable, Codable {
 
     public init(from decoder: any Decoder) throws {
         switch try Record(from: decoder) {
+        case .compaction(let id, let state): self = .compaction(id: id, state: state)
         case .payload(let data): self = .payload(data)
         case .text(let text): self = .text(text)
         case .reasoning(let text): self = .reasoning(text)
@@ -42,6 +49,7 @@ public enum FxEvent: Sendable, Equatable, Codable {
     public func encode(to encoder: any Encoder) throws {
         let record: Record
         switch self {
+        case .compaction(let id, let state): record = .compaction(id: id, state: state)
         case .payload(let data): record = .payload(data)
         case .text(let text): record = .text(text)
         case .reasoning(let text): record = .reasoning(text)

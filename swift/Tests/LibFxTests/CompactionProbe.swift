@@ -7,6 +7,7 @@ enum CompactionProbeError: Error {
 
 /// Uses only public SDK APIs. The consumer smoke copies this file unchanged.
 struct CompactionProof: Sendable {
+    let events: [FxEvent]
     let summaryRequests: Int
     let conversationRequests: Int
     let replacementRecords: Int
@@ -15,9 +16,11 @@ struct CompactionProof: Sendable {
     let checkpointBytes: Int
 }
 
-private actor CompactionHTTP: FxHTTPClient {
+actor CompactionHTTP: FxHTTPClient {
     static let marker = "COMPACTION_PROBE_NOTE"
     static let continuedReply = "Conversation continued"
+    let failSummary: Bool
+    init(failSummary: Bool = false) { self.failSummary = failSummary }
     private(set) var summaries: [String] = []
     private(set) var conversations: [String] = []
 
@@ -44,6 +47,7 @@ private actor CompactionHTTP: FxHTTPClient {
         let reply: String
         if isSummary {
             summaries.append(text)
+            if failSummary { throw CompactionProbeError.failed("Scripted summary failure") }
             // Answer the compactor's requested turn headings, not an ordinary user prompt.
             let headings = text.split(separator: "\n").filter {
                 $0.hasPrefix("Turn ") && $0.contains(" (")
@@ -85,10 +89,25 @@ func runCompactionProbe(trigger: FxAutoCompaction? = nil) async throws -> Compac
     func require(_ condition: Bool, _ message: String) throws {
         if !condition { throw CompactionProbeError.failed(message) }
     }
+    var events: [FxEvent] = []
+    var activeCompaction: String?
+    var completedCompactions: Set<String> = []
     func prompt(_ engine: FxEngine, _ text: String) async throws -> String {
         let turn = try await engine.prompt(text)
         var reply = ""
         for try await event in turn {
+            events.append(event)
+            if case .compaction(let id, let state) = event {
+                if state == .started {
+                    try require(activeCompaction == nil && !completedCompactions.contains(id), "Duplicate compaction start")
+                    activeCompaction = id
+                } else {
+                    try require(state == .completed && activeCompaction == id, "Unpaired compaction completion")
+                    activeCompaction = nil
+                    completedCompactions.insert(id)
+                }
+            }
+            if case .text = event { try require(activeCompaction == nil, "Reply preceded compaction completion") }
             if case .text(let text) = event { reply += text }
         }
         try require(try await turn.result.stopReason == .endTurn, "Turn did not end normally")
@@ -161,7 +180,8 @@ func runCompactionProbe(trigger: FxAutoCompaction? = nil) async throws -> Compac
         let afterBytes = requests.last!.utf8.count
         let beforeBytes = requests.dropLast().map { $0.utf8.count }.max() ?? 0
         try require(afterBytes < beforeBytes, "Compaction did not reduce the next model context")
-        return CompactionProof(summaryRequests: summaries.count, conversationRequests: finalRequests.count,
+        try require(activeCompaction == nil && !completedCompactions.isEmpty, "Missing compaction lifecycle")
+        return CompactionProof(events: events, summaryRequests: summaries.count, conversationRequests: finalRequests.count,
                                replacementRecords: replacementRecords.count, beforeBytes: beforeBytes,
                                afterBytes: afterBytes, checkpointBytes: checkpoint.count)
     } catch {
