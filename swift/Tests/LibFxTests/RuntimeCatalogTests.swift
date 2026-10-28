@@ -365,3 +365,36 @@ private actor MessagesCatalogHTTP: FxHTTPClient {
     #expect(String(describing: input).contains("updated"))
     try await restored.close()
 }
+
+private actor HeldTool {
+    private(set) var started = false
+    private var release: CheckedContinuation<Void, Never>?
+    func hold() async { started = true; await withCheckedContinuation { release = $0 } }
+    func open() { release?.resume(); release = nil }
+}
+
+@Test(arguments: ["catalog", "context"])
+func idleUpdateWaitsForCallbacksOfCancelledTurn(_ kind: String) async throws {
+    let calls = CatalogCalls()
+    let held = HeldTool()
+    // Ignores cancellation, like a callback still releasing an external resource.
+    let slow = FxTool(name: "slow", description: "Slow", inputSchema: .object(["type": .string("object")]), isIdempotent: true) { _, _ in
+        await held.hold(); return "late"
+    }
+    var configuration = FxConfiguration(apiKey: "fixture", model: "swift/catalog", tools: [slow], httpClient: CatalogHTTP(actions: [("slow", .object([:]))]))
+    configuration.toolSearchEnabled = true
+    let engine = try await FxEngine.open(configuration: configuration)
+    let turn = try await engine.prompt("run slow")
+    while await !held.started { await Task.yield() }
+    await turn.cancel()
+    #expect(try await turn.result.stopReason == .cancelled)
+    let update = Task {
+        if kind == "catalog" { try await engine.upsertTools([catalogTool("other", calls: calls)]) }
+        else { try await engine.setContext(name: "env", text: "after stop") }
+    }
+    try await Task.sleep(for: .milliseconds(50))
+    await held.open()
+    try await update.value
+    try await drainCatalogTurn(try await engine.prompt("after update"))
+    try await engine.close()
+}

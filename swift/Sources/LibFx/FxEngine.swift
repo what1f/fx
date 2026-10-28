@@ -292,6 +292,7 @@ public actor FxEngine {
     }
 
     private func setConfigurationOption(_ name: String, value: String) async throws {
+        await joinFinishedToolTasks()
         try checkCatalogUpdate()
         let task = Task {
             _ = try await rpc.request("session/set_config_option", .object([
@@ -320,6 +321,7 @@ public actor FxEngine {
     }
 
     private func updateContext(name: String?, text: String) async throws {
+        await joinFinishedToolTasks()
         try checkCatalogUpdate()
         guard !text.isEmpty, text.utf8.count <= 65536 else {
             throw FxError.invalidInput("Context must contain 1–65536 UTF-8 bytes")
@@ -337,6 +339,7 @@ public actor FxEngine {
 
     /// Adds or updates deferred tools while the engine is idle.
     public func upsertTools(_ additions: [FxTool]) async throws {
+        await joinFinishedToolTasks()
         try checkCatalogUpdate()
         guard toolSearchEnabled else { throw FxError.invalidInput("Enable tool search before opening the engine") }
         var candidate = tools
@@ -354,6 +357,7 @@ public actor FxEngine {
 
     /// Removes deferred tools. Later calls to their names cannot execute a closure.
     public func removeTools(named names: [String]) async throws {
+        await joinFinishedToolTasks()
         try checkCatalogUpdate()
         var candidate = tools
         for name in names {
@@ -361,6 +365,13 @@ public actor FxEngine {
             candidate.removeValue(forKey: name)
         }
         try await updateCatalog(candidate)
+    }
+
+    /// A cancelled turn can finish before its tool callbacks return. Between turns, an idle
+    /// update waits for those callbacks instead of failing. A tool callback cannot join itself.
+    private func joinFinishedToolTasks() async {
+        guard ToolTaskContext.current.flatMap({ ownedToolTasks[$0] }) == nil else { return }
+        while turnID == nil, !closed, let task = ownedToolTasks.values.first { await task.value }
     }
 
     private func checkCatalogUpdate() throws {
