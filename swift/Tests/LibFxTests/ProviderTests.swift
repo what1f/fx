@@ -28,13 +28,10 @@ private actor CredentialLog {
 }
 
 @Suite struct ProviderTests {
-    @Test func messagesCompatibilityIsExplicitAndProtocolScoped() throws {
-        let provider = try FxCustomProvider(name: "messages", baseURL: URL(string: "https://models.example/v1")!, apiProtocol: .anthropicMessages, deferredToolMode: .callAction)
-        #expect(provider.definition["messages"]?["deferred_tool_mode"] == .string("call_action"))
+    @Test func messagesModeIsRuntimeOwned() throws {
+        let provider = try FxCustomProvider(name: "messages", baseURL: URL(string: "https://models.example/v1")!, apiProtocol: .anthropicMessages)
+        #expect(provider.definition["messages"]?["deferred_tool_mode"] == nil)
         #expect(provider.chatURL.absoluteString == "https://models.example/v1/messages")
-        #expect(throws: FxError.self) {
-            try FxCustomProvider(name: "responses", baseURL: URL(string: "https://models.example/v1")!, apiProtocol: .responses, deferredToolMode: .callAction)
-        }
     }
 
     private func provider() throws -> FxCustomProvider {

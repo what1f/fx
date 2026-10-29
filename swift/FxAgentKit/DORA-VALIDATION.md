@@ -15,7 +15,7 @@ Both runs use `deepseek-flash`, a deliberately reduced 32768-token context windo
 | Check | Responses | Messages |
 | --- | --- | --- |
 | Endpoint | `https://api.deepseek.com/v1/responses` | `https://api.deepseek.com/anthropic/v1/messages` |
-| Deferred invocation | Native search output and native action calls | Explicit `.callAction` compatibility mode |
+| Deferred invocation | Native search output and native action calls | Historical text invocation; FX-6 routing below |
 | Total model requests | 26 | 27 |
 | Multi-turn recall | Passed | Passed |
 | Search, then execute deferred action | Passed | Passed |
@@ -37,9 +37,9 @@ Each success comes from the native runtime linked into the consumer and actual H
 
 DeepSeek Messages returned HTTP 422 for `tool_addition.tool.type = tool_definition`. Replacing it with `tool_reference` returned HTTP 400 for an unknown tool unless that definition was already declared at the top level. The endpoint therefore could not support arbitrary new by-value definitions while keeping its top-level tool list fixed. The same incompatibility is reported in [DeepSeek issue 1701](https://github.com/deepseek-ai/DeepSeek-V3/issues/1701).
 
-The accepted integration uses an explicit `deferredToolMode: .callAction` setting for this endpoint. Its fixed functions are `tool_search` and `call_action`; search returns full schemas in tool-result text. Invocation validates the current schema and then executes the same approved closure. The default `.native` mode remains available for Messages services that accept inline definitions. There is no automatic protocol downgrade after a rejection. Route identity includes the compatibility mode so opaque replay cannot cross modes.
+The earlier run below used a provider-selected call-tool mode. FX-6 removes that configuration. Messages now negotiates native → reference → call-tool after HTTP 400 or 422 on a request containing deferred content, commits only a successful retry, and restores the learned mode from the session. The current reference format declares saved schemas in top-level `tools` and returns `tool_reference` blocks. Adjacent user messages and parallel tool results are combined. See the FX-6 validation section for current results; the earlier request counts remain historical evidence.
 
-The implementation follows pi's explicit provider-compatibility distinction rather than assuming that all Messages endpoints accept the same features. The local reference was pi `6fb2e7815167e6b19006fc526d1a5d0f5f998787`, `packages/ai/src/api/anthropic-messages.ts`. The Responses search format was checked against Codex `8c818cbed4bc83d30f5d515674b809646fe2676d`, `codex-rs/protocol/src/models.rs`, and the existing Responses serializer/reducer was reused. Service protocol references: [DeepSeek Responses](https://api-docs.deepseek.com/guides/responses_api/) and [DeepSeek Messages](https://api-docs.deepseek.com/guides/anthropic_api/).
+The earlier implementation followed pi's explicit provider-compatibility distinction rather than assuming that all Messages endpoints accept the same features. The local reference was pi `6fb2e7815167e6b19006fc526d1a5d0f5f998787`, `packages/ai/src/api/anthropic-messages.ts`. The Responses search format was checked against Codex `8c818cbed4bc83d30f5d515674b809646fe2676d`, `codex-rs/protocol/src/models.rs`, and the existing Responses serializer/reducer was reused. Service protocol references: [DeepSeek Responses](https://api-docs.deepseek.com/guides/responses_api/) and [DeepSeek Messages](https://api-docs.deepseek.com/guides/anthropic_api/).
 
 Live acceptance also found and repaired Messages thinking/signature replay, missing JSON separation between thinking and text, and content-block indices being mistaken for tool ordinals. Focused regressions cover these cases. Public `FxUsage` now retains cache and reasoning counters supplied through the Chat Completions reducer, including translated Messages usage. The integration also completes the host-context JSON export/import and test equality cases missed by the earlier branch.
 
@@ -153,7 +153,7 @@ The credential was checked with `git grep` against every new integration revisio
 
 The search runtime saved complete definitions for every match. Responses replayed every saved result as a new `tool_search_output`; Messages native replayed each as a `tool_addition`. Two overlapping searches therefore declared the same tool name more than once. Restoring the loaded-name set did not remove duplicate declarations from the transcript. Updating or removing a tool also left its old schema in those results.
 
-The gateway now projects discovery records onto the current selected catalog. Native requests declare each name once at its first discovery position, using the current description and schema. Removed definitions are omitted. Chat Completions and Messages `.callAction` retain their fixed dispatch functions and render current schemas in search-result text. Persisted records remain unchanged. An unchanged catalog preserves its input prefix; changing a schema or removing a definition can invalidate the prefix from the original declaration.
+The gateway now projects discovery records onto the current selected catalog. Native requests declare each name once at its first discovery position, using the current description and schema. Removed definitions are omitted. Chat Completions and Messages `.callTool` retain their fixed dispatch functions and render current schemas in search-result text. Persisted records remain unchanged. An unchanged catalog preserves its input prefix; changing a schema or removing a definition can invalidate the prefix from the original declaration.
 
 ### Reference implementations
 
@@ -169,12 +169,12 @@ Codex revision `8c818cbed4bc83d30f5d515674b809646fe2676d` returns complete match
 
 The rebuilt XCFramework contains macOS arm64 and x86_64 slices. Archive SHA-256: `acdc210e738681916e10926976b2c684381a02bcdbf3c1ea3d07573518123d5a`.
 
-- The deferred Zig filter passed all 69 tests. Request fixtures cover Responses, Chat Completions, Messages native, and Messages `.callAction`, including repeated matches, schema replacement, and deletion.
+- The deferred Zig filter passed all 69 tests. Request fixtures cover Responses, Chat Completions, Messages native, and Messages `.callTool`, including repeated matches, schema replacement, and deletion.
 - Swift tests passed 463 tests: LibFx 407, MCP 11, HTTP 14, AgentKit 31. The initial full run failed one catalog probe because it required historical request bytes to remain unchanged after a schema update. The probe now resets its prefix expectation only for catalog mutations. Its eight focused tests and the complete Swift rerun passed.
 - The first full Zig run had compiled two request fixtures before their setup fixes and reported 10093 passes, two skips, and two failures. Those fixtures omitted required message content and assumed the wrong system-message offset. The deferred filter passed after those fixes; the full rerun result is recorded below.
 - A real current `zig-out/bin/fx acp` process used an isolated home and a local Responses endpoint. It performed `read_file`, included the file's marker in its second request, and ended normally. Both outgoing requests had unique tool names. Exit status was zero and stderr was empty. This binary check covers the shared serializer; the Swift regressions and consumers cover deferred host-tool registration, which the ordinary CLI does not expose.
 - The live Responses consumer passed 27 requests, including two compaction requests, persisted summary replacement, approval denial/allowance, catalog changes, and SQLite reopen. All 26 requests after the first reported cache hits.
-- The live Messages `.callAction` consumer passed on its second attempt: 26 requests, including two compaction requests, with cache hits on all 25 requests after the first. The first attempt failed the consumer's `Expected one denial` assertion after 10 requests; it is retained as a failed live trial, rather than counted as acceptance. Neither trial reported a duplicate-tool error. Both successful protocols retained paired streaming events and closed normally.
+- The live Messages `.callTool` consumer passed on its second attempt: 26 requests, including two compaction requests, with cache hits on all 25 requests after the first. The first attempt failed the consumer's `Expected one denial` assertion after 10 requests; it is retained as a failed live trial, rather than counted as acceptance. Neither trial reported a duplicate-tool error. Both successful protocols retained paired streaming events and closed normally.
 
 The live launcher now sets `DORA_TEST_DEEPSEEK_KEY`; the consumer accepts that variable and retains its previous variable as a fallback. Credentials are read into memory from the existing launcher and never written to request fixtures or logs. Both successful live runs passed the HTTP disk-cache check. Local logs are retained under `swift/.build/fx3-evidence/` and are excluded from git.
 
@@ -200,3 +200,34 @@ Validation performed locally on macOS arm64:
 - Dora's real DeepSeek Responses acceptance exercised discovered Skill reads, codemode nested tools, same-session Skill addition, tool_search, and deferred plugin Actions.
 
 The Swift SDK changed; the Zig kernel and C ABI did not. No new kernel artifact was needed for these checks. Remote CI, the standalone fx terminal UI, and real-window Dora interaction were not exercised. Nothing was pushed.
+
+## FX-6
+
+The implementation adds status-based fallback to both native and host HTTP transports. In-source Zig tests cover combined results, image blocks, interruption ordering, exact prefixes, immutable reference declarations, error gating, unsuccessful retries, and checkpoint recovery. Swift `DeferredNegotiationTests` covers all three modes, session-store reopen, checkpoint reopen, later discovery and removed tools. `deferredMessagesLiveDeepSeek` uses real model responses; its final call-tool tier is selected by one explicitly local reference rejection, then sent to DeepSeek unchanged. Numeric provider usage and local prefix assertions are reported separately.
+
+### FX-6 live acceptance, 2026-10-30
+
+The final `deferredMessagesLiveDeepSeek` run passed using real `deepseek-flash` responses. Request 2 rejected native additions with HTTP 422; request 3 automatically retried with references and returned native calls to both first-batch tools in one response. Request 4 accepted their combined results. Requests 5–7 reopened the session, discovered a second batch, invoked its native name, and returned its result. Assertions verify native names and exclude wrapper calls during this reference phase.
+
+DeepSeek accepted reference mode. Request 8 was an explicitly local HTTP 400 fixture used to select the last tier; it did not reach DeepSeek. Requests 9–10 sent call-tool history to DeepSeek, invoked `call_tool`, and accepted its result. The run made nine real HTTP requests. Its local reference tools/history prefix assertions passed independently of the service counters below.
+
+| Request | Source | HTTP | Uncached input tokens | Cache-read input tokens |
+| --- | --- | ---: | ---: | ---: |
+| 1 | deepseek | 200 | 208 | 384 |
+| 2 | deepseek | 422 | NA | NA |
+| 3 | deepseek | 200 | 231 | 640 |
+| 4 | deepseek | 200 | 180 | 768 |
+| 5 | deepseek | 200 | 159 | 1024 |
+| 6 | deepseek | 200 | 210 | 1152 |
+| 7 | deepseek | 200 | 255 | 1152 |
+| 8 | local fixture | 400 | NA | NA |
+| 9 | deepseek | 200 | 233 | 1024 |
+| 10 | deepseek | 200 | 183 | 1152 |
+
+`NA` means no usage was available. The first request's cache reads may reuse earlier runs; these counters do not establish a guaranteed hit rate. The two mode changes are separate approved serialization boundaries. Credentials came only from `DORA_TEST_DEEPSEEK_KEY`; the ephemeral HTTP session has no disk cache, cookie store or credential store.
+
+### FX-6 local acceptance
+
+`zig build` and the complete `FX_SOUND=0 zig build test --summary all` passed: 10,109 tests passed and two skipped, with all 18 build steps successful. The 77 focused deferred tests passed, including summary-first negotiation and exact request replay after checkpoint recovery. Swift passed all four suites (LibFx 418, MCP 11, HTTP 14, AgentKit 36); the opt-in live test also passed separately. SQLite reopen uses a new database connection. The rebuilt XCFramework contains arm64 and x86_64 archives.
+
+The fresh checkout binary completed a real two-file parallel tool round trip. One unmodified MCP process-exit timing test failed in an intermediate full run, then passed its focused rerun and the final isolated full suite; no MCP assertions were relaxed. Two earlier stale compaction/model-write fixtures were corrected to match existing behavior. CI was not run because this task is local-only. Local results are not a release or CI qualification.

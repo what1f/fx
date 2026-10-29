@@ -63,6 +63,12 @@ fn buildRequest(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.Req
 }
 
 fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequest) anyerror!stream_provider.Result {
+    const context: *Context = @ptrCast(@alignCast(raw.?));
+    if (context.definition().protocol == .@"anthropic-messages") return anthropic.negotiate(raw, alloc, request, context.definition().id, buildRequest, streamOnce);
+    return streamOnce(raw, alloc, request);
+}
+
+fn streamOnce(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequest) anyerror!stream_provider.Result {
     if (host_stream.deadlineExpired(request.deadline)) return error.Timeout;
     if (request.cancel_flag.load(.seq_cst)) return stream_provider.failResult(error.Cancelled);
     // The engine never holds this provider's key; the host adds it.
@@ -82,9 +88,10 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
         .{ .name = "accept", .value = "text/event-stream" },
     };
 
-    const opened = try host_stream.openPost(alloc, transport, request, endpoint, if (definition.protocol == .@"anthropic-messages") &anthropic.headers else &headers, payload);
+    const opened = try host_stream.openPost(alloc, transport, request, endpoint, if (definition.protocol == .@"anthropic-messages") anthropic.headers[0..(if (request.deferred_tool_mode == .native) @as(usize, 4) else 3)] else &headers, payload);
     defer transport.close(opened.handle);
     if (opened.status != .ok) return .{ .failed = .{
+        .http_status = @intCast(@backingInt(opened.status)),
         .kind = chat_completions.failure_kind(opened.status),
         .detail = try host_stream.readErrorBody(alloc, transport, opened.handle, request),
         .ownership = .owned,
@@ -230,4 +237,129 @@ test "host configured Responses binds endpoint and retains cached usage" {
     try std.testing.expect(std.mem.find(u8, fake.bodies[0], "\"input\":[") != null);
     try std.testing.expectEqual(@as(?u64, 64), result.completed.completion.usage.cache_read_tokens);
     try std.testing.expectEqualStrings("hello", result.completed.completion.content.?);
+}
+
+test "deferred Messages negotiate HTTP status and checkpoint only successful modes" {
+    const alloc = std.testing.allocator;
+    const Mode = @import("../core/agent/deferred_tool_mode.zig").Mode;
+    const Agent = @import("../core/agent/runtime/agent.zig").Agent;
+    const success = "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"ok\"}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n";
+    const cases = [_]struct { statuses: []const u16, initial: Mode = .native, expected: Mode, deferred: bool = true }{
+        .{ .statuses = &.{ 422, 200 }, .expected = .reference },
+        .{ .statuses = &.{ 422, 400, 200 }, .expected = .call_tool },
+        .{ .statuses = &.{ 400, 503 }, .expected = .native },
+        .{ .statuses = &.{ 422, 400, 422 }, .expected = .native },
+        .{ .statuses = &.{400}, .expected = .native, .deferred = false },
+        .{ .statuses = &.{ 400, 200 }, .initial = .reference, .expected = .call_tool },
+    };
+    for (cases) |case| {
+        var replies: [4]FakeTransport.Response = undefined;
+        for (case.statuses, 0..) |status, i| replies[i] = .{ .status = status, .body = if (status == 200) success else "arbitrary failure" };
+        var fake: FakeTransport = .{ .responses = replies[0..case.statuses.len] };
+        defer fake.deinit();
+        var context = try Context.init(alloc, fake.transport(), "{\"local\":{\"protocol\":\"anthropic-messages\",\"base_url\":\"https://models.example/v1\",\"auth\":{\"type\":\"none\"}}}");
+        defer context.deinit(alloc);
+        var agent: Agent = .{ .deferred_tool_mode = case.initial };
+        defer agent.deinit(alloc);
+        var request = fake.request(.host_managed);
+        request.prepared_request_body = null;
+        request.deferred_tool_mode = agent.deferred_tool_mode;
+        request.negotiated_deferred_tool_mode = &agent.deferred_tool_mode;
+        request.tools = .{ .advertised_names = &.{ "tool_search", "call_tool" }, .advertised_functions = &.{ .{ .name = "tool_search", .description = "Search" }, .{ .name = "call_tool", .description = "Call a deferred tool by name" } } };
+        request.messages = if (case.deferred) &.{
+            .{ .role = .assistant, .tool_calls = &.{.{ .id = "search", .name = "tool_search", .arguments_json = "{}" }} },
+            .{ .role = .tool, .tool_call_id = "search", .content = "Found", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"found\",\"description\":\"Found\",\"inputSchema\":{\"type\":\"object\"}}]" } },
+        } else &.{.{ .role = .user, .content = "Hello" }};
+        var result = try @import("../core/agent/runtime/gateway_step.zig").streamModelCompletion(bundle(&context, context.definition()).agent_stream.?, alloc, request);
+        defer result.deinit(alloc);
+        try std.testing.expectEqual(case.statuses.len, fake.calls);
+        try std.testing.expectEqual(fake.calls, fake.closed);
+        try std.testing.expectEqual(case.expected, agent.deferred_tool_mode);
+        if (case.statuses[case.statuses.len - 1] != 200) try std.testing.expectEqual(case.statuses[case.statuses.len - 1], result.failed.http_status.?);
+        for (0..fake.calls) |i| {
+            const native = case.initial == .native and i == 0;
+            try std.testing.expectEqual(native, std.mem.find(u8, fake.headers[i], "anthropic-beta") != null);
+        }
+        const checkpoint = try agent.checkpoint(alloc, .{});
+        defer alloc.free(checkpoint);
+        var restored: Agent = .{};
+        defer restored.deinit(alloc);
+        const meta = try restored.restoreCheckpoint(alloc, checkpoint);
+        defer meta.free(alloc);
+        try std.testing.expectEqual(case.expected, restored.deferred_tool_mode);
+        if (case.expected == .reference) {
+            // Reopened conversation sends reference immediately, without another native rejection.
+            request.deferred_tool_mode = restored.deferred_tool_mode;
+            const body = try buildRequest(&context, alloc, request.data());
+            defer alloc.free(body);
+            try std.testing.expect(std.mem.find(u8, body, "tool_reference") != null);
+            try std.testing.expect(std.mem.find(u8, body, "tool_addition") == null);
+        }
+    }
+}
+
+test "deferred summary forks commit negotiation once and reuse the learned mode" {
+    const alloc = std.testing.allocator;
+    const Mode = @import("../core/agent/deferred_tool_mode.zig").Mode;
+    const Host = struct {
+        saved: Mode = .native,
+        commits: usize = 0,
+        memory: ?*Mode = null,
+        fn save(raw: *anyopaque, mode: Mode) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.memory) |current| try std.testing.expectEqual(mode, current.*);
+            self.saved = mode;
+            self.commits += 1;
+        }
+        fn capabilities(_: *anyopaque, _: []const u8) @import("../core/config/model_capabilities.zig").Capabilities {
+            return .{};
+        }
+    };
+    var host: Host = .{};
+    var mode: Mode = .native;
+    host.memory = &mode;
+    const success = "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"ok\"}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n";
+    var fake: FakeTransport = .{ .responses = &.{ .{ .status = 422, .body = "rejected" }, .{ .status = 200, .body = success }, .{ .status = 200, .body = success } } };
+    defer fake.deinit();
+    var context = try Context.init(alloc, fake.transport(), "{\"local\":{\"protocol\":\"anthropic-messages\",\"base_url\":\"https://models.example/v1\",\"auth\":{\"type\":\"none\"}}}");
+    defer context.deinit(alloc);
+    var caller_state: @import("../core/agent/runtime/text_completion.zig").CompactorCaller = .{
+        .negotiated_deferred_tool_mode = &mode,
+        .deferred_tool_mode_commit = .{ .context = &host, .save_fn = Host.save },
+        .stream_provider = bundle(&context, context.definition()).agent_stream.?,
+        .provider = .gateway,
+        .model = fake.model,
+        .api_key = "",
+        .credential_source = .host_managed,
+        .retry_count = 0,
+        .capabilities_context = &host,
+        .capabilities_fn = Host.capabilities,
+        .conversation = .{
+            .model = fake.model,
+            .instructions = &.{.{ .role = .system, .content = "Stable" }},
+            .messages = &.{
+                .{ .role = .assistant, .tool_calls = &.{.{ .id = "s", .name = "tool_search", .arguments_json = "{}" }} },
+                .{ .role = .tool, .tool_call_id = "s", .content = "Found", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"found\",\"description\":\"Found\",\"inputSchema\":{\"type\":\"object\"}}]" } },
+            },
+            .tools = .{ .advertised_names = &.{"tool_search"}, .advertised_functions = &.{.{ .name = "tool_search", .description = "Search" }} },
+            .tool_choice = .auto,
+            .provider_options = .{},
+        },
+    };
+    const caller = caller_state.caller();
+    const call: @import("../core/compactor/compactor.zig").Call = .{ .model = fake.model, .reasoning = null, .system = "unused", .user = "Summarize", .after_conversation = true, .max_bytes = 1024, .cancel_flag = &fake.cancel_flag, .trace_ctx = .{} };
+    for (0..2) |_| {
+        const reply = try caller.vtable.send(caller.context, alloc, call);
+        defer switch (reply) {
+            .text => |text| alloc.free(text),
+            .failed => |failure| alloc.free(failure.detail),
+        };
+        try std.testing.expect(reply == .text);
+        try std.testing.expectEqualStrings("ok", reply.text);
+        try std.testing.expectEqual(Mode.reference, mode);
+        try std.testing.expectEqual(Mode.reference, host.saved);
+        try std.testing.expectEqual(@as(usize, 1), host.commits);
+    }
+    try std.testing.expectEqual(@as(usize, 3), fake.calls);
+    try std.testing.expectEqualStrings(fake.bodies[1], fake.bodies[2]);
 }

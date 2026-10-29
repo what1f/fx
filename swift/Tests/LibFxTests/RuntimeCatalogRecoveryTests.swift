@@ -125,7 +125,7 @@ func runtimeCatalogLiveDeepSeekRepeatedSearchAndRecovery() async throws {
         ("tool_search", .object(["query": .string("notes")])),
         ("tool_search", .object(["query": .string("select:notes_read")])), nil,
         ("tool_search", .object(["query": .string("select:notes_read")])),
-        ("call_action", .object(["name": .string("notes_read"), "args": .object(["updated": .string("live")])])), nil, nil,
+        ("call_tool", .object(["name": .string("notes_read"), "args": .object(["updated": .string("live")])])), nil, nil,
     ], codex: true)
     let http = VerifiedCatalogHTTP(fixture)
     let provider = try FxCustomProvider(name: "deepseek", baseURL: URL(string: "https://api.deepseek.com/v1")!, models: ["deepseek-flash": .init(contextWindow: 65536, maxOutputTokens: 1024)], apiProtocol: .responses)

@@ -85,7 +85,7 @@ pub const Runtime = struct {
         for (descriptors, 0..) |entry, index| {
             const name_value = entry.object.get("name") orelse return error.InvalidHostTool;
             if (name_value != .string) return error.InvalidHostTool;
-            if (std.mem.eql(u8, name_value.string, "tool_search") or std.mem.eql(u8, name_value.string, "call_action") or !validName(name_value.string)) return error.InvalidHostToolName;
+            if (std.mem.eql(u8, name_value.string, "tool_search") or std.mem.eql(u8, name_value.string, "call_tool") or !validName(name_value.string)) return error.InvalidHostToolName;
             for (order[0..index]) |prior| {
                 if (std.mem.eql(u8, prior, name_value.string)) {
                     return error.DuplicateHostToolName;
@@ -177,10 +177,10 @@ pub const Runtime = struct {
             direct_count += 1;
         };
         if (direct_count + @as(usize, if (std.mem.findScalar(bool, deferred, true) != null) 2 else 0) > max_tools) return error.TooManyHostTools;
-        tools[tools.len - 2] = call_action_tool;
+        tools[tools.len - 2] = call_tool_tool;
         tools[tools.len - 1] = search_tool;
         tools[tools.len - 1].model_visible = std.mem.findScalar(bool, deferred, true) != null;
-        order[order.len - 2] = call_action_tool.name;
+        order[order.len - 2] = call_tool_tool.name;
         order[order.len - 1] = search_tool.name;
         var visible: std.ArrayList(stream_provider.DynamicFunctionTool) = .empty;
         for (dynamic_tools) |definition| {
@@ -226,7 +226,7 @@ pub const Runtime = struct {
             defer alloc.free(schema);
             try out.writer.print("Definition version: {x}\n", .{std.hash.Wyhash.hash(0, schema)});
         }
-        try out.writer.writeAll("Fetch current definitions with tool_search(query: select:name or keywords). Use call_action with the current arguments when a definition changes. Removed actions cannot be called.\n</system-reminder>");
+        try out.writer.writeAll("Fetch current definitions with tool_search(query: select:name or keywords). Use call_tool with the current arguments when a definition changes. Removed actions cannot be called.\n</system-reminder>");
         return out.toOwnedSlice();
     }
 
@@ -328,7 +328,7 @@ pub const Runtime = struct {
         defer output.deinit();
         var additions: std.Io.Writer.Allocating = .init(ctx.allocator);
         defer additions.deinit();
-        output.writer.writeAll("Definitions (use call_action with name and args for updated definitions):") catch return error.OutOfMemory;
+        output.writer.writeAll("Definitions (use call_tool with name and args for updated definitions):") catch return error.OutOfMemory;
         additions.writer.writeByte('[') catch return error.OutOfMemory;
         var count: usize = 0;
         var result_bytes: usize = 2;
@@ -472,7 +472,7 @@ fn call(
         const catalog = ctx.host_tool_catalog orelse return error.InvalidToolArguments;
         return catalog.search(ctx, input.as(RawInput).json);
     }
-    if (std.mem.eql(u8, ctx.tool_call_name, "call_action")) {
+    if (std.mem.eql(u8, ctx.tool_call_name, "call_tool")) {
         const catalog = ctx.host_tool_catalog orelse return error.InvalidToolArguments;
         const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, input.as(RawInput).json, .{}) catch return error.InvalidToolArguments;
         defer parsed.deinit();
@@ -497,10 +497,10 @@ fn call(
     );
 }
 
-const call_action_tool: tool_dispatch.Tool = .{
-    .name = "call_action",
-    .description = "Call an action by name with its arguments.",
-    .model_schema = .{ .name = "call_action", .description = "Call an action by name with its arguments.", .input_schema = .{ .properties = &.{ .{ .name = "name", .json_type = .string }, .{ .name = "args", .json_type = .object } }, .required = &.{ "name", "args" } } },
+const call_tool_tool: tool_dispatch.Tool = .{
+    .name = "call_tool",
+    .description = "Call a deferred tool by name with its arguments.",
+    .model_schema = .{ .name = "call_tool", .description = "Call a deferred tool by name with its arguments.", .input_schema = .{ .properties = &.{ .{ .name = "name", .json_type = .string }, .{ .name = "args", .json_type = .object } }, .required = &.{ "name", "args" } } },
     .executor_kind = .host,
     .activity_kind = .command,
     .decode = decode,
@@ -816,7 +816,7 @@ test "unloaded host calls execute without activation and report invalid or missi
     try std.testing.expect(std.mem.find(u8, invalid.failure, "Arguments must be an object") != null);
     try std.testing.expect(std.mem.find(u8, invalid.failure, "\"definition\"") != null);
     var action_ctx = ctx;
-    action_ctx.tool_call_name = "call_action";
+    action_ctx.tool_call_name = "call_tool";
     const action = try decode(action_ctx, "{\"name\":\"action\",\"args\":{}}");
     try std.testing.expectEqualStrings("executed", (try call(action_ctx, action.input)).success);
     const missing = try decode(action_ctx, "{\"name\":\"removed\",\"args\":{}}");

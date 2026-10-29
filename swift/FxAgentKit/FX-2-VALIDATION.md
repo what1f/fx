@@ -47,7 +47,7 @@ The universal archive SHA-256 is `54118f0d220b43cce344b080b386ca9ed216b1db7c119c
 
 ### Live DeepSeek revalidation
 
-Both protocols used `deepseek-flash` and the existing public FxAgentKit acceptance program. Both passed multi-turn recall, deferred search and invocation, catalog add/update/remove, approval deny/allow, automatic compaction, continued invocation after compaction, appended context, SQLite reopen, and close. Each persisted one real compaction replacement. Messages retains its explicit `.callAction` compatibility setting.
+Both protocols used `deepseek-flash` and the existing public FxAgentKit acceptance program. Both passed multi-turn recall, deferred search and invocation, catalog add/update/remove, approval deny/allow, automatic compaction, continued invocation after compaction, appended context, SQLite reopen, and close. Each persisted one real compaction replacement. Messages retains its explicit `.callTool` compatibility setting.
 
 | Protocol | Requests | Summary requests | Cache hits after first request | Second request cached tokens | stderr bytes |
 | --- | --- | --- | --- | --- | --- |

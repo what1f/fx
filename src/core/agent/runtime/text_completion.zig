@@ -17,6 +17,8 @@ const types = @import("../../shared/types.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Request = struct {
+    negotiated_deferred_tool_mode: ?*@import("../deferred_tool_mode.zig").Mode = null,
+    deferred_tool_mode_commit: ?@import("../deferred_tool_mode.zig").Commit = null,
     observer: ?*observation.Observer = null,
     purpose: observation.ModelPurpose = .auxiliary,
     stream_provider: agent_stream_provider.Provider,
@@ -83,6 +85,8 @@ pub fn complete(alloc: Allocator, request: Request) Error!Outcome {
     var delivery = runtime_gateway_step.DeliveryCertainty.init();
     var attempt_evidence: agent_stream_provider.AttemptEvidence = .{};
     var model_request: agent_stream_provider.ModelRequest = .{
+        .negotiated_deferred_tool_mode = request.negotiated_deferred_tool_mode,
+        .deferred_tool_mode_commit = request.deferred_tool_mode_commit,
         .observer = request.observer,
         .purpose = request.purpose,
         .credential = request.credential,
@@ -116,6 +120,7 @@ pub fn complete(alloc: Allocator, request: Request) Error!Outcome {
         }
         model_request.messages = messages;
     }
+    if (request.negotiated_deferred_tool_mode) |mode| model_request.deferred_tool_mode = mode.*;
     var streamed = runtime_gateway_step.streamModelCompletion(
         request.stream_provider,
         alloc,
@@ -194,6 +199,8 @@ fn onEvent(raw: *anyopaque, event: agent_stream_provider.Event) void {
 /// and its own output limit. A request after the conversation keeps the
 /// conversation's options except Ultrafast, which is reserved for agent turns.
 pub const CompactorCaller = struct {
+    negotiated_deferred_tool_mode: ?*@import("../deferred_tool_mode.zig").Mode = null,
+    deferred_tool_mode_commit: ?@import("../deferred_tool_mode.zig").Commit = null,
     observer: ?*observation.Observer = null,
     stream_provider: agent_stream_provider.Provider,
     cooperative_transport_pulse: ?agent_stream_provider.CooperativePulse = null,
@@ -265,6 +272,8 @@ pub const CompactorCaller = struct {
                 .account_id = self.account_id,
                 .tenant_context = self.gateway_team,
             } },
+            .negotiated_deferred_tool_mode = self.negotiated_deferred_tool_mode,
+            .deferred_tool_mode_commit = self.deferred_tool_mode_commit,
             .session_id = self.session_id,
             .model = call.model,
             .retry_count = self.retry_count,

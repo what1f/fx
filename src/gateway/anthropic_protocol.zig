@@ -52,7 +52,7 @@ pub fn buildFor(alloc: Allocator, input: streams.RequestData, provider: ?@import
     return buildConfigured(alloc, input, provider, .native);
 }
 
-pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?@import("../core/config/model_provider.zig").ProviderId, mode: @import("../core/config/configured_provider.zig").DeferredToolMode) ![]u8 {
+pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?@import("../core/config/model_provider.zig").ProviderId, mode: @import("../core/agent/deferred_tool_mode.zig").Mode) ![]u8 {
     var request = input;
     const projected = if (provider) |identity| try types.projectProviderReplay(alloc, input.messages, .{ .provider = identity, .model = input.model }) else null;
     defer if (projected) |messages| alloc.free(messages);
@@ -100,6 +100,27 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
         try json(w, f.object.get("parameters").?);
         try w.writeByte('}');
     };
+    if (mode == .reference) {
+        var references = @import("deferred_definitions.zig").Declarations.init(alloc);
+        defer references.deinit();
+        for (request.messages) |message| if (message.tool_result_memory) |memory| if (memory.loaded_tools_json) |definitions| {
+            const first = try references.first(alloc, definitions);
+            defer alloc.free(first);
+            const loaded = try std.json.parseFromSlice(std.json.Value, alloc, first, .{});
+            defer loaded.deinit();
+            for (loaded.value.array.items) |entry| {
+                if (count > 0) try w.writeByte(',');
+                count += 1;
+                try w.writeAll("{\"name\":");
+                try json(w, entry.object.get("name").?);
+                try w.writeAll(",\"description\":");
+                try json(w, entry.object.get("description").?);
+                try w.writeAll(",\"input_schema\":");
+                try json(w, entry.object.get("inputSchema").?);
+                try w.writeAll(",\"defer_loading\":true}");
+            }
+        };
+    }
     if (deferred and mode == .native) {
         if (count > 0) try w.writeByte(',');
         try w.writeAll("{\"name\":\"__fx_deferred_placeholder__\",\"description\":\"Reserved. Never call.\",\"input_schema\":{\"type\":\"object\",\"properties\":{}},\"defer_loading\":true}");
@@ -135,16 +156,26 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
             const definitions = if (message.tool_result_memory) |memory| memory.loaded_tools_json else null;
             const tool_images = if (message.tool_result_memory) |memory| memory.tool_images else &.{};
             const with_images = tool_images.len > 0 and !cc.toolResultDenied(message);
-            if (with_images) try w.writeAll("[{\"type\":\"text\",\"text\":");
-            if (mode == .call_action and definitions != null) {
+            const with_references = mode == .reference and definitions != null;
+            if (with_images or with_references) try w.writeAll("[{\"type\":\"text\",\"text\":");
+            if (mode == .call_tool and definitions != null) {
                 const current = try @import("deferred_definitions.zig").snapshot(alloc, definitions.?);
                 defer alloc.free(current);
                 try json(w, if (std.mem.eql(u8, current, "[]")) message.content orelse current else current);
             } else {
                 try json(w, message.content orelse "");
             }
-            if (with_images) {
+            if (with_images or with_references) {
                 try w.writeByte('}');
+                if (with_references) {
+                    const loaded = try std.json.parseFromSlice(std.json.Value, alloc, definitions.?, .{});
+                    defer loaded.deinit();
+                    for (loaded.value.array.items) |entry| {
+                        try w.writeAll(",{\"type\":\"tool_reference\",\"tool_name\":");
+                        try json(w, entry.object.get("name").?);
+                        try w.writeByte('}');
+                    }
+                }
                 for (tool_images) |image| {
                     try w.writeByte(',');
                     try writeEncodedImageBlock(w, image);
@@ -182,10 +213,10 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
             try w.writeByte('}');
         }
         try w.writeAll("]}");
-        if (mode == .call_action) continue;
-        if (message.role != .tool or (message_index + 1 < request.messages.len and request.messages[message_index + 1].role == .tool)) continue;
+        if (mode != .native) continue;
+        if (message.role == .assistant or (message_index + 1 < request.messages.len and request.messages[message_index + 1].role != .assistant)) continue;
         var group_start = message_index;
-        while (group_start > 0 and request.messages[group_start - 1].role == .tool) group_start -= 1;
+        while (group_start > 0 and request.messages[group_start - 1].role != .assistant) group_start -= 1;
         for (request.messages[group_start .. message_index + 1]) |result| if (result.tool_result_memory) |memory| if (memory.loaded_tools_json) |definitions| {
             const current = try declarations.first(alloc, definitions);
             defer alloc.free(current);
@@ -207,7 +238,95 @@ pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?
         };
     }
     try w.writeAll("]}");
+    return mergeUsers(alloc, out.written());
+}
+
+/// Rewrites only the wire projection. Stored messages and result bytes stay intact.
+fn mergeUsers(alloc: Allocator, body: []const u8) ![]u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    const w = &out.writer;
+    try w.writeByte('{');
+    var fields = parsed.value.object.iterator();
+    var field_count: usize = 0;
+    while (fields.next()) |field| {
+        if (field_count > 0) try w.writeByte(',');
+        field_count += 1;
+        try json(w, field.key_ptr.*);
+        try w.writeByte(':');
+        if (!std.mem.eql(u8, field.key_ptr.*, "messages")) {
+            try json(w, field.value_ptr.*);
+            continue;
+        }
+        const messages = field.value_ptr.array.items;
+        try w.writeByte('[');
+        var start: usize = 0;
+        while (start < messages.len) {
+            if (start > 0) try w.writeByte(',');
+            const message = messages[start];
+            if (!std.mem.eql(u8, message.object.get("role").?.string, "user")) {
+                try json(w, message);
+                start += 1;
+                continue;
+            }
+            var end = start + 1;
+            while (end < messages.len and std.mem.eql(u8, messages[end].object.get("role").?.string, "user")) : (end += 1) {}
+            try w.writeAll("{\"role\":\"user\",\"content\":[");
+            var blocks: usize = 0;
+            for ([_]bool{ true, false }) |results| {
+                for (messages[start..end]) |part| for (part.object.get("content").?.array.items) |block| {
+                    const is_result = std.mem.eql(u8, block.object.get("type").?.string, "tool_result");
+                    if (results != is_result) continue;
+                    if (blocks > 0) try w.writeByte(',');
+                    blocks += 1;
+                    try json(w, block);
+                };
+            }
+            try w.writeAll("]}");
+            start = end;
+        }
+        try w.writeByte(']');
+    }
+    try w.writeByte('}');
     return out.toOwnedSlice();
+}
+
+/// Inspect typed JSON blocks, never provider error wording.
+pub fn hasDeferredContent(alloc: Allocator, body: []const u8, mode: @import("../core/agent/deferred_tool_mode.zig").Mode) !bool {
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    if (mode == .reference) if (parsed.value.object.get("tools")) |tools| {
+        if (tools == .array) for (tools.array.items) |tool| {
+            if (tool != .object) continue;
+            if (tool.object.get("defer_loading")) |flag| if (flag == .bool and flag.bool) return true;
+        };
+    };
+    const messages = parsed.value.object.get("messages") orelse return false;
+    if (messages != .array) return false;
+    for (messages.array.items) |message| {
+        if (message != .object) continue;
+        const content = message.object.get("content") orelse continue;
+        if (content != .array) continue;
+        for (content.array.items) |block| {
+            if (block != .object) continue;
+            const kind = block.object.get("type") orelse continue;
+            if (kind != .string) continue;
+            if (mode == .native and std.mem.eql(u8, kind.string, "tool_addition")) return true;
+            if (mode == .reference and std.mem.eql(u8, kind.string, "tool_result")) {
+                const result = block.object.get("content") orelse continue;
+                if (result != .array) continue;
+                for (result.array.items) |entry| {
+                    if (entry != .object) continue;
+                    const entry_kind = entry.object.get("type") orelse continue;
+                    if (entry_kind == .string and std.mem.eql(u8, entry_kind.string, "tool_reference")) return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 const Usage = struct {
@@ -403,15 +522,15 @@ test "deferred tools preserve Anthropic prefix and append definitions" {
     try std.testing.expectEqual(@as(usize, 2), parsed.value.object.get("tools").?.array.items.len);
     try std.testing.expectEqual(@as(usize, 4), parsed.value.object.get("messages").?.array.items.len);
     request.messages = messages[0..1];
-    request.tools.advertised_names = &.{ "tool_search", "call_action" };
-    request.tools.advertised_functions = &.{ .{ .name = "tool_search", .description = "Search" }, .{ .name = "call_action", .description = "Call a discovered action" } };
-    const compatible_before = try buildConfigured(alloc, request, null, .call_action);
+    request.tools.advertised_names = &.{ "tool_search", "call_tool" };
+    request.tools.advertised_functions = &.{ .{ .name = "tool_search", .description = "Search" }, .{ .name = "call_tool", .description = "Call a discovered action" } };
+    const compatible_before = try buildConfigured(alloc, request, null, .call_tool);
     defer alloc.free(compatible_before);
     request.messages = &messages;
-    const compatible_after = try buildConfigured(alloc, request, null, .call_action);
+    const compatible_after = try buildConfigured(alloc, request, null, .call_tool);
     defer alloc.free(compatible_after);
     try std.testing.expect(std.mem.startsWith(u8, compatible_after, compatible_before[0 .. compatible_before.len - 2]));
-    try std.testing.expect(std.mem.find(u8, compatible_after, "\"call_action\"") != null);
+    try std.testing.expect(std.mem.find(u8, compatible_after, "\"call_tool\"") != null);
     try std.testing.expect(std.mem.find(u8, compatible_after, "tool_addition") == null);
     const compatible = try std.json.parseFromSlice(std.json.Value, alloc, compatible_after, .{});
     defer compatible.deinit();
@@ -495,7 +614,7 @@ test "Anthropic content block indices map to contiguous tool ordinals" {
     try std.testing.expectEqualStrings("{}", result.completed.completion.tool_calls[0].arguments_json);
 }
 
-test "deferred Messages native and callAction preserve saved schemas after repeated search" {
+test "deferred Messages native and callTool preserve saved schemas after repeated search" {
     const alloc = std.testing.allocator;
     const saved = "[{\"name\":\"action\",\"description\":\"old\",\"inputSchema\":{}},{\"name\":\"removed\",\"description\":\"removed\",\"inputSchema\":{}}]";
     const messages = [_]types.ChatMessage{
@@ -507,7 +626,7 @@ test "deferred Messages native and callAction preserve saved schemas after repea
     const schema = try std.json.parseFromSlice(std.json.Value, alloc, "{\"type\":\"object\",\"required\":[\"updated\"]}", .{});
     defer schema.deinit();
     var request: streams.RequestData = .{ .model = "claude-test", .instructions = &.{}, .messages = &messages, .tool_choice = .auto, .provider_options = .{}, .tools = .{ .selected_dynamic = &.{.{ .name = "action", .description = "current", .input_schema = schema.value, .deferred = true }} } };
-    for ([_]@import("../core/config/configured_provider.zig").DeferredToolMode{ .native, .call_action }) |mode| {
+    for ([_]@import("../core/agent/deferred_tool_mode.zig").Mode{ .native, .call_tool }) |mode| {
         const body = try buildConfigured(alloc, request, null, mode);
         defer alloc.free(body);
         try std.testing.expect(std.mem.find(u8, body, "updated") == null);
@@ -516,7 +635,7 @@ test "deferred Messages native and callAction preserve saved schemas after repea
         if (mode == .native) try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\"type\":\"tool_addition\""));
     }
     request.tools.selected_dynamic = &.{};
-    for ([_]@import("../core/config/configured_provider.zig").DeferredToolMode{ .native, .call_action }) |mode| {
+    for ([_]@import("../core/agent/deferred_tool_mode.zig").Mode{ .native, .call_tool }) |mode| {
         const body = try buildConfigured(alloc, request, null, mode);
         defer alloc.free(body);
         try std.testing.expect(std.mem.find(u8, body, "action") != null);
@@ -574,3 +693,162 @@ test "Anthropic messages carry user and tool-result images as image blocks" {
     try std.testing.expectEqualStrings("shot", parts[0].object.get("text").?.string);
     try std.testing.expectEqualStrings(png_b64, parts[1].object.get("source").?.object.get("data").?.string);
 }
+
+/// Retries the same typed turn, without committing a mode until a reply succeeds.
+pub fn negotiate(
+    raw: ?*anyopaque,
+    alloc: Allocator,
+    initial: streams.ModelRequest,
+    provider_name: []const u8,
+    build_fn: *const fn (?*anyopaque, Allocator, streams.RequestData) anyerror![]u8,
+    send_fn: *const fn (?*anyopaque, Allocator, streams.ModelRequest) anyerror!streams.Result,
+) !streams.Result {
+    var request = initial;
+    var owned: ?[]u8 = null;
+    defer if (owned) |body| alloc.free(body);
+    while (true) {
+        if (request.prepared_request_body == null) {
+            owned = try build_fn(raw, alloc, request.data());
+            request.prepared_request_body = owned;
+        }
+        var result = try send_fn(raw, alloc, request);
+        if (result == .completed) {
+            const previous = if (initial.negotiated_deferred_tool_mode) |saved| saved.* else initial.deferred_tool_mode;
+            // A checkpoint requested by persistence must see the same mode as
+            // the event it is about to cover. Failed persistence rolls back.
+            if (initial.negotiated_deferred_tool_mode) |saved| saved.* = request.deferred_tool_mode;
+            if (request.deferred_tool_mode != initial.deferred_tool_mode) if (initial.deferred_tool_mode_commit) |commit| {
+                commit.save(request.deferred_tool_mode) catch |err| {
+                    if (initial.negotiated_deferred_tool_mode) |saved| saved.* = previous;
+                    result.deinit(alloc);
+                    return err;
+                };
+            };
+            return result;
+        }
+        const status = result.failed.http_status orelse return result;
+        const next = request.deferred_tool_mode.next() orelse return result;
+        if ((status != 400 and status != 422) or !try hasDeferredContent(alloc, request.prepared_request_body.?, request.deferred_tool_mode)) return result;
+        @import("../core/shared/debug_trace.zig").logf("gateway", "deferred_tool_downgrade provider={s} model={s} from={s} to={s} status={d}", .{ provider_name, request.model, @tagName(request.deferred_tool_mode), @tagName(next), status });
+        result.deinit(alloc);
+        if (owned) |body| alloc.free(body);
+        owned = null;
+        request.prepared_request_body = null;
+        request.deferred_tool_mode = next;
+        // This is the same admitted logical request, with no streamed output.
+        // The gateway step's admission guard permits exactly one admission.
+        request.admission = .{ .context = initial.admission.context, .admit_fn = alreadyAdmitted };
+    }
+}
+
+test "deferred Messages merge parallel results images and user interruptions with stable bytes" {
+    const alloc = std.testing.allocator;
+    const messages = [_]types.ChatMessage{
+        .{ .role = .assistant, .tool_calls = &.{ .{ .id = "a", .name = "one", .arguments_json = "{}" }, .{ .id = "b", .name = "two", .arguments_json = "{}" } } },
+        .{ .role = .tool, .tool_call_id = "a", .content = "first", .tool_result_memory = .{ .tool_images = &.{.{ .mime_type = @constCast("image/png"), .data = @constCast("aW1hZ2U=") }} } },
+        .{ .role = .tool, .tool_call_id = "b", .content = "second" },
+        .{ .role = .user, .content = "interruption" },
+        .{ .role = .user, .content = "another" },
+    };
+    for ([_]@import("../core/agent/deferred_tool_mode.zig").Mode{ .native, .reference, .call_tool }) |mode| {
+        var request: streams.RequestData = .{ .model = "fixture", .messages = messages[0..3], .tool_choice = .auto, .provider_options = .{} };
+        const first = try buildConfigured(alloc, request, null, mode);
+        defer alloc.free(first);
+        request.messages = messages[0..4];
+        const parallel = try buildConfigured(alloc, request, null, mode);
+        defer alloc.free(parallel);
+        // Only reopen the final user's content array, message, messages array and root.
+        try std.testing.expect(std.mem.startsWith(u8, parallel, first[0 .. first.len - 4]));
+        request.messages = &messages;
+        const interrupted = try buildConfigured(alloc, request, null, mode);
+        defer alloc.free(interrupted);
+        try std.testing.expect(std.mem.startsWith(u8, interrupted, parallel[0 .. parallel.len - 4]));
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, interrupted, .{});
+        defer parsed.deinit();
+        const wire = parsed.value.object.get("messages").?.array.items;
+        try std.testing.expectEqual(@as(usize, 2), wire.len);
+        const blocks = wire[1].object.get("content").?.array.items;
+        try std.testing.expectEqual(@as(usize, 4), blocks.len);
+        try std.testing.expectEqualStrings("tool_result", blocks[0].object.get("type").?.string);
+        try std.testing.expectEqualStrings("image", blocks[0].object.get("content").?.array.items[1].object.get("type").?.string);
+        try std.testing.expectEqualStrings("tool_result", blocks[1].object.get("type").?.string);
+        try std.testing.expectEqualStrings("interruption", blocks[2].object.get("text").?.string);
+        try std.testing.expectEqualStrings("another", blocks[3].object.get("text").?.string);
+    }
+    const hoisted = try mergeUsers(alloc, "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"before\"},{\"type\":\"tool_result\",\"tool_use_id\":\"a\",\"content\":\"result\"},{\"type\":\"text\",\"text\":\"after\"}]}]}");
+    defer alloc.free(hoisted);
+    try std.testing.expect(std.mem.find(u8, hoisted, "tool_result").? < std.mem.find(u8, hoisted, "before").?);
+    try std.testing.expect(std.mem.find(u8, hoisted, "before").? < std.mem.find(u8, hoisted, "after").?);
+}
+
+test "deferred reference declarations append first saved schemas and survive catalog removal" {
+    const alloc = std.testing.allocator;
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "Find tools" },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "a", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "a", .content = "First", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"first\",\"description\":\"original\",\"inputSchema\":{\"type\":\"object\"}}]" } },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "b", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "b", .content = "Next", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"first\",\"description\":\"changed\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"second\",\"description\":\"second\",\"inputSchema\":{\"type\":\"object\"}}]" } },
+    };
+    for ([_]@import("../core/agent/deferred_tool_mode.zig").Mode{ .native, .reference, .call_tool }) |mode| {
+        var request: streams.RequestData = .{ .model = "fixture", .messages = messages[0..3], .tool_choice = .auto, .provider_options = .{}, .tools = .{ .advertised_names = &.{ "tool_search", "call_tool" }, .advertised_functions = &.{ .{ .name = "tool_search", .description = "Search" }, .{ .name = "call_tool", .description = "Call a deferred tool by name" } } } };
+        const first = try buildConfigured(alloc, request, null, mode);
+        defer alloc.free(first);
+        request.messages = &messages;
+        const second = try buildConfigured(alloc, request, null, mode);
+        defer alloc.free(second);
+        const first_parsed = try std.json.parseFromSlice(std.json.Value, alloc, first, .{});
+        defer first_parsed.deinit();
+        const second_parsed = try std.json.parseFromSlice(std.json.Value, alloc, second, .{});
+        defer second_parsed.deinit();
+        const tools1 = first_parsed.value.object.get("tools").?.array.items;
+        const tools2 = second_parsed.value.object.get("tools").?.array.items;
+        for (tools1, 0..) |entry, i| {
+            const old = try std.json.Stringify.valueAlloc(alloc, entry, .{});
+            defer alloc.free(old);
+            const new = try std.json.Stringify.valueAlloc(alloc, tools2[i], .{});
+            defer alloc.free(new);
+            try std.testing.expectEqualStrings(old, new);
+        }
+        const marker = "\"messages\":[";
+        const start1 = std.mem.find(u8, first, marker).?;
+        const start2 = std.mem.find(u8, second, marker).?;
+        try std.testing.expect(std.mem.startsWith(u8, second[start2..], first[start1 .. first.len - 2]));
+        // Restore the actual checkpoint, including its first saved definitions.
+        const Agent = @import("../core/agent/runtime/agent.zig").Agent;
+        var agent: Agent = .{ .deferred_tool_mode = mode };
+        defer agent.deinit(alloc);
+        var steps: [2]types.ToolExecutionStep = undefined;
+        var results: [2]types.PersistedToolResult = undefined;
+        for (0..2) |i| {
+            const result = messages[2 + i * 2];
+            results[i] = .{ .tool_call_id = @constCast(result.tool_call_id.?), .tool_name = @constCast("tool_search"), .status = .success, .output = @constCast(result.content.?), .output_bytes = result.content.?.len, .stored_output_bytes = result.content.?.len, .loaded_tools_json = result.tool_result_memory.?.loaded_tools_json };
+            steps[i] = .{ .tool_calls = @constCast(messages[1 + i * 2].tool_calls), .tool_results = results[i .. i + 1] };
+        }
+        try agent.appendHistoryEntry(alloc, .{ .assistant = .{ .user = .{ .text = @constCast("Find tools") }, .assistant = @constCast(""), .execution = .{ .tool_steps = &steps } } });
+        const checkpoint = try agent.checkpoint(alloc, .{});
+        defer alloc.free(checkpoint);
+        var reopened: Agent = .{};
+        defer reopened.deinit(alloc);
+        const meta = try reopened.restoreCheckpoint(alloc, checkpoint);
+        defer meta.free(alloc);
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        var replayed: std.ArrayList(types.ChatMessage) = .empty;
+        try @import("../core/session/session.zig").appendHistoryChatMessages(arena.allocator(), &replayed, reopened.history.items);
+        request.messages = replayed.items;
+        // No live selected tools remain; removed historical names still serialize.
+        const restored = try buildConfigured(alloc, request, null, reopened.deferred_tool_mode);
+        defer alloc.free(restored);
+        try std.testing.expectEqualStrings(second, restored);
+        if (mode == .reference) {
+            try std.testing.expectEqual(@as(usize, 4), tools2.len);
+            try std.testing.expectEqualStrings("original", tools2[2].object.get("description").?.string);
+            try std.testing.expectEqualStrings("second", tools2[3].object.get("name").?.string);
+            try std.testing.expect(std.mem.find(u8, second, "tool_reference") != null);
+            try std.testing.expect(std.mem.find(u8, second, "tool_addition") == null);
+        }
+    }
+}
+
+fn alreadyAdmitted(_: *anyopaque) !void {}

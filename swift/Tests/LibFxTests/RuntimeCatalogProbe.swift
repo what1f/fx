@@ -121,7 +121,7 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
                 afterSearch = calls.last?["function"]?["name"] == .string("tool_search")
             } else { afterSearch = false }
             if lastRole == "user" || afterSearch {
-                let name = afterSearch || removed ? "call_action" : "tool_search"
+                let name = afterSearch || removed ? "call_tool" : "tool_search"
                 if afterSearch && !removed {
                     guard text.contains("\"required\":[\"\(key)\"]") else { throw probeFailure("Search omitted current definition") }
                 }

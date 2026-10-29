@@ -1089,7 +1089,12 @@ pub fn Runtime(comptime App: type) type {
                 provider_options.provider_order = settings.provider_order;
                 provider_options.provider_strict = settings.provider_strict;
             }
+            if (app.session.agent.deferred_tool_mode == .native) if (deps.load_deferred_tool_mode) |load| {
+                app.session.agent.deferred_tool_mode = try load(deps.ctx);
+            };
             var summary_model: agent_runtime.CompactorCaller = .{
+                .negotiated_deferred_tool_mode = &app.session.agent.deferred_tool_mode,
+                .deferred_tool_mode_commit = if (deps.save_deferred_tool_mode) |save| .{ .context = deps.ctx, .save_fn = save } else null,
                 .stream_provider = deps.agent_stream_provider,
                 .cooperative_transport_pulse = deps.cooperative_transport_pulse,
                 .provider = job.provider,

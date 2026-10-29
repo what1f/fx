@@ -16,6 +16,7 @@ const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub const DurableSessionPreferences = struct {
+    deferred_tool_mode: @import("../agent/deferred_tool_mode.zig").Mode = .native,
     provider: model_provider.ProviderId = .gateway,
     model: []u8,
     effort: types.ReasoningEffort,
@@ -29,6 +30,7 @@ pub const DurableSessionPreferences = struct {
 
     pub fn dupe(self: DurableSessionPreferences, alloc: Allocator) !DurableSessionPreferences {
         return .{
+            .deferred_tool_mode = self.deferred_tool_mode,
             .provider = self.provider,
             .model = try alloc.dupe(u8, self.model),
             .effort = self.effort,
@@ -40,23 +42,28 @@ pub const DurableSessionPreferences = struct {
 
 /// Decodes persisted preferences; the caller owns the returned model.
 pub fn parse_preferences(alloc: Allocator, value: std.json.Value) !DurableSessionPreferences {
-    const raw = try requireObject(value);
+    const saved_mode = if (value == .object) value.object.get("deferred_tool_mode") else null;
+    var fields = try (try requireObject(value)).clone(alloc);
+    defer fields.deinit(alloc);
+    _ = fields.swapRemove("deferred_tool_mode");
+    const cleaned: std.json.Value = .{ .object = fields };
+    const raw = fields;
     const legacy = raw.contains("connection_id") or raw.contains("model_id");
     const has_ultrafast_mode = raw.contains("ultrafast_mode");
     const object = if (legacy)
         if (has_ultrafast_mode)
-            try exactObject(value, &.{ "connection_id", "model_id", "effort", "fast_mode", "ultrafast_mode" })
+            try exactObject(cleaned, &.{ "connection_id", "model_id", "effort", "fast_mode", "ultrafast_mode" })
         else
-            try exactObject(value, &.{ "connection_id", "model_id", "effort", "fast_mode" })
+            try exactObject(cleaned, &.{ "connection_id", "model_id", "effort", "fast_mode" })
     else if (raw.contains("provider"))
         if (has_ultrafast_mode)
-            try exactObject(value, &.{ "provider", "model", "effort", "fast_mode", "ultrafast_mode" })
+            try exactObject(cleaned, &.{ "provider", "model", "effort", "fast_mode", "ultrafast_mode" })
         else
-            try exactObject(value, &.{ "provider", "model", "effort", "fast_mode" })
+            try exactObject(cleaned, &.{ "provider", "model", "effort", "fast_mode" })
     else if (has_ultrafast_mode)
-        try exactObject(value, &.{ "model", "effort", "fast_mode", "ultrafast_mode" })
+        try exactObject(cleaned, &.{ "model", "effort", "fast_mode", "ultrafast_mode" })
     else
-        try exactObject(value, &.{ "model", "effort", "fast_mode" });
+        try exactObject(cleaned, &.{ "model", "effort", "fast_mode" });
     const provider: model_provider.ProviderId = if (legacy) blk: {
         if (!std.mem.eql(u8, try requireString(object, "connection_id"), "vercel")) return error.InvalidDurableField;
         break :blk .gateway;
@@ -69,7 +76,11 @@ pub fn parse_preferences(alloc: Allocator, value: std.json.Value) !DurableSessio
     const effort = types.ReasoningEffort.parse(try requireString(object, "effort")) orelse return error.InvalidDurableField;
     const fast_mode = try requireBool(object, "fast_mode");
     const ultrafast_mode = if (has_ultrafast_mode) try requireBool(object, "ultrafast_mode") else false;
-    return .{ .provider = provider, .model = try alloc.dupe(u8, model), .effort = effort, .fast_mode = fast_mode, .ultrafast_mode = ultrafast_mode };
+    const deferred_mode = if (saved_mode) |mode| blk: {
+        if (mode != .string) return error.InvalidDurableField;
+        break :blk std.meta.stringToEnum(@import("../agent/deferred_tool_mode.zig").Mode, mode.string) orelse return error.InvalidDurableField;
+    } else .native;
+    return .{ .deferred_tool_mode = deferred_mode, .provider = provider, .model = try alloc.dupe(u8, model), .effort = effort, .fast_mode = fast_mode, .ultrafast_mode = ultrafast_mode };
 }
 
 test "legacy connection preferences decode through the shared state codec" {
@@ -1168,6 +1179,10 @@ fn writeState(writer: *std.Io.Writer, state: DurableSessionState) !void {
     }
     try writer.writeAll(",\"provider\":");
     try std.json.Stringify.value(state.preferences.provider, .{}, writer);
+    if (state.preferences.deferred_tool_mode != .native) {
+        try writer.writeAll(",\"deferred_tool_mode\":");
+        try std.json.Stringify.value(@tagName(state.preferences.deferred_tool_mode), .{}, writer);
+    }
     try writer.writeAll("},\"history\":[");
     for (state.history, 0..) |turn, i| {
         if (i > 0) try writer.writeByte(',');

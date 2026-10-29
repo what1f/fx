@@ -118,7 +118,7 @@ func drainCatalogTurn(_ turn: FxTurn) async throws {
         ("tool_search", .object(["query": .string("action_42")])),
         ("action_42", .object(["value": .string("first")])), nil,
         ("tool_search", .object(["query": .string("action_42")])), nil,
-        ("call_action", .object(["name": .string("action_42"), "args": .object(["updated": .string("restored")])])), nil,
+        ("call_tool", .object(["name": .string("action_42"), "args": .object(["updated": .string("restored")])])), nil,
         ("action_42", .object(["updated": .string("removed")])), nil,
     ], codex: true)
     let credentials = try FxSubscriptionCredentials(accessToken: "fixture-token", accountID: "fixture-account", expiresAt: Date().addingTimeInterval(3600))
@@ -134,7 +134,7 @@ func drainCatalogTurn(_ turn: FxTurn) async throws {
         Issue.record("Missing ordinary function tools"); try await engine.close(); return
     }
     #expect(initial.count == 2)
-    #expect(initial.contains { $0["name"] == .string("call_action") })
+    #expect(initial.contains { $0["name"] == .string("call_tool") })
     #expect(loaded == initial)
     #expect(!loaded.contains { $0["name"] == .string("action_42") })
     #expect(String(describing: before).contains("tool_search_output"))
@@ -330,7 +330,7 @@ private actor MessagesCatalogHTTP: FxHTTPClient {
         ("tool_search", .object(["query": .string("select:notes_read")])), nil,
         ("tool_search", .object(["query": .string("notes")])), nil,
         ("tool_search", .object(["query": .string("select:notes_read")])),
-        ("call_action", .object(["name": .string("notes_read"), "args": .object(["updated": .string("new")])])), nil,
+        ("call_tool", .object(["name": .string("notes_read"), "args": .object(["updated": .string("new")])])), nil,
     ], codex: true)
     let credentials = try FxSubscriptionCredentials(accessToken: "fixture-token", accountID: "fixture-account", expiresAt: Date().addingTimeInterval(3600))
     let auth = FxSubscription(provider: .codex, credentials: { _ in credentials })

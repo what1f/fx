@@ -122,7 +122,7 @@ actor State {
             let kind = CommandLine.arguments.dropFirst().first ?? "responses"
             let api: FxCustomProvider.APIProtocol = kind == "messages" ? .anthropicMessages : kind == "chat" ? .chatCompletions : .responses
             let base = kind == "messages" ? "https://api.deepseek.com/anthropic/v1" : "https://api.deepseek.com/v1"
-            let provider = try FxCustomProvider(name: "deepseek", baseURL: URL(string: base)!, models: ["deepseek-flash": .init(contextWindow: 32768, maxOutputTokens: 16384, supportsToolUse: true)], apiProtocol: api, deferredToolMode: kind == "messages" ? .callAction : .native)
+            let provider = try FxCustomProvider(name: "deepseek", baseURL: URL(string: base)!, models: ["deepseek-flash": .init(contextWindow: 32768, maxOutputTokens: 16384, supportsToolUse: true)], apiProtocol: api)
             let state = State(), meter = Meter()
             let approval = FxToolApproval(onApproval: { _ in await state.decide() })
             func tool(_ name: String, value: String, write: Bool = false) -> FxTool {
@@ -134,7 +134,7 @@ actor State {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("fx-live-\(UUID())")
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: directory) }
-            var config = FxConfiguration(provider: .custom(provider, credentials: { _ in key }), model: "deepseek-flash", instructions: "You are a test assistant. Keep replies under 30 words. Use tool_search to discover deferred tools by exact name with query select:NAME. Call the discovered tool by its native name, or call_action where offered. Do not invent tool results. Never retry a rejected tool unless the next user message explicitly requests it.", tools: [tool("echo_code", value: "ALPHA-42"), tool("save_note", value: "SAVED-73", write: true)], workspace: directory, httpClient: MeasuredHTTP(meter: meter), checkpointAfterBytes: nil)
+            var config = FxConfiguration(provider: .custom(provider, credentials: { _ in key }), model: "deepseek-flash", instructions: "You are a test assistant. Keep replies under 30 words. Use tool_search to discover deferred tools by exact name with query select:NAME. Call the discovered tool by its native name, or call_tool where offered. Do not invent tool results. Never retry a rejected tool unless the next user message explicitly requests it.", tools: [tool("echo_code", value: "ALPHA-42"), tool("save_note", value: "SAVED-73", write: true)], workspace: directory, httpClient: MeasuredHTTP(meter: meter), checkpointAfterBytes: nil)
             config.toolSearchEnabled = true
             let database = directory.appendingPathComponent("conversation.sqlite")
             let agent = try await Agent.open(configuration: config, persistenceURL: database, approval: approval, builtInTools: [])

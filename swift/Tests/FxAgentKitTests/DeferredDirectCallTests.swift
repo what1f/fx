@@ -4,7 +4,7 @@ import LibFx
 import FxAgentKit
 
 enum DirectMode: String, CaseIterable, Sendable {
-    case responses, messages, callAction
+    case responses, messages, callTool
 }
 
 private actor DirectCalls {
@@ -29,9 +29,9 @@ private actor DirectHTTP: FxHTTPClient {
         let search = loaded && step == 1
         let calling = search || step == (loaded ? 2 : 1)
         let target = missing ? "removed" : "direct_action"
-        let name = search ? "tool_search" : mode == .callAction ? "call_action" : target
+        let name = search ? "tool_search" : mode == .callTool ? "call_tool" : target
         let args: JSONValue = search ? .object(["query": .string("select:direct_action")])
-            : mode == .callAction ? .object(["name": .string(target), "args": input]) : input
+            : mode == .callTool ? .object(["name": .string(target), "args": input]) : input
         let arguments = String(decoding: try JSONEncoder().encode(args), as: UTF8.self)
         var events: [[String: Any]]
         if mode == .responses {
@@ -103,8 +103,7 @@ private func rawArray(_ key: String, _ data: Data) throws -> Data {
         let http = DirectHTTP(mode: mode, input: input, missing: scenario == "missing", loaded: scenario == "loaded")
         let provider = try FxCustomProvider(name: "directfixture", baseURL: URL(string: "https://direct.example/v1")!,
             models: ["fixture": .init(contextWindow: 100000, maxOutputTokens: 1024)],
-            apiProtocol: mode == .responses ? .responses : .anthropicMessages,
-            deferredToolMode: mode == .callAction ? .callAction : .native)
+            apiProtocol: mode == .responses ? .responses : .anthropicMessages)
         let tool = FxTool(name: "direct_action", description: "Current action", inputSchema: .object([
             "type": .string("object"), "properties": .object(["value": .object(["type": .string("string")])]),
             "required": .array([.string("value")]), "additionalProperties": .bool(false),

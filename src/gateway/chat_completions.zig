@@ -58,7 +58,7 @@ fn build(raw: ?*anyopaque, alloc: Allocator, request: streams.RequestData) ![]u8
 /// The request body for `definition`, omitting replay parts recorded for
 /// another endpoint. Caller owns the result.
 pub fn build_for(definition: *const definitions.Definition, alloc: Allocator, request: streams.RequestData) ![]u8 {
-    if (definition.protocol == .@"anthropic-messages") return anthropic.buildConfigured(alloc, request, bound_identity(definition), definition.deferred_tool_mode);
+    if (definition.protocol == .@"anthropic-messages") return anthropic.buildConfigured(alloc, request, bound_identity(definition), request.deferred_tool_mode);
     if (definition.protocol == .@"openai-responses") return responses.build(alloc, request, bound_identity(definition));
     const identity = bound_identity(definition);
     for (request.messages) |message| if (message.provider_replay) |replay| {
@@ -113,6 +113,12 @@ test "chat completions adapter binds replay to endpoint authority and wires proj
 }
 
 fn stream(raw: ?*anyopaque, alloc: Allocator, request: streams.ModelRequest) !streams.Result {
+    const definition = definition_at(raw);
+    if (definition.protocol == .@"anthropic-messages") return anthropic.negotiate(raw, alloc, request, definition.id, build, streamOnce);
+    return streamOnce(raw, alloc, request);
+}
+
+fn streamOnce(raw: ?*anyopaque, alloc: Allocator, request: streams.ModelRequest) !streams.Result {
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
     const definition = definition_at(raw);
     if (request.credential.credentialSource() != .configured) return error.ConfiguredProviderCredentialRequired;
@@ -158,12 +164,12 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
         .client = &client,
         .uri = uri,
         .authorization = if (definition.protocol == .@"anthropic-messages") null else authorization,
-        .extra_headers = if (definition.protocol == .@"anthropic-messages") &.{
+        .extra_headers = if (definition.protocol == .@"anthropic-messages") (&[_]std.http.Header{
             .{ .name = "x-api-key", .value = token orelse "" },
             anthropic.headers[1],
             anthropic.headers[2],
             anthropic.headers[3],
-        } else &.{.{ .name = "accept", .value = "text/event-stream" }},
+        })[0..(if (request.deferred_tool_mode == .native) @as(usize, 4) else 3)] else &.{.{ .name = "accept", .value = "text/event-stream" }},
     };
     try request.admission.admit();
     var opened = try client_mod.openBoundedPost(alloc, request.cancel_flag, phase_deadline(30_000, request.deadline), &operation);
@@ -213,7 +219,7 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
             detail = redacted;
         }
 
-        return .{ .failed = .{ .kind = failure_kind(response.head.status), .detail = detail, .retry_after_seconds = retry_after, .ownership = .owned } };
+        return .{ .failed = .{ .http_status = @intCast(@backingInt(response.head.status)), .kind = failure_kind(response.head.status), .detail = detail, .retry_after_seconds = retry_after, .ownership = .owned } };
     }
     var result = (if (definition.protocol == .@"anthropic-messages") anthropic.consume(alloc, reader, request, watch.progress()) else if (definition.protocol == .@"openai-responses") responses.consume(alloc, request, reader, watch.progress()) else consume(alloc, reader, request, watch.progress())) catch |err| return watch.failure(err);
     if (watch.finish()) |err| {

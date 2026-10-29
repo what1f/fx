@@ -1881,7 +1881,7 @@ fn handleKernelCatalog(state: *ServerState, alloc: Allocator, msg: *const jsonrp
         if (std.mem.eql(u8, old, current)) continue;
         try updates.append(update_alloc, .{
             .name = try update_alloc.print("tool.{s}", .{name}),
-            .text = try update_alloc.print("<system-reminder>\nActive tool {s} changed. Current definition: {s}\nUse call_action with the current arguments for changed definitions. Earlier native declarations are historical snapshots.\n</system-reminder>", .{ name, current }),
+            .text = try update_alloc.print("<system-reminder>\nActive tool {s} changed. Current definition: {s}\nUse call_tool with the current arguments for changed definitions. Earlier native declarations are historical snapshots.\n</system-reminder>", .{ name, current }),
         });
     }
     try appendHostContexts(state, active, updates.items);
@@ -4792,6 +4792,7 @@ test "ACP model commits honor the active session write boundary" {
     const alloc = std.testing.allocator;
     var active: ActiveSessionState = undefined;
     active.v2 = null;
+    active.journal = null;
     active.session_write_mutex = .init;
     active.model = try alloc.dupe(u8, "old-model");
     defer alloc.free(active.model);
@@ -4829,10 +4830,8 @@ test "ACP model commits honor the active session write boundary" {
 
     try std.testing.expect(blocked_at_boundary);
     try std.testing.expect(worker.done.load(.seq_cst));
-    try std.testing.expectEqual(
-        error.SessionPersistenceUnavailable,
-        worker.failure.?,
-    );
+    try std.testing.expect(worker.failure == null);
+    try std.testing.expectEqualStrings("new-model", active.model);
 }
 
 test "ACP publishes an account-bound refreshed Codex token for later prompts" {

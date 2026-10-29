@@ -1945,6 +1945,8 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .ctx = @ptrCast(ctx),
         .observer = ctx.observer,
         .agent_stream_provider = server.streamProviderFor(ctx.state, ctx.state.active_session.?.provider),
+        .load_deferred_tool_mode = loadDeferredToolMode,
+        .save_deferred_tool_mode = saveDeferredToolMode,
         .report_usage = reportUsage,
         .flush_assistant_stream_per_content_chunk = host_target.is_wasm,
         .render_assistant_text = false,
@@ -5988,4 +5990,29 @@ test "ACP compaction notifications pair identities and ignore stale or inactive 
     id = activity.begin(&ctx, .automatic, 1);
     activity.settle(&ctx, id, .{ .outcome = .failed });
     try std.testing.expectEqual(@as(usize, 0), capture.frames.items.len);
+}
+
+fn loadDeferredToolMode(raw: *anyopaque) !@import("../core/agent/deferred_tool_mode.zig").Mode {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw));
+    const session = if (ctx.state.active_session) |*value| value else return .native;
+    if (session.v2) |v2| {
+        var prefs = try v2.currentPreferences(ctx.alloc);
+        defer prefs.deinit(ctx.alloc);
+        return prefs.deferred_tool_mode;
+    }
+    return .native;
+}
+
+fn saveDeferredToolMode(raw: *anyopaque, mode: @import("../core/agent/deferred_tool_mode.zig").Mode) !void {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw));
+    const session = if (ctx.state.active_session) |*value| value else return;
+    session.session_write_mutex.lockUncancelable(io_mod.getIo());
+    defer session.session_write_mutex.unlock(io_mod.getIo());
+    if (session.journal) |*journal_state| try journal_state.appendMarked(ctx.alloc, session.session_id, .{ .deferred_tool_mode = mode }, true);
+    if (session.v2) |v2| {
+        var prefs = try v2.currentPreferences(ctx.alloc);
+        defer prefs.deinit(ctx.alloc);
+        prefs.deferred_tool_mode = mode;
+        try v2.setPreferences(prefs);
+    }
 }

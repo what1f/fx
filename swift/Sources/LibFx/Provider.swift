@@ -18,11 +18,6 @@ public struct FxCustomProvider: Sendable {
         case responses = "openai-responses"
         case anthropicMessages = "anthropic-messages"
     }
-    public enum DeferredToolMode: String, Sendable {
-        case native
-        case callAction = "call_action"
-    }
-    public let deferredToolMode: DeferredToolMode
     public let apiProtocol: APIProtocol
     public struct ModelCapabilities: Sendable {
         public var contextWindow: UInt32?
@@ -53,7 +48,7 @@ public struct FxCustomProvider: Sendable {
     public let models: [String: ModelCapabilities]
     let chatURL: URL
 
-    public init(name: String, baseURL: URL, models: [String: ModelCapabilities] = [:], apiProtocol: APIProtocol = .chatCompletions, deferredToolMode: DeferredToolMode = .native) throws {
+    public init(name: String, baseURL: URL, models: [String: ModelCapabilities] = [:], apiProtocol: APIProtocol = .chatCompletions) throws {
         let letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
         let allowed = letters + "0123456789_-"
         guard (1...64).contains(name.utf8.count), let first = name.first, letters.contains(first),
@@ -81,10 +76,6 @@ public struct FxCustomProvider: Sendable {
                 throw FxError.invalidInput("Output token limit must be less than the context window")
             }
         }
-        guard deferredToolMode == .native || apiProtocol == .anthropicMessages else {
-            throw FxError.invalidInput("Call-action routing requires the Messages protocol")
-        }
-        self.deferredToolMode = deferredToolMode
         self.apiProtocol = apiProtocol
         self.name = name
         self.baseURL = baseURL
@@ -99,7 +90,6 @@ public struct FxCustomProvider: Sendable {
     var definition: JSONValue {
         .object([name: .object([
             "protocol": .string(apiProtocol.rawValue),
-            "deferred_tool_mode": .string(deferredToolMode.rawValue),
             "base_url": .string(baseURL.absoluteString),
             "auth": .object(["type": .string("none")]),
             "model_metadata": .object(models.mapValues(\.json)),
