@@ -1226,20 +1226,35 @@ pub const Reducer = struct {
     }
 
     fn accept_failure(self: *Reducer, alloc: std.mem.Allocator, fields: std.json.ObjectMap) !void {
-        const code = stringField(fields, "code") orelse "provider_error";
-        const message = stringField(fields, "message") orelse "Provider response failed";
+        // A bare `error` event and some proxies nest the details under "error".
+        const source = if (fields.get("error")) |nested| if (nested == .object) nested.object else fields else fields;
+        const type_name = stringField(source, "type");
+        const code = stringField(source, "code") orelse
+            if (type_name != null and !std.mem.eql(u8, type_name.?, "error")) type_name.? else "provider_error";
+        const message = stringField(source, "message") orelse stringField(fields, "message") orelse "Provider response failed";
         const bounded_code = types.ModelFailureDiagnostic.init(code);
         const bounded_message = types.ModelFailureDiagnostic.init(message);
         var buffer: [2 * types.ModelFailureDiagnostic.max_bytes + 2]u8 = undefined;
         const text = try std.mem.print(&buffer, "{s}: {s}", .{ bounded_code.view(), bounded_message.view() });
         const detail = types.ModelFailureDiagnostic.init(text);
         self.provider_failure_detail = try alloc.dupe(u8, detail.view());
-        self.provider_failure_cause = if (std.mem.eql(u8, code, "server_error"))
-            null
-        else if (std.mem.eql(u8, code, "rate_limit_exceeded"))
-            .rate_limited
-        else
-            .non_retryable;
+        self.provider_failure_cause = failureCause(code);
+    }
+
+    /// Like Codex, only failures that a retry cannot fix stop the turn.
+    /// Unknown codes, including proxy-defined ones, are treated as transient.
+    fn failureCause(code: []const u8) ?types.ProviderFailureCause {
+        if (std.mem.eql(u8, code, "rate_limit_exceeded")) return .rate_limited;
+        const terminal = [_][]const u8{
+            "context_length_exceeded",     "insufficient_quota",               "credit_balance_exhausted",
+            "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "usage_not_included",
+            "invalid_prompt",              "invalid_request_error",            "invalid_api_key",
+            "authentication_error",        "permission_error",                 "permission_denied",
+            "model_not_found",             "content_filter",                   "content_policy_violation",
+            "cyber_policy",                "bio_policy",                       "misalignment_policy_violation",
+        };
+        for (terminal) |name| if (std.mem.eql(u8, code, name)) return .non_retryable;
+        return null;
     }
 
     fn accept_text(
@@ -1966,7 +1981,8 @@ test "Responses terminal failure classification is conservative and diagnostics 
         .{ "server_error", false },
         .{ "rate_limit_exceeded", false },
         .{ "invalid_prompt", true },
-        .{ "unknown_code", true },
+        .{ "insufficient_quota", true },
+        .{ "unknown_code", false },
     };
     inline for (cases) |case| {
         var stream = ToolRecordTest.init(std.testing.allocator);
@@ -1996,8 +2012,34 @@ test "Responses terminal failure classification is conservative and diagnostics 
     const completion = try stream.finish();
     defer stream.freeCompletion(completion);
     try std.testing.expectEqual(types.ProviderFinishReason.provider_error, completion.finish_reason.?);
-    try std.testing.expectEqual(types.ProviderFailureCause.non_retryable, completion.provider_failure_cause.?);
+    try std.testing.expectEqual(@as(?types.ProviderFailureCause, null), completion.provider_failure_cause);
     try std.testing.expect(completion.provider_failure_detail.?.len > 0);
+}
+
+test "Responses error events read nested proxy details and retry unknown types" {
+    var stream = ToolRecordTest.init(std.testing.allocator);
+    defer stream.deinit();
+    try stream.apply("{\"type\":\"error\",\"error\":{\"type\":\"upstream_error\",\"message\":\"upstream response incomplete\"}}");
+    const completion = try stream.finish();
+    defer stream.freeCompletion(completion);
+    try std.testing.expectEqual(types.ProviderFinishReason.provider_error, completion.finish_reason.?);
+    try std.testing.expectEqual(@as(?types.ProviderFailureCause, null), completion.provider_failure_cause);
+    try std.testing.expectEqualStrings("upstream_error: upstream response incomplete", completion.provider_failure_detail.?);
+
+    var terminal = ToolRecordTest.init(std.testing.allocator);
+    defer terminal.deinit();
+    try terminal.apply("{\"type\":\"error\",\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"too long\"}}");
+    const stopped = try terminal.finish();
+    defer terminal.freeCompletion(stopped);
+    try std.testing.expectEqual(types.ProviderFailureCause.non_retryable, stopped.provider_failure_cause.?);
+
+    var flat = ToolRecordTest.init(std.testing.allocator);
+    defer flat.deinit();
+    try flat.apply("{\"type\":\"error\",\"code\":\"server_error\",\"message\":\"busy\"}");
+    const flat_completion = try flat.finish();
+    defer flat.freeCompletion(flat_completion);
+    try std.testing.expectEqual(@as(?types.ProviderFailureCause, null), flat_completion.provider_failure_cause);
+    try std.testing.expectEqualStrings("server_error: busy", flat_completion.provider_failure_detail.?);
 }
 
 test "Responses terminal metadata rejects contradictions before publishing final text" {
