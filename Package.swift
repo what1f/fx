@@ -4,8 +4,8 @@ import PackageDescription
 
 // CFx 由 zig 编译，产物不进 Git。本地跑过 swift/scripts/build-xcframework.sh 就用本地产物；
 // 作为远程依赖拉取时没有本地产物，从 GitHub Release 下载。发版用 swift/scripts/release.sh，它会改写下面两行。
-let cfxReleaseURL = "https://github.com/what1f/fx/releases/download/v0.4.5-swift.3/CFx.xcframework.zip"
-let cfxReleaseChecksum = "fd6e420777edd4d977afb700258a1d1e877bd4fd274054acfb5e63761cafba2d"
+let cfxReleaseURL = "https://github.com/what1f/fx/releases/download/v0.4.5-swift.4/CFx.xcframework.zip"
+let cfxReleaseChecksum = "6365ec71b74aab5cb5a661a5f466c782f85509f600c7a8b14d5443b1ba40e49a"
 let localCFx = "swift/Artifacts/CFx.xcframework"
 let cfx: Target = FileManager.default.fileExists(atPath: Context.packageDirectory + "/" + localCFx)
     ? .binaryTarget(name: "CFx", path: localCFx)
