@@ -7,6 +7,7 @@ public struct FxWorkspaceTools: Sendable {
     public let workspace: URL
     private let approval: FxToolApproval
     private let pluginID: String
+    private let environment: (@Sendable () async throws -> [String: String])?
     private static let fileLimit = 4 * 1024 * 1024
     private static let outputLimit = 50 * 1024
 
@@ -14,11 +15,15 @@ public struct FxWorkspaceTools: Sendable {
         case readFile, writeFile, editFile, shell
     }
 
-    /// Every returned tool uses this approval policy before it executes.
-    public init(workspace: URL, approval: FxToolApproval, pluginID: String) {
+    /// Every returned tool uses this approval policy before it executes. `environment` is read before
+    /// each shell command; its variables are added to the inherited process environment, replacing
+    /// any with the same name.
+    public init(workspace: URL, approval: FxToolApproval, pluginID: String,
+                environment: (@Sendable () async throws -> [String: String])? = nil) {
         self.workspace = workspace.standardizedFileURL
         self.approval = approval
         self.pluginID = pluginID
+        self.environment = environment
     }
 
     public func tools(_ selected: [Tool]) -> [FxTool] {
@@ -101,7 +106,8 @@ public struct FxWorkspaceTools: Sendable {
             guard !command.isEmpty, !command.utf8.contains(0), command.utf8.count <= 64 * 1024 else {
                 throw FxError.invalidInput("Command must contain 1 to 65536 bytes without NUL")
             }
-            let execution = WorkspaceCommand(command: command, workspace: workspace, limit: Self.outputLimit)
+            let extra = try await environment?() ?? [:]
+            let execution = WorkspaceCommand(command: command, workspace: workspace, environment: extra, limit: Self.outputLimit)
             if let value = input["timeout"] {
                 guard case .number(let timeout) = value, timeout.isFinite, timeout > 0, timeout <= 86400 else {
                     throw FxError.invalidInput("timeout must be between 0 and 86400 seconds")
@@ -190,8 +196,11 @@ private final class WorkspaceCommand: @unchecked Sendable {
     private let cancellationFinished = DispatchGroup()
     private var cancellationScheduled = false
 
-    init(command: String, workspace: URL, limit: Int) {
+    init(command: String, workspace: URL, environment: [String: String], limit: Int) {
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        if !environment.isEmpty {
+            process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, added in added }
+        }
         // Wait until the owner has verified the group, then replace this shell.
         process.arguments = ["-c", "IFS= read -r launch || exit; exec /bin/bash -c \"$1\"", "workspace-shell", command]
         process.currentDirectoryURL = workspace

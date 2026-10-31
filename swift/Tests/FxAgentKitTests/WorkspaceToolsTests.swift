@@ -30,6 +30,19 @@ private func input(_ fields: [String: String]) -> JSONValue { .object(fields.map
         #expect(try String(contentsOf: fixture.url.appendingPathComponent("note.txt"), encoding: .utf8) == "one\r\nthree\r\n")
     }
 
+    @Test func shellAddsTheHostEnvironmentReadBeforeEachCommand() async throws {
+        let fixture = try WorkspaceFixture()
+        defer { fixture.close() }
+        let value = LockedValue("first")
+        let shell = FxWorkspaceTools(workspace: fixture.url, approval: FxToolApproval { _ in .allowOnce }, pluginID: "fixture",
+                                     environment: { ["FX_TOOL_VAR": value.get(), "HOME": "fx-home"] }).tools([.shell])[0]
+        let first = try await shell.execute(input(["command": "printf '%s %s %s' \"$FX_TOOL_VAR\" \"$HOME\" \"${PATH:+path}\""]), context)
+        #expect(first.text.contains("first fx-home path"))
+        value.set("second")
+        let second = try await shell.execute(input(["command": "printf %s \"$FX_TOOL_VAR\""]), context)
+        #expect(second.text.contains("second"))
+    }
+
     @Test(arguments: ["aa", "missing", ""])
     func editRejectsAmbiguousOverlappingMissingAndEmptyMatches(old: String) async throws {
         let fixture = try WorkspaceFixture()
@@ -220,4 +233,12 @@ extension WorkspaceToolsTests {
         #expect(result.images.count == 1 && result.images.first?.format == .png)
         #expect(result.text.contains("1 × 1"))
     }
+}
+
+private final class LockedValue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: String
+    init(_ value: String) { self.value = value }
+    func get() -> String { lock.withLock { value } }
+    func set(_ new: String) { lock.withLock { value = new } }
 }
