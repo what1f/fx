@@ -580,3 +580,16 @@ libfx is developed in the [fx repository](https://github.com/vercel-labs/fx), un
 ## License
 
 [Apache-2.0](https://github.com/vercel-labs/fx/blob/main/LICENSE)
+
+### Native Swift model configuration
+
+The Swift engine and FxAgentKit expose idle `setModel` and `setReasoningEffort` calls through ACP. Configured endpoints support the standard effort fields for Chat Completions, Responses, and Messages. The host persists its selection and supplies it when reopening native history. See [libfx Swift](../swift/README.md).
+
+### Native Swift deferred tools
+
+The native Swift package supports deferred host tool catalogs and idle catalog updates. See [Update deferred host tools](../swift/README.md#update-deferred-host-tools) for activation, schema validation, persistence, and capacity limits. Registered deferred tools can be called before discovery; invalid arguments return field errors and the current definition. Direct calls leave the top-level tool list unchanged. Repeated discovery does not duplicate native declarations. Native requests retain the first saved declaration of each name. Catalog changes append current definitions as context; use the fixed `call_tool` function for updated arguments. Removed tools cannot execute. Repeated searches do not add native declarations, and request serialization filters duplicates already present in saved histories without rewriting storage. Compaction starts a new declaration baseline. The JavaScript SDK does not expose catalog mutation methods.
+
+Deferred host actions no longer enter the top-level tool list when selected.
+Chat Completions uses `tool_search` and `call_tool`; Responses returns definitions
+in conversation output items. The Swift engine also supports persisted, appended
+context reminders. Anthropic Messages uses inline tool additions and supports text and tools.

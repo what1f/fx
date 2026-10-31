@@ -1,4 +1,5 @@
 const std = @import("std");
+const compaction_activity = @import("../core/output/compaction_activity.zig");
 const observation = @import("../core/agent/runtime/observation.zig");
 const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const skill_contract = @import("../core/skills/skill_contract.zig");
@@ -247,6 +248,9 @@ const AcpContext = struct {
     /// card stands. Keys are owned copies of provider call ids so the ID
     /// stays stable from permission review through execution.
     published_tool_calls: std.StringHashMapUnmanaged(ToolCallCard) = .empty,
+    compaction: compaction_activity.State = .{},
+    compaction_id: acp_types.MessageIdBuffer = undefined,
+    compaction_announced: bool = false,
     message_id: acp_types.MessageIdBuffer = undefined,
     message_kind: ?AgentMessageKind = null,
     stop_reason: acp_types.StopReason = .end_turn,
@@ -497,6 +501,7 @@ const AcpContext = struct {
             .max_command_output_bytes = self.state.cfg.max_command_output_bytes,
             .max_tool_result_bytes = session.max_tool_result_bytes,
             .auto_compact_percent = self.state.auto_compact_percent,
+            .auto_compact = self.state.auto_compact,
             .api_key = session.api_key,
             .agent_stream_provider = server.streamProviderFor(self.state, session.provider),
             .credential_source = session.credential_source,
@@ -520,6 +525,7 @@ const AcpContext = struct {
             .permission_rules = session.permission_rules,
             .tool_registry = self.toolRegistry(),
             .host_tool_provider = hostToolProvider(self.state),
+            .host_tool_catalog = &self.state.host_tools,
             .permission_reviewer_provider = self.state.cfg.provider_set.select(session.provider).permission_reviewer,
             .auto_classifier = self.auto_classifier,
             .subagent_host = self.state.subagent_host,
@@ -1083,10 +1089,7 @@ pub fn handlePrompt(
     });
     defer tool_projection.deinit(alloc);
 
-    const owned_prompt = try alloc.dupe(
-        u8,
-        if (recovery_checkpoint) |checkpoint| checkpoint.user.text else prompt_text,
-    );
+    const owned_prompt = try alloc.dupe(u8, if (recovery_checkpoint) |checkpoint| checkpoint.user.text else prompt_text);
     defer alloc.free(owned_prompt);
 
     var skill_catalog = state.skills.acquireCatalog();
@@ -1100,6 +1103,7 @@ pub fn handlePrompt(
     for (state.context_snapshot.notices) |notice| try pushContextNotice(@ptrCast(&ctx), notice);
 
     session.session_rt.setConversationLanguageFromUserMessage(owned_prompt);
+    try server.ensureCatalogReminder(state, session);
     const context_history = try session.session_rt.snapshotHistory(alloc);
     defer types.freeHistoryTurnSlice(alloc, context_history);
     var context_snapshot = try state.context_snapshot.dupe(alloc);
@@ -1155,6 +1159,11 @@ pub fn handlePrompt(
         .advertised_functions = tool_projection.advertised_functions,
         .custom_tool_guidance = tool_projection.custom_guidance,
     });
+    const context_snapshots = try types.latestHostContexts(dynamic_tool_arena.allocator(), session.session_rt.agent.history.items);
+    // Compaction frees the old canonical history before the in-flight request
+    // is rebuilt. Its baseline must own bytes for the whole running turn.
+    for (context_snapshots) |*entry| entry.* = try types.dupeHistoryTurn(dynamic_tool_arena.allocator(), entry.*);
+    agent_config.context_snapshots = context_snapshots;
     agent_config.session_child_capability = sessionChildCapability(session);
     maybeStartAcpTitleTask(state, session, owned_prompt, recovery_checkpoint != null, ctx.observer);
     defer if (session.title_task != null) completeAcpTitleTask(state, session);
@@ -1374,6 +1383,13 @@ fn connectHostChannelServers(session: *server.ActiveSessionState) void {
     };
 }
 
+fn hostDeclarations(ctx: *AcpContext, alloc: Allocator, history: []const types.HistoryTurn) ![]bool {
+    var messages: std.ArrayList(types.ChatMessage) = .empty;
+    defer messages.deinit(alloc);
+    try session_runtime.appendHistoryChatMessages(alloc, &messages, history);
+    return ctx.state.host_tools.declaredTools(alloc, messages.items);
+}
+
 /// Host tools plus every tool of the session's always-loaded MCP servers, so
 /// client-provided tools stay callable on each turn without a search. The
 /// result is allocated in `arena`, which must outlive the turn.
@@ -1381,7 +1397,12 @@ fn initialDynamicTools(
     ctx: *AcpContext,
     arena: Allocator,
 ) ![]const agent_stream_provider.DynamicFunctionTool {
-    const host_tools = ctx.state.host_tools.dynamic_tools;
+    if (ctx.state.active_session) |*active| {
+        const declared = try hostDeclarations(ctx, arena, active.session_rt.agent.history.items);
+        defer arena.free(declared);
+        @memcpy(ctx.state.host_tools.loaded, declared);
+    }
+    const host_tools = try ctx.state.host_tools.initialTools(arena);
     if (comptime host_target.is_wasm) return host_tools;
     const session = if (ctx.state.active_session) |*active| active else return host_tools;
     const loaded = if (session.mcp) |mcp| try mcp.snapshotAlwaysLoadedTools(
@@ -1437,6 +1458,7 @@ fn buildAgentConfig(
         .agent_step_limit = session.agent_step_limit,
         .max_tool_result_bytes = session.max_tool_result_bytes,
         .auto_compact_percent = state.auto_compact_percent,
+        .auto_compact = state.auto_compact,
         .cancel_flag = &session.cancel_flag,
         .fast_mode = session.fast_mode,
         .ultrafast_mode = session.ultrafast_mode,
@@ -1923,6 +1945,8 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .ctx = @ptrCast(ctx),
         .observer = ctx.observer,
         .agent_stream_provider = server.streamProviderFor(ctx.state, ctx.state.active_session.?.provider),
+        .load_deferred_tool_mode = loadDeferredToolMode,
+        .save_deferred_tool_mode = saveDeferredToolMode,
         .report_usage = reportUsage,
         .flush_assistant_stream_per_content_chunk = host_target.is_wasm,
         .render_assistant_text = false,
@@ -1961,6 +1985,7 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
             null,
         .save_prompt_images = if (session.v2 != null) savePromptImages else null,
         .commit_context_compaction = .{ .commit = commitContextCompaction },
+        .compaction_activity = .{ .begin = beginCompaction, .running = runningCompaction, .settle = settleCompaction },
         .recovery_checkpoint = if (session.journal != null)
             .{
                 .set = setJournalProgress,
@@ -1987,6 +2012,45 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .record_tool_call_rejected = recordToolCallRejected,
         .record_tool_call_failed = recordToolCallFailed,
     };
+}
+
+// Display-only notifications never participate in model history or compaction errors.
+fn compactionUpdate(ctx: *AcpContext, status: []const u8) bool {
+    const session = if (ctx.state.active_session) |*active| active else return false;
+    if (session.cancel_flag.load(.seq_cst)) return false;
+    const op = ctx.compaction.snapshot.operation orelse return false;
+    var storage: [256]u8 = undefined;
+    const update = std.mem.print(
+        &storage,
+        "{{\"sessionUpdate\":\"context_compaction\",\"id\":\"{s}\",\"status\":\"{s}\",\"origin\":\"{s}\"}}",
+        .{ ctx.compaction_id, status, @tagName(op.origin) },
+    ) catch return false;
+    ctx.sendUpdate(update) catch return false;
+    return true;
+}
+
+fn beginCompaction(raw: *anyopaque, origin: compaction_activity.Origin, turn_id: ?u64) compaction_activity.OperationId {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw));
+    const id = ctx.compaction.begin(origin, turn_id, 0);
+    _ = acp_types.generateMessageId(&ctx.compaction_id);
+    ctx.compaction_announced = compactionUpdate(ctx, "in_progress");
+    return id;
+}
+
+fn runningCompaction(_: *anyopaque, _: compaction_activity.OperationId, _: compaction_activity.Stage) void {}
+
+fn settleCompaction(raw: *anyopaque, id: compaction_activity.OperationId, feedback: compaction_activity.Feedback) void {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw));
+    const op = ctx.compaction.snapshot.operation orelse return;
+    if (op.id != id or !op.active()) return;
+    ctx.compaction.settle(id, feedback, 0);
+    if (!ctx.compaction_announced) return;
+    ctx.compaction_announced = false;
+    _ = compactionUpdate(ctx, switch (feedback.outcome) {
+        .succeeded => "completed",
+        .cancelled, .no_op, .busy => "cancelled",
+        .failed => "failed",
+    });
 }
 
 /// Drains steering at a turn boundary. ACP clients steer by sending
@@ -3018,11 +3082,26 @@ fn commitContextCompaction(
     const session = if (ctx.state.active_session) |*value| value else return error.SessionPersistenceUnavailable;
     session.session_write_mutex.lockUncancelable(io_mod.getIo());
     defer session.session_write_mutex.unlock(io_mod.getIo());
-    const prepared = try session_runtime.prepareCompactedHistory(ctx.alloc, session.session_rt.agent.history.items, summary, retained_from orelse .{ .turns = history_range.rawHistoryTurnCount(session.session_rt.agent.history.items) });
+    var retained_summary = summary;
+    const host_state = if (ctx.state.host_tools.search_enabled) try ctx.state.host_tools.saveState(ctx.alloc) else null;
+    defer if (host_state) |json| ctx.alloc.free(json);
+    retained_summary.host_state_json = host_state;
+    var prepared = try session_runtime.prepareCompactedHistory(ctx.alloc, session.session_rt.agent.history.items, retained_summary, retained_from orelse .{ .turns = history_range.rawHistoryTurnCount(session.session_rt.agent.history.items) });
     var prepared_owned = true;
     defer if (prepared_owned) types.freeHistoryTurnSlice(ctx.alloc, prepared);
+    const snapshots = try types.latestHostContexts(ctx.alloc, session.session_rt.agent.history.items);
+    defer ctx.alloc.free(snapshots);
+    for (snapshots) |entry| {
+        const copy = try types.dupeHistoryTurn(ctx.alloc, entry);
+        errdefer types.freeHistoryTurn(ctx.alloc, copy);
+        prepared = try ctx.alloc.realloc(prepared, prepared.len + 1);
+        prepared[prepared.len - 1] = copy;
+    }
+    var declaration_arena = std.heap.ArenaAllocator.init(ctx.alloc);
+    defer declaration_arena.deinit();
+    const declared = try hostDeclarations(ctx, declaration_arena.allocator(), prepared);
     if (session.v2) |v2| {
-        v2.commitCompaction(summary, active_prefix != null, retained_from) catch |err| {
+        v2.commitCompaction(retained_summary, active_prefix != null, retained_from) catch |err| {
             if (session_adapter.writeMayHaveLanded(err) and active_prefix != null) {
                 if (ctx.current_prompt_input) |input| input.retainImageSnapshots();
             }
@@ -3065,8 +3144,11 @@ fn commitContextCompaction(
         }
     }
     if (session.journal) |*journal| try journal.append(ctx.alloc, session.session_id, .{ .history_replaced = prepared });
+    const reinjected = prepared[prepared.len - snapshots.len ..];
     session.session_rt.commitCompactedHistory(ctx.alloc, prepared);
     prepared_owned = false;
+    for (reinjected) |entry| try server.notifyHostContext(ctx.state, session.session_id, entry.host_context);
+    @memcpy(ctx.state.host_tools.loaded, declared);
 }
 
 /// `recovery_checkpoint.set` for a journaled libfx session: the open turn
@@ -5847,4 +5929,90 @@ test "ACP prompt agent config carries request options from active session" {
     try std.testing.expectEqualStrings(state.cfg.gateway_chat_url, state.web_search_runtime.gateway_chat_url);
     try std.testing.expectEqualStrings("/models", tool_ctx.gateway_models_path);
     try std.testing.expect(tool_ctx.ultrafast_mode);
+}
+
+test "ACP compaction notifications pair identities and ignore stale or inactive operations" {
+    const Capture = struct {
+        frames: std.ArrayList(u8) = .empty,
+        fail: bool = false,
+        fn write(raw: ?*anyopaque, frame: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (self.fail) return error.BrokenPipe;
+            try self.frames.appendSlice(std.testing.allocator, frame);
+        }
+    };
+    const alloc = std.testing.allocator;
+    var state = try initTestAcpState(alloc, "/tmp/workspace", .ask);
+    defer state.deinit();
+    var capture: Capture = .{};
+    defer capture.frames.deinit(alloc);
+    state.writer = jsonrpc.Writer.initCallback(&capture, Capture.write);
+    var ctx = AcpContext{ .alloc = alloc, .state = &state, .session_id = "session_1" };
+    const activity = agentRuntimeDeps(&ctx).compaction_activity.?;
+    activity.settle(&ctx, @fromBackingInt(1), .{ .outcome = .no_op });
+    try std.testing.expectEqual(@as(usize, 0), capture.frames.items.len);
+    const outcomes = [_]compaction_activity.Outcome{ .succeeded, .cancelled, .failed, .no_op, .busy };
+    const origins = [_]compaction_activity.Origin{ .automatic, .manual, .provider_overflow };
+    for (outcomes, 0..) |outcome, index| {
+        capture.frames.clearRetainingCapacity();
+        const origin = origins[index % origins.len];
+        const id = activity.begin(&ctx, origin, 1);
+        activity.running(&ctx, id, .summary);
+        activity.settle(&ctx, @fromBackingInt(100), .{ .outcome = .failed });
+        activity.settle(&ctx, id, .{ .outcome = outcome });
+        activity.settle(&ctx, id, .{ .outcome = outcome });
+        var lines = std.mem.splitScalar(u8, capture.frames.items, '\n');
+        var first = try std.json.parseFromSlice(std.json.Value, alloc, lines.next().?, .{});
+        defer first.deinit();
+        var last = try std.json.parseFromSlice(std.json.Value, alloc, lines.next().?, .{});
+        defer last.deinit();
+        const start = first.value.object.get("params").?.object.get("update").?.object;
+        const end = last.value.object.get("params").?.object.get("update").?.object;
+        try std.testing.expectEqualStrings("context_compaction", start.get("sessionUpdate").?.string);
+        try std.testing.expectEqualStrings("in_progress", start.get("status").?.string);
+        try std.testing.expectEqualStrings(start.get("id").?.string, end.get("id").?.string);
+        try std.testing.expectEqualStrings(@tagName(origin), end.get("origin").?.string);
+        try std.testing.expectEqualStrings(switch (outcome) {
+            .succeeded => "completed",
+            .failed => "failed",
+            .cancelled, .no_op, .busy => "cancelled",
+        }, end.get("status").?.string);
+        try std.testing.expectEqualStrings("", lines.next().?);
+        try std.testing.expect(lines.next() == null);
+    }
+    capture.frames.clearRetainingCapacity();
+    state.active_session.?.cancel_flag.store(true, .seq_cst);
+    var id = activity.begin(&ctx, .automatic, 1);
+    activity.settle(&ctx, id, .{ .outcome = .cancelled });
+    try std.testing.expectEqual(@as(usize, 0), capture.frames.items.len);
+    state.active_session.?.cancel_flag.store(false, .seq_cst);
+    capture.fail = true;
+    id = activity.begin(&ctx, .automatic, 1);
+    activity.settle(&ctx, id, .{ .outcome = .failed });
+    try std.testing.expectEqual(@as(usize, 0), capture.frames.items.len);
+}
+
+fn loadDeferredToolMode(raw: *anyopaque) !@import("../core/agent/deferred_tool_mode.zig").Mode {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw));
+    const session = if (ctx.state.active_session) |*value| value else return .native;
+    if (session.v2) |v2| {
+        var prefs = try v2.currentPreferences(ctx.alloc);
+        defer prefs.deinit(ctx.alloc);
+        return prefs.deferred_tool_mode;
+    }
+    return .native;
+}
+
+fn saveDeferredToolMode(raw: *anyopaque, mode: @import("../core/agent/deferred_tool_mode.zig").Mode) !void {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw));
+    const session = if (ctx.state.active_session) |*value| value else return;
+    session.session_write_mutex.lockUncancelable(io_mod.getIo());
+    defer session.session_write_mutex.unlock(io_mod.getIo());
+    if (session.journal) |*journal_state| try journal_state.appendMarked(ctx.alloc, session.session_id, .{ .deferred_tool_mode = mode }, true);
+    if (session.v2) |v2| {
+        var prefs = try v2.currentPreferences(ctx.alloc);
+        defer prefs.deinit(ctx.alloc);
+        prefs.deferred_tool_mode = mode;
+        try v2.setPreferences(prefs);
+    }
 }

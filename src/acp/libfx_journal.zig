@@ -346,7 +346,7 @@ pub const Journal = struct {
                 .follow_up => self.follow_ups_waiting += 1,
                 .steer => self.steers_waiting += 1,
             },
-            .tool_intent, .history_replaced, .input_withdrawn, .turn_yielded, .tool_result => {},
+            .deferred_tool_mode, .tool_intent, .history_replaced, .input_withdrawn, .turn_yielded, .tool_result => {},
         }
     }
 
@@ -511,7 +511,7 @@ fn userOf(turn: *types.HistoryTurn) ?*types.UserTurn {
     return switch (turn.*) {
         .assistant => |*entry| &entry.user,
         .interrupted => |*entry| &entry.user,
-        .compacted_summary => null,
+        .compacted_summary, .host_context => null,
     };
 }
 
@@ -519,7 +519,7 @@ fn executionOf(turn: *types.HistoryTurn) ?*types.ExecutionMemory {
     return switch (turn.*) {
         .assistant => |*entry| &entry.execution,
         .interrupted => |*entry| &entry.execution,
-        .compacted_summary => null,
+        .compacted_summary, .host_context => null,
     };
 }
 
@@ -621,7 +621,7 @@ fn keepNeededImages(
         const user, const execution = switch (turn) {
             .assistant => |entry| .{ entry.user, entry.execution },
             .interrupted => |entry| .{ entry.user, entry.execution },
-            .compacted_summary => continue,
+            .compacted_summary, .host_context => continue,
         };
         try countOpenedImages(alloc, &sizes, &names, user.images, &images.missing);
         try countOpenedToolImages(alloc, &sizes, &names, execution, &images.missing);
@@ -717,6 +717,7 @@ pub fn open(
         };
         saved_meta = try decoded.?.meta.dupe(alloc);
         base = .{
+            .deferred_tool_mode = decoded.?.meta.deferred_tool_mode,
             .history = decoded.?.history,
             .cursor = .{ .next_seq = parsed.seq + 1, .turn = parsed.turn },
             .last_turn_id = parsed.last_turn_id,
@@ -735,6 +736,7 @@ pub fn open(
         return error.ImagesMissing;
     }
     if (folded.history.len > 0) try runtime.agent.restoreHistory(alloc, folded.history);
+    runtime.agent.deferred_tool_mode = folded.deferred_tool_mode;
     if (decoded) |value| runtime.agent.turn_usage = value.usage;
     var state: Journal = .{
         .writer = writer,

@@ -197,9 +197,9 @@ pub fn compact(alloc: Allocator, request: Request, model: Model, store: ?compact
         part.earlier = earlier;
         part.turns = request.turns[start..end];
         part.last_turn_open = request.last_turn_open and end == request.turns.len;
-        // The conversation holds every turn, so it serves only a request for
-        // all of them.
-        if (start > 0 or end < request.turns.len) part.conversation_room = null;
+        // The first part can reuse the parent prefix; subsequent parts have
+        // their own accumulated summary context.
+        if (start > 0) part.conversation_room = null;
         var next = try compactPart(alloc, part, users, model, store, part_fold);
         if (end == request.turns.len) {
             errdefer next.deinit();
@@ -567,7 +567,7 @@ const First = struct { asked: Asked, prompt: Prompt, request_start: usize };
 
 /// Asks for the first notes: right after the conversation itself when the
 /// model can be asked that way and the request fits, so the provider can
-/// reuse what it cached; otherwise, or when that fails, with the turns
+/// reuse what it cached; otherwise with the turns
 /// written out. Scratch memory is from `scratch`; `out` owns the notes.
 fn askFirstNotes(alloc: Allocator, out: Allocator, scratch: Allocator, plan: Plan, request: Request, model: Model, known: ledger.Known) Error!First {
     if (request.conversation_room) |room| conversation: {
@@ -583,13 +583,8 @@ fn askFirstNotes(alloc: Allocator, out: Allocator, scratch: Allocator, plan: Pla
             break :conversation;
         }
         const prompt: Prompt = .{ .model = request.model, .system = "", .user = text.items, .after_conversation = true };
-        const asked = askNotes(out, model, prompt, known, plan.earlier.entries, checkpoint.highestIds(plan.earlier)) catch |err| switch (err) {
-            error.Cancelled, error.OutOfMemory => |fatal| return fatal,
-            else => {
-                trace.log(true, "compaction notes after the conversation failed err={s}; writing the turns out", .{@errorName(err)});
-                break :conversation;
-            },
-        };
+        // A failed cached fork must not silently retry with a different prefix.
+        const asked = try askNotes(out, model, prompt, known, plan.earlier.entries, checkpoint.highestIds(plan.earlier));
         return .{ .asked = asked, .prompt = prompt, .request_start = request_start };
     }
     const transcript = try fittingTranscript(alloc, scratch, plan, request.max_prompt_tokens);
@@ -1516,16 +1511,12 @@ test "after the conversation the model reads only the request, with every turn f
     try testing.expect(store.find(.tool, 1) != null);
 }
 
-test "a request after the conversation that fails or does not fit writes the turns out" {
+test "a failed cached fork stops while an oversized fork uses the compaction boundary" {
     var failing = FakeModel{ .fail_after_conversation = true };
     defer failing.deinit();
-    var result = try compact(testing.allocator, .{ .model = "m", .turns = &sample, .conversation_room = 100_000 }, failing.model(), null);
-    defer result.deinit();
-    try testing.expectEqual(@as(usize, 2), failing.calls);
+    try testing.expectError(error.ModelFailed, compact(testing.allocator, .{ .model = "m", .turns = &sample, .conversation_room = 100_000 }, failing.model(), null));
+    try testing.expectEqual(@as(usize, 1), failing.calls);
     try testing.expectEqual(@as(usize, 1), failing.after_conversation_calls);
-    try testing.expectEqualStrings(system_prompt, failing.seen_system);
-    try testing.expect(std.mem.startsWith(u8, failing.seen_user.items, "[Turn 1]\n"));
-    try testing.expect(std.mem.find(u8, result.text, sample_fact) != null);
 
     var cramped = FakeModel{};
     defer cramped.deinit();
@@ -1555,7 +1546,7 @@ test "a follow-up after the conversation lists only the skipped turns, findable"
     try testing.expectEqualStrings("first build", result.compacted.turns[0].tools[0].why);
 }
 
-test "the conversation serves only a request for every turn" {
+test "the first compaction chunk reuses the conversation prefix" {
     const output = text_utils.repeat("x", 4000);
     const turns = [_]Turn{ workedTurn("first", "call-1", output), workedTurn("second", "call-2", output) };
     var model = FakeModel{ .replies = &.{ "Turn 1\nIn between: Ran the first build.", "Turn 2\nIn between: Ran the second build." } };
@@ -1565,7 +1556,7 @@ test "the conversation serves only a request for every turn" {
     var result = try compact(testing.allocator, .{ .model = "m", .turns = &turns, .max_prompt_tokens = room, .conversation_room = 100_000 }, model.model(), null);
     defer result.deinit();
     try testing.expectEqual(@as(usize, 2), model.calls);
-    try testing.expectEqual(@as(usize, 0), model.after_conversation_calls);
+    try testing.expectEqual(@as(usize, 1), model.after_conversation_calls);
     try testing.expectEqualStrings("Ran the second build.", result.compacted.turns[1].work);
 }
 

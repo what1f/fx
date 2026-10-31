@@ -57,11 +57,10 @@ pub const Size = struct {
         return std.math.cast(usize, @as(u128, tokens) * correction.estimated / correction.measured) orelse std.math.maxInt(usize);
     }
 
-    /// The sizes for a model, compacting automatically at `percent` of its
-    /// usable input.
-    pub fn of(capabilities: model_capabilities.Capabilities, percent: u8) Size {
+    /// The sizes for a model with the selected automatic compaction trigger.
+    pub fn of(capabilities: model_capabilities.Capabilities, trigger: settings.Trigger) Size {
         return .{
-            .compact_at_tokens = compactAtTokens(capabilities, percent),
+            .compact_at_tokens = compactAtTrigger(capabilities, trigger),
             .usable_tokens = usableInputTokens(capabilities),
         };
     }
@@ -138,8 +137,14 @@ pub const Size = struct {
     }
 };
 
-/// Request size, in tokens, at which automatic compaction starts: `percent`
-/// of the model's usable input.
+/// Request size, in tokens, at which the selected trigger starts compaction.
+fn compactAtTrigger(capabilities: model_capabilities.Capabilities, trigger: settings.Trigger) ?usize {
+    return switch (trigger) {
+        .percent => |percent| compactAtTokens(capabilities, percent),
+        .tokens => |tokens| if (compactAtTokens(capabilities, settings.max_percent)) |limit| @min(tokens, limit) else tokens,
+    };
+}
+
 fn compactAtTokens(capabilities: model_capabilities.Capabilities, percent: u8) ?usize {
     const usable = usableInputTokens(capabilities) orelse return null;
     return percentOf(usable, @min(settings.max_percent, @max(settings.min_percent, percent)));
@@ -187,21 +192,25 @@ fn selectRecentContext(
         if (selected_any and turns_used >= max_turns) break;
         raw_count -= 1;
         const user = switch (turn) {
+            .host_context => |entry| entry.text,
             .assistant => |entry| entry.user.text,
             .interrupted => |entry| entry.user.text,
             .compacted_summary => unreachable,
         };
         const reply = switch (turn) {
+            .host_context => "",
             .assistant => |entry| entry.assistant,
             .interrupted => |entry| entry.assistant orelse "",
             .compacted_summary => unreachable,
         };
         const execution = switch (turn) {
+            .host_context => types.ExecutionMemory{},
             .assistant => |entry| entry.execution,
             .interrupted => |entry| entry.execution,
             .compacted_summary => unreachable,
         };
         const replay = switch (turn) {
+            .host_context => null,
             .assistant => |entry| entry.provider_replay,
             .interrupted => null,
             .compacted_summary => unreachable,
@@ -593,4 +602,21 @@ test "a request after the conversation gets what the conversation leaves" {
     try testing.expectEqual(@as(?usize, null), (Size{ .compact_at_tokens = 96_000, .usable_tokens = 120_000 }).roomAfterConversation());
     try testing.expectEqual(@as(?usize, null), (Size{ .compact_at_tokens = 96_000, .usable_tokens = 120_000, .request_tokens = 120_000 }).roomAfterConversation());
     try testing.expectEqual(@as(?usize, null), (Size{ .compact_at_tokens = 96_000, .usable_tokens = 120_000, .request_tokens = 100_000, .overflow = true }).roomAfterConversation());
+}
+
+test "token trigger respects the window cap and works without a known window" {
+    const capabilities = model_capabilities.Capabilities{ .context_window = 8192, .max_output_tokens = 1024 };
+    try testing.expectEqual(@as(?usize, 3000), compactAtTrigger(capabilities, .{ .tokens = 3000 }));
+    try testing.expectEqual(@as(?usize, 5734), compactAtTrigger(capabilities, .{ .tokens = 9000 }));
+    try testing.expectEqual(@as(?usize, 131072), compactAtTrigger(.{}, .{ .tokens = 131072 }));
+    try testing.expectEqual(compactAtTokens(capabilities, 10), compactAtTrigger(capabilities, .{ .percent = 10 }));
+    try testing.expectEqual(compactAtTokens(capabilities, 80), compactAtTrigger(capabilities, .{ .percent = 80 }));
+    var size = Size.of(capabilities, .{ .tokens = 3000 });
+    size.request_tokens = 2999;
+    try testing.expect(!size.due());
+    size.request_tokens = 3000;
+    try testing.expect(size.due());
+    size.request_tokens = 3001;
+    try testing.expect(size.due());
+    try testing.expectEqual(@as(?usize, 7168), size.usable_tokens);
 }

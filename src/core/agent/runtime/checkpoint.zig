@@ -37,12 +37,13 @@ pub const Error = Allocator.Error || error{
 /// empty when it gave none. Older checkpoints carry none, and readers that
 /// predate it ignore it.
 pub const Meta = struct {
+    deferred_tool_mode: @import("../deferred_tool_mode.zig").Mode = .native,
     libfx_version: []const u8 = "",
     tool_schema_hash: []const u8 = "",
     model: []const u8 = "",
 
     pub fn isEmpty(self: Meta) bool {
-        return self.libfx_version.len == 0 and self.tool_schema_hash.len == 0 and self.model.len == 0;
+        return self.deferred_tool_mode == .native and self.libfx_version.len == 0 and self.tool_schema_hash.len == 0 and self.model.len == 0;
     }
 
     pub fn fits(self: Meta) bool {
@@ -57,7 +58,7 @@ pub const Meta = struct {
         errdefer alloc.free(libfx_version);
         const tool_schema_hash = try alloc.dupe(u8, self.tool_schema_hash);
         errdefer alloc.free(tool_schema_hash);
-        return .{ .libfx_version = libfx_version, .tool_schema_hash = tool_schema_hash, .model = try alloc.dupe(u8, self.model) };
+        return .{ .deferred_tool_mode = self.deferred_tool_mode, .libfx_version = libfx_version, .tool_schema_hash = tool_schema_hash, .model = try alloc.dupe(u8, self.model) };
     }
 
     /// Frees a `Meta` that `dupe` or `decode` returned.
@@ -75,6 +76,8 @@ pub const Meta = struct {
         try std.json.Stringify.value(self.tool_schema_hash, .{}, writer);
         try writer.writeAll(",\"model\":");
         try std.json.Stringify.value(self.model, .{}, writer);
+        try writer.writeAll(",\"deferredToolMode\":");
+        try std.json.Stringify.value(@tagName(self.deferred_tool_mode), .{}, writer);
         try writer.writeByte('}');
     }
 };
@@ -319,6 +322,10 @@ pub fn metaFromJson(value: std.json.Value) error{InvalidMeta}!Meta {
             if (text != .string) return error.InvalidMeta;
             @field(meta, field[1]) = text.string;
         }
+    }
+    if (value.object.get("deferredToolMode")) |mode| {
+        if (mode != .string) return error.InvalidMeta;
+        meta.deferred_tool_mode = std.meta.stringToEnum(@import("../deferred_tool_mode.zig").Mode, mode.string) orelse return error.InvalidMeta;
     }
     if (!meta.fits()) return error.InvalidMeta;
     return meta;

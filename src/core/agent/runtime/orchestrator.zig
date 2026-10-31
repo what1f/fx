@@ -6392,8 +6392,8 @@ pub const BeforeSummary = struct {
 /// The sizes compaction works with for `model`, including what `agent`
 /// measured of its recent requests: their fixed part, and how far fx's token
 /// estimate ran from the provider's count.
-pub fn compactionSize(agent: *const runtime_agent.Agent, capabilities: model_capabilities.Capabilities, percent: u8, model: []const u8) compactor.Size {
-    var size = compactor.Size.of(capabilities, percent);
+pub fn compactionSize(agent: *const runtime_agent.Agent, capabilities: model_capabilities.Capabilities, trigger: compactor.Trigger, model: []const u8) compactor.Size {
+    var size = compactor.Size.of(capabilities, trigger);
     size.fixed_tokens = agent.request_fixed_tokens;
     if (agent.request_token_calibration) |*calibration| {
         const cost = calibration.cost;
@@ -6557,10 +6557,10 @@ test "compaction activity automatic error provenance excludes secondary finaliza
             var agent: runtime_agent.Agent = .{};
             defer agent.deinit(alloc);
             try agent.restoreHistory(alloc, job.history);
-            // The conversation's model fails, then the fallback model does too.
+            // A cached summary fork fails without changing the parent prefix.
             const expected: anyerror = if (secondary_failure) error.ContextCapacityExceeded else error.ModelFailed;
             try std.testing.expectError(expected, processAgentPrompt(&agent, &deps, null, support.testLifecycleContext(hooks.RuntimeView.empty(), alloc, fixture.config().workspace_root), fixture.config(), job));
-            try std.testing.expectEqual(@as(usize, 2), gateway.index);
+            try std.testing.expectEqual(@as(usize, 1), gateway.index);
             if (bound) {
                 const op = host.activity.snapshot.operation.?;
                 try std.testing.expectEqual(compaction_activity.Origin.automatic, op.origin);
@@ -7549,7 +7549,11 @@ fn processQueuedPromptLoop(
                 config.first_call_tool_choice
             else
                 .auto;
+            if (agent.deferred_tool_mode == .native) if (deps.load_deferred_tool_mode) |load| {
+                agent.deferred_tool_mode = try load(deps.ctx);
+            };
             var request_data = agent_stream_provider.RequestData{
+                .deferred_tool_mode = agent.deferred_tool_mode,
                 .model = gateway_model,
                 .instructions = gateway_instructions.items,
                 .messages = request_messages,
@@ -7624,7 +7628,7 @@ fn processQueuedPromptLoop(
                     const fixed = if (applicable_calibration) |calibration| runtime_prompt_context.calibrateProviderRequest(measured, calibration) else measured;
                     break :fixed fixed.estimated_input_tokens;
                 } else null;
-                var size = compactionSize(agent, request_capabilities, config.auto_compact_percent, gateway_model);
+                var size = compactionSize(agent, request_capabilities, config.auto_compact orelse .{ .percent = config.auto_compact_percent }, gateway_model);
                 size.request_tokens = request_cost.estimated_input_tokens;
                 size.overflow = overflow_pending;
                 if (just_rebuilt_request) compactor.traceLog(false, "request after compaction estimated_tokens={d} fixed_tokens={any} usable_tokens={any} after_tokens={d}", .{ request_cost.estimated_input_tokens, size.fixed_tokens, size.usable_tokens, size.afterTokens() });
@@ -7700,6 +7704,8 @@ fn processQueuedPromptLoop(
                         // The request just built starts like the one sent
                         // before it, so the provider has most of it cached.
                         // After an overflow it no longer fits.
+                        .negotiated_deferred_tool_mode = &agent.deferred_tool_mode,
+                        .deferred_tool_mode_commit = if (deps.save_deferred_tool_mode) |save| .{ .context = deps.ctx, .save_fn = save } else null,
                         .conversation = if (overflow_pending) null else request_data,
                     };
                     var compaction_failure: ?compaction_activity.ErrorProvenance = null;
@@ -7747,12 +7753,14 @@ fn processQueuedPromptLoop(
                         var retained_messages: std.ArrayList(ChatMessage) = .empty;
                         try session_runtime.appendHistoryChatMessages(arena, &retained_messages, outcome.retained_history);
                         try projectEmptyHistoryReplay(arena, deps.agent_stream_provider, .{ .provider = job.provider, .model = gateway_model }, retained_messages.items);
+                        try session_runtime.appendHistoryChatMessages(arena, &retained_messages, config.context_snapshots);
                         active_compaction_handoff = outcome.model_text;
                         trace_count_after_compaction = true;
                         active_compaction_history_tail = retained_messages.items;
-                        const next_history = try arena.alloc(HistoryTurn, outcome.retained_history.len + 1);
+                        const next_history = try arena.alloc(HistoryTurn, outcome.retained_history.len + 1 + config.context_snapshots.len);
                         next_history[0] = .{ .compacted_summary = outcome.checkpoint };
-                        @memcpy(next_history[1..], outcome.retained_history);
+                        @memcpy(next_history[1..][0..outcome.retained_history.len], outcome.retained_history);
+                        @memcpy(next_history[1 + outcome.retained_history.len ..], config.context_snapshots);
                         compaction_history = next_history;
                         finalization.compacted_execution = .{
                             .tool_steps = finalization.compacted_execution.tool_steps + active_cut.tool_steps,
@@ -7799,6 +7807,13 @@ fn processQueuedPromptLoop(
                             );
                             return;
                         }
+                        continue;
+                    }
+                    if (request_data.deferred_tool_mode != agent.deferred_tool_mode) {
+                        // A successful summary may negotiate even when no new
+                        // compacted context is installed. Rebuild the same turn
+                        // with the committed mode before sending its main call.
+                        skip_next_preflight_refresh = true;
                         continue;
                     }
                 }
@@ -7869,6 +7884,9 @@ fn processQueuedPromptLoop(
                 .provider_options = request_data.provider_options,
                 .max_output_tokens = request_data.max_output_tokens,
                 .budget = request_data.budget,
+                .deferred_tool_mode = agent.deferred_tool_mode,
+                .negotiated_deferred_tool_mode = &agent.deferred_tool_mode,
+                .deferred_tool_mode_commit = if (deps.save_deferred_tool_mode) |save| .{ .context = deps.ctx, .save_fn = save } else null,
                 .prepared_request_body = prepared_request_body,
                 .trace_ctx = step_ctx,
                 .content_capture_limit = null,

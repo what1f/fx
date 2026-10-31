@@ -1634,7 +1634,7 @@ pub const Session = struct {
             const stores = switch (turn.*) {
                 .assistant => |entry| storesBodies(entry.execution),
                 .interrupted => |entry| storesBodies(entry.execution),
-                .compacted_summary => false,
+                .compacted_summary, .host_context => false,
             };
             if (stores) try self.openTurnLocked();
         }
@@ -1648,7 +1648,7 @@ pub const Session = struct {
         const execution = switch (turn.*) {
             .assistant => |*entry| &entry.execution,
             .interrupted => |*entry| &entry.execution,
-            .compacted_summary => return,
+            .compacted_summary, .host_context => return,
         };
         for (execution.tool_steps) |step| for (step.tool_results) |*result| {
             if (result.output_handle != null) continue;
@@ -1964,7 +1964,7 @@ pub const Session = struct {
         const stores = switch (copy) {
             .assistant => |entry| storesBodies(entry.execution),
             .interrupted => |entry| storesBodies(entry.execution),
-            .compacted_summary => return error.InvalidConversationFrame,
+            .compacted_summary, .host_context => return error.InvalidConversationFrame,
         };
         if (stores) try self.openTurnLocked();
         try session_log.externalizeConversationTurnResults(a, &copy, try self.capabilityLocked());
@@ -2132,9 +2132,14 @@ pub const Session = struct {
     // -- settings ------------------------------------------------------------
 
     pub fn setPreferences(self: *Session, preferences: session_codec.DurableSessionPreferences) !void {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         defer arena.deinit();
-        _ = try self.write(&.{.{ .set = .{ .key = .prefs, .value = try encodePreferences(arena.allocator(), preferences, self.instructions) } }});
+        const current = try self.currentPreferences(arena.allocator());
+        var saved_preferences = preferences;
+        if (@backingInt(current.deferred_tool_mode) > @backingInt(saved_preferences.deferred_tool_mode)) saved_preferences.deferred_tool_mode = current.deferred_tool_mode;
+        _ = try self.write(&.{.{ .set = .{ .key = .prefs, .value = try encodePreferences(arena.allocator(), saved_preferences, self.instructions) } }});
     }
 
     // -- children (D22) ------------------------------------------------------
@@ -2349,7 +2354,7 @@ pub const Session = struct {
                 const user = switch (value) {
                     .assistant => |entry| entry.user,
                     .interrupted => |entry| entry.user,
-                    .compacted_summary => return,
+                    .compacted_summary, .host_context => return,
                 };
                 const prompt = try sink.alloc.dupe(u8, user.text);
                 errdefer sink.alloc.free(prompt);
@@ -3313,7 +3318,7 @@ const Conversion = struct {
                 const execution = switch (whole.turn) {
                     .assistant => |entry| entry.execution,
                     .interrupted => |entry| entry.execution,
-                    .compacted_summary => continue,
+                    .compacted_summary, .host_context => continue,
                 };
                 for (execution.tool_steps) |tool_step| for (tool_step.tool_results) |result| {
                     const handle = result.output_handle orelse continue;
@@ -4339,7 +4344,7 @@ fn presentStoredResults(src: Source, alloc: Allocator, turn: types.HistoryTurn) 
     const execution = switch (shown) {
         .assistant => |*entry| &entry.execution,
         .interrupted => |*entry| &entry.execution,
-        .compacted_summary => return shown,
+        .compacted_summary, .host_context => return shown,
     };
     for (execution.tool_steps) |*step| for (step.tool_results) |*result| {
         const handle = result.output_handle orelse continue;
@@ -4872,6 +4877,7 @@ const instructions_key = "instructions";
 
 fn encodePreferences(alloc: Allocator, preferences: session_codec.DurableSessionPreferences, instructions: ?[]const u8) ![]u8 {
     const Saved = struct {
+        deferred_tool_mode: ?@import("../agent/deferred_tool_mode.zig").Mode,
         provider: model_provider.ProviderId,
         model: []const u8,
         effort: []const u8,
@@ -4882,6 +4888,7 @@ fn encodePreferences(alloc: Allocator, preferences: session_codec.DurableSession
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
     try std.json.Stringify.value(Saved{
+        .deferred_tool_mode = if (preferences.deferred_tool_mode == .native) null else preferences.deferred_tool_mode,
         .provider = preferences.provider,
         .model = preferences.model,
         .effort = preferences.effort.label(),
@@ -9014,4 +9021,26 @@ test "only the adapter imports the session manager" {
         checked += 1;
     }
     try testing.expect(checked > 100);
+}
+
+test "deferred mode preferences survive ordinary settings updates" {
+    var t: TestHome = undefined;
+    try t.init();
+    defer t.deinit();
+    const alloc = testing.allocator;
+    var model = "test-model".*;
+    const session = try Session.create(alloc, &t.store, "/w", .ask, testSeed(&model));
+    defer session.close();
+    try session.commitTurn(assistantTurn("start", "ok"), types.ConversationLanguage.default());
+    var preferences = try session.currentPreferences(alloc);
+    defer preferences.deinit(alloc);
+    preferences.deferred_tool_mode = .reference;
+    try session.setPreferences(preferences);
+    preferences.deferred_tool_mode = .native;
+    preferences.fast_mode = true;
+    try session.setPreferences(preferences);
+    var current = try session.currentPreferences(alloc);
+    defer current.deinit(alloc);
+    try testing.expectEqual(@import("../agent/deferred_tool_mode.zig").Mode.reference, current.deferred_tool_mode);
+    try testing.expect(current.fast_mode);
 }

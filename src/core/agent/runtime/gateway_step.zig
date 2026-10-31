@@ -415,10 +415,11 @@ pub fn recordSelectedDynamicTool(alloc: Allocator, tools: *std.ArrayList(agent_s
             existing.description = description.string;
             existing.input_schema = input_schema;
             existing.mcp_binding = selected.mcp_binding;
+            existing.deferred = if (schema.object.get("deferred")) |v| v == .bool and v.bool else false;
             return;
         }
     }
-    try tools.append(alloc, .{ .name = name, .description = description.string, .input_schema = input_schema, .mcp_binding = selected.mcp_binding });
+    try tools.append(alloc, .{ .name = name, .description = description.string, .input_schema = input_schema, .mcp_binding = selected.mcp_binding, .deferred = if (schema.object.get("deferred")) |v| v == .bool and v.bool else false });
 }
 
 pub fn gatewayHttpErrorDetail(

@@ -192,7 +192,13 @@ pub fn prepareReadyCall(alloc: Allocator, call: ToolCall, config: Config) !Resul
                 return .{ .candidate = .{ .kind = .deferred_dynamic } };
             }
         }
-        return .{ .terminal = .{ .kind = .unsupported } };
+        return .{ .terminal = .{
+            .kind = .unsupported,
+            .model_output = if (config.tool_registry.lookup("tool_search") != null)
+                try @import("../tooling/host_tool_runtime.zig").unknownToolFailure(alloc, call.name)
+            else
+                null,
+        } };
     };
 
     if (try classifyWithCallback(
@@ -534,7 +540,7 @@ pub fn retainedContextTargets(
         const execution = switch (history[index]) {
             .assistant => |turn| turn.execution,
             .interrupted => |turn| turn.execution,
-            .compacted_summary => continue,
+            .compacted_summary, .host_context => continue,
         };
         try collector.collect(execution);
     }

@@ -77,7 +77,10 @@ pub const max_snapshot_bytes: usize = checkpoint_codec.max_checkpoint_bytes;
 const max_safe_position: u64 = (1 << 53) - 1;
 pub const max_history_turns = checkpoint_codec.max_history_turns;
 
+const Mode = @import("../deferred_tool_mode.zig").Mode;
+
 const EventType = enum {
+    deferred_tool_mode,
     turn_committed,
     turn_progress,
     tool_intent,
@@ -133,6 +136,7 @@ pub const max_turn_id_bytes = 128;
 
 /// Borrows its payload only for `Cursor.write`.
 pub const Event = union(EventType) {
+    deferred_tool_mode: Mode,
     turn_committed: types.HistoryTurn,
     turn_progress: Progress,
     tool_intent: []const types.ToolCall,
@@ -187,6 +191,10 @@ pub const Cursor = struct {
             @tagName(event),
         });
         switch (event) {
+            .deferred_tool_mode => |mode| {
+                try writer.writeAll(",\"data\":");
+                try std.json.Stringify.value(@tagName(mode), .{}, writer);
+            },
             .turn_committed => |turn| {
                 try writer.writeAll(",\"data\":");
                 if (stored) |names|
@@ -281,7 +289,7 @@ fn eventNamesImages(event: Event, stored: ?*const session_codec.StoredImages) bo
             if (session_codec.turnNamesImages(turn, stored)) break true;
         } else false,
         .tool_result => |result| session_codec.toolImagesNameImages(result.images, stored),
-        .tool_intent, .turn_progress_cleared, .input_accepted, .input_withdrawn, .turn_yielded => false,
+        .deferred_tool_mode, .tool_intent, .turn_progress_cleared, .input_accepted, .input_withdrawn, .turn_yielded => false,
     };
 }
 
@@ -463,6 +471,7 @@ pub const LoadError = Allocator.Error || error{
 
 /// A session rebuilt from its events. Owns every slice.
 pub const Folded = struct {
+    deferred_tool_mode: Mode = .native,
     history: []types.HistoryTurn,
     /// The turn a crash left open: progress with no commit or clear after it.
     open_turn: ?session_codec.RecoveryCheckpoint,
@@ -614,6 +623,7 @@ fn stringField(value: std.json.Value, name: []const u8) LoadError![]const u8 {
 /// it. A snapshot has no follow-up waiting; it is a quiet prefix, or a turn
 /// that yielded with no input waiting for it.
 pub const Base = struct {
+    deferred_tool_mode: Mode = .native,
     history: []const types.HistoryTurn = &.{},
     cursor: Cursor = .{},
     /// The id of the prefix's last turn.
@@ -643,6 +653,7 @@ pub fn foldFrom(alloc: Allocator, events_json: []const u8, base: Base) LoadError
     };
     if (parsed != .array) return error.InvalidJournal;
 
+    var deferred_mode = base.deferred_tool_mode;
     var history: std.ArrayList(types.HistoryTurn) = .empty;
     defer {
         for (history.items) |turn| types.freeHistoryTurn(alloc, turn);
@@ -685,6 +696,13 @@ pub fn foldFrom(alloc: Allocator, events_json: []const u8, base: Base) LoadError
         // A yield stands only until the turn does anything more.
         if (event.kind != .turn_yielded) yielded = false;
         switch (event.kind) {
+            .deferred_tool_mode => {
+                const data = event.data orelse return error.InvalidJournal;
+                if (data != .string) return error.InvalidJournal;
+                const mode = std.meta.stringToEnum(Mode, data.string) orelse return error.InvalidJournal;
+                if (@backingInt(mode) < @backingInt(deferred_mode)) return error.InvalidJournal;
+                deferred_mode = mode;
+            },
             .turn_committed => {
                 const turn = try parseTurn(alloc, event.data orelse return error.InvalidJournal, base.images);
                 // The same rule the session applies when it commits the turn.
@@ -845,6 +863,7 @@ pub fn foldFrom(alloc: Allocator, events_json: []const u8, base: Base) LoadError
     errdefer if (last_turn_id) |id| alloc.free(id);
     const owned = try history.toOwnedSlice(alloc);
     return .{
+        .deferred_tool_mode = deferred_mode,
         .history = owned,
         .open_turn = open_turn,
         .running_calls = unanswered,
@@ -2029,4 +2048,17 @@ test "a yielded snapshot names its open turn's stored images" {
     defer folded.deinit(alloc);
     try std.testing.expectEqualStrings(png, folded.open_turn.?.user.images[0].inline_data.?);
     try std.testing.expect(folded.yielded);
+}
+
+test "deferred mode journal recovery is monotone and leaves history unchanged" {
+    const alloc = std.testing.allocator;
+    const bytes = try testJournal(alloc, &.{ .{ .deferred_tool_mode = .reference }, .{ .deferred_tool_mode = .call_tool } });
+    defer alloc.free(bytes);
+    var folded = try fold(alloc, bytes);
+    defer folded.deinit(alloc);
+    try std.testing.expectEqual(Mode.call_tool, folded.deferred_tool_mode);
+    try std.testing.expectEqual(@as(usize, 0), folded.history.len);
+    const invalid = try testJournal(alloc, &.{ .{ .deferred_tool_mode = .reference }, .{ .deferred_tool_mode = .native } });
+    defer alloc.free(invalid);
+    try std.testing.expectError(error.InvalidJournal, fold(alloc, invalid));
 }

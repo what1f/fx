@@ -3,6 +3,12 @@
 
 const std = @import("std");
 
+/// One automatic compaction trigger. Token limits retain the window safety cap.
+pub const Trigger = union(enum) {
+    percent: u8,
+    tokens: usize,
+};
+
 /// Automatic compaction starts once a request reaches this share of the
 /// model's usable input window.
 pub const default_percent: u8 = 80;

@@ -1692,7 +1692,7 @@ pub const FakeAgentRuntimeDeps = struct {
                 }
                 try self.record("history:interrupted", .{});
             },
-            .compacted_summary => {},
+            .compacted_summary, .host_context => {},
         }
     }
 
@@ -1738,7 +1738,7 @@ pub const FakeAgentRuntimeDeps = struct {
                         self.finish_assistant_text = try self.alloc.dupe(u8, entry.assistant);
                     },
                     .interrupted => self.interrupted_event_count += 1,
-                    .compacted_summary => {},
+                    .compacted_summary, .host_context => {},
                 }
                 try self.record("event:finish_prompt", .{});
             },

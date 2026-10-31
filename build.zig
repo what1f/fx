@@ -80,6 +80,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const exe_tests = b.addTest(.{
+        .filters = if (b.option([]const u8, "test-filter", "Run matching unit tests")) |filter| &.{filter} else &.{},
         .root_module = exe.root_module,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
@@ -104,6 +105,8 @@ pub fn build(b: *std.Build) void {
     session_manager_test_step.dependOn(&run_session_manager_tests.step);
     session_manager_test_step.dependOn(&run_session_manager_hook_tests.step);
 
+    const focused_test_step = b.step("test-focused", "Run filtered runtime tests");
+    focused_test_step.dependOn(&run_exe_tests.step);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_session_manager_tests.step);
@@ -115,6 +118,31 @@ pub fn build(b: *std.Build) void {
     if (napi_surface != .none) {
         addNapiArtifact(b, napi_surface, target, git_commit, app_version, update_channel);
     }
+
+    const c_options = b.addOptions();
+    const c_sanitize_thread = b.option(bool, "libfx-tsan", "Instrument the C ABI core with Thread Sanitizer") orelse false;
+    c_options.addOption([]const u8, "git_commit", git_commit);
+    c_options.addOption([]const u8, "app_version", app_version);
+    c_options.addOption([]const u8, "update_channel", @tagName(update_channel));
+    c_options.addOption(bool, "libfx", true);
+    const c_core = b.addLibrary(.{
+        .name = "fx_core",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/c_core_main.zig"),
+            .target = target,
+            .optimize = .safe,
+            .link_libc = true,
+            .sanitize_thread = c_sanitize_thread,
+        }),
+    });
+    c_core.bundle_compiler_rt = true;
+    c_core.root_module.addImport("build_options", c_options.createModule());
+    const c_session_manager = addSessionManager(b, c_core.root_module, target, .safe, null);
+    c_session_manager.sanitize_thread = c_sanitize_thread;
+    const c_install = b.addInstallArtifact(c_core, .{});
+    const c_step = b.step("libfx-c", "Build the libfx C ABI core library");
+    c_step.dependOn(&c_install.step);
 
     const mcp_test_exports = b.createModule(.{
         .root_source_file = b.path("src/mcp_test_exports.zig"),
