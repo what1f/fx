@@ -109,9 +109,11 @@ pub const Size = struct {
         return self.estimate(@max(after -| fixed, after / 4));
     }
 
-    /// Estimated tokens the compacted text may use so compaction still frees
-    /// at least half the room: half the compaction point less the fixed part
-    /// and `kept_used`, the turns kept unchanged. Past it, the conversation
+    /// Estimated tokens the compacted text may use: the room the compacted
+    /// conversation gets right after compaction less `kept_used`, the turns
+    /// kept unchanged. That room is a share of the model's window, so the
+    /// compacted text shrinks with the window. It never passes half the
+    /// compaction point less the fixed part, past which the conversation
     /// would compact again right away and soon not fit at all.
     pub fn compactedTokens(self: Size, kept_used: usize) usize {
         const point = self.compact_at_tokens orelse self.request_tokens orelse return std.math.maxInt(usize);
@@ -120,7 +122,8 @@ pub const Size = struct {
             most = @min(most, rejected / 2);
         };
         const fixed = self.fixed_tokens orelse most / 4;
-        return self.estimate(@max(most -| fixed, most / 4)) -| kept_used;
+        const frees_half = self.estimate(@max(most -| fixed, most / 4));
+        return @min(frees_half, self.conversationTokens()) -| kept_used;
     }
 
     /// The request has reached the automatic compaction point.
@@ -459,12 +462,17 @@ test "automatic compaction starts at the configured share of usable input" {
     try testing.expectEqual(@as(?usize, null), compactAtTokens(.{}, 80));
 }
 
-test "the compacted text may use half the compaction point, less the fixed part and the kept turns" {
+test "the compacted text fits the room after compaction, less the fixed part and the kept turns" {
+    // A fifth of the usable input less the fixed part, below half the compaction point.
     const size: Size = .{ .compact_at_tokens = 100_000, .usable_tokens = 125_000, .fixed_tokens = 10_000 };
-    try testing.expectEqual(@as(usize, 35_000), size.compactedTokens(5_000));
-    // A fixed part that fills the half leaves a quarter of it.
+    try testing.expectEqual(@as(usize, 10_000), size.compactedTokens(5_000));
+    // A 128k window: the compacted text stays near a tenth of it, not half the compaction point.
+    const window = Size.of(.{ .context_window = 131_072, .max_output_tokens = 32_768 }, .{ .percent = 80 });
+    const sized: Size = .{ .compact_at_tokens = window.compact_at_tokens, .usable_tokens = window.usable_tokens, .fixed_tokens = 3_000 };
+    try testing.expectEqual(@as(usize, 11_660), sized.compactedTokens(5_000));
+    // A fixed part that fills the room leaves a quarter of it.
     const crowded: Size = .{ .compact_at_tokens = 100_000, .usable_tokens = 125_000, .fixed_tokens = 60_000 };
-    try testing.expectEqual(@as(usize, 12_500), crowded.compactedTokens(0));
+    try testing.expectEqual(@as(usize, 6_250), crowded.compactedTokens(0));
     const unknown: Size = .{ .compact_at_tokens = null, .usable_tokens = null };
     try testing.expectEqual(std.math.maxInt(usize), unknown.compactedTokens(0));
 }
