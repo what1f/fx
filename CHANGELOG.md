@@ -1,5 +1,11 @@
 # fx
 
+## Unreleased
+
+- Combine adjacent Messages user content and parallel tool results, with tool results first.
+- Retry rejected Messages deferred requests from native inline definitions to references, then named invocation. Save successful negotiation with the session.
+- Rename the deferred invocation function to `call_tool` and remove provider-selected deferred modes from Zig configuration and Swift. This is a breaking API and tool-name change. Historical calls replay unchanged; no alias or migration is provided.
+
 ## 0.0.14
 
 <!-- release:start -->

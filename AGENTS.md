@@ -2,6 +2,14 @@
 
 Instructions for AI coding agents working with this codebase.
 
+## Agent prompt-cache invariant
+
+Every change to agents, provider requests, tools, skills, context, compaction, or session recovery must preserve the already-sent prompt prefix whenever possible. Keep session instructions, tool definitions and ordering, historical messages, and tool results stable. Append skill, environment, catalog, or guidance changes as new context; persist baselines across recovery and avoid duplicate updates. Do not implement refresh by rebuilding the request head, rewriting history, or silently replacing the session.
+
+The user has approved cache boundaries for system instructions, resident tools, post-compaction context, model/provider/protocol switches, and reasoning effort changes. The summary request should still reuse its parent prefix. Before adding or increasing any other cache-breaking trigger, explain its condition, affected prefix, frequency, and cache-preserving alternative, and obtain explicit confirmation. This is an engineering approval rule, not a confirmation dialog on each tool call.
+
+Validate actual serialized instructions, tools, history, and cache-relevant settings over repeated calls, dynamic updates, and recovery. Record local prefix invariants separately from provider cache-read metrics; local equality alone does not prove a cache hit.
+
 ## Declaring Work Ready
 
 Do not say the work is "ready", "done", "good to go", "complete", or similar until you have personally run the binary and exercised the change on its happy path. A passing test suite is necessary, not sufficient — tests in this repo do not always construct the full runtime, attach a TTY, or spawn background threads, so they will not catch startup crashes, render regressions, or thread-lifetime bugs.

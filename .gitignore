@@ -55,3 +55,7 @@ benchmarks/baseline.json
 .vibe/
 .windsurf/
 .zencoder/
+
+# SwiftPM（清单在仓库根目录）
+/.build/
+/.swiftpm/

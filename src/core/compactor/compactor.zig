@@ -57,6 +57,7 @@ pub const snapshotTrace = trace.snapshot;
 pub const resetTrace = trace.reset;
 
 // The `auto_compact_percent` setting.
+pub const Trigger = settings.Trigger;
 pub const default_percent = settings.default_percent;
 pub const isValidPercent = settings.isValidPercent;
 pub const resolvePercent = settings.resolvePercent;

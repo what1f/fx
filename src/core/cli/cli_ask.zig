@@ -3023,7 +3023,7 @@ fn pushEvent(raw_ctx: *anyopaque, event: WorkerEvent) !void {
                     try ctx.final_output.appendSlice(ctx.alloc, presentation.textForCompletedPresentation(text, normalized));
                     try ctx.final_source.appendSlice(ctx.alloc, turn.assistant);
                 },
-                .compacted_summary, .interrupted => {},
+                .compacted_summary, .host_context, .interrupted => {},
             };
         },
         else => {},

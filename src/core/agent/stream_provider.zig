@@ -140,6 +140,7 @@ pub const StructuredResponseFormat = struct {
 };
 
 pub const DynamicFunctionTool = struct {
+    deferred: bool = false,
     name: []const u8,
     description: []const u8,
     input_schema: std.json.Value,
@@ -174,6 +175,7 @@ test "host-managed credential lease exposes no secret or account metadata" {
 /// Pure provider input used by request serializers and permission reviewers.
 /// Every slice and JSON value is borrowed for the call.
 pub const RequestData = struct {
+    deferred_tool_mode: @import("deferred_tool_mode.zig").Mode = .native,
     model: []const u8,
     instructions: []const types.ChatMessage = &.{},
     messages: []const types.ChatMessage,
@@ -218,6 +220,9 @@ pub fn validate_prompt_lanes(
 /// Borrowed typed request. Providers own validation, wire serialization,
 /// endpoint selection, headers, HTTP, and stream reduction.
 pub const ModelRequest = struct {
+    deferred_tool_mode: @import("deferred_tool_mode.zig").Mode = .native,
+    negotiated_deferred_tool_mode: ?*@import("deferred_tool_mode.zig").Mode = null,
+    deferred_tool_mode_commit: ?@import("deferred_tool_mode.zig").Commit = null,
     observer: ?*observation.Observer = null,
     parent_call_id: ?[]const u8 = null,
     purpose: observation.ModelPurpose = .agent,
@@ -253,6 +258,7 @@ pub const ModelRequest = struct {
 
     pub fn data(self: ModelRequest) RequestData {
         return .{
+            .deferred_tool_mode = self.deferred_tool_mode,
             .model = self.model,
             .instructions = self.instructions,
             .messages = self.messages,
@@ -297,6 +303,7 @@ pub const Completed = struct {
 };
 
 pub const Failure = struct {
+    http_status: ?u16 = null,
     kind: FailureKind,
     detail: ?[]u8 = null,
     diagnostics: FailureDiagnostics = .{},

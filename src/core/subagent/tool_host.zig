@@ -1763,7 +1763,7 @@ fn assistantTextForWork(
         return switch (candidate) {
             .assistant => |value| value.assistant,
             .interrupted => |value| value.assistant orelse "",
-            .compacted_summary => null,
+            .compacted_summary, .host_context => null,
         };
     }
     return null;

@@ -366,6 +366,8 @@ pub fn Bindings(comptime App: type) type {
                 .format_tool_execution_error = agentFormatToolExecutionError,
                 .record_tool_call_rejected = agentRecordToolCallRejected,
                 .record_tool_call_failed = agentRecordToolCallFailed,
+                .load_deferred_tool_mode = agentLoadDeferredMode,
+                .save_deferred_tool_mode = agentSaveDeferredMode,
                 .report_usage = agentReportUsage,
                 .report_inner_tool_usage = agentReportInnerToolUsage,
                 .diff_marker_styles = .{
@@ -1398,6 +1400,31 @@ pub fn Bindings(comptime App: type) type {
         fn agentFormatToolExecutionError(ctx: *anyopaque, arena: Allocator, tool_name: []const u8, err: anyerror) ![]const u8 {
             const app: *App = @ptrCast(@alignCast(ctx));
             return app.formatToolExecutionErrorForAgent(arena, tool_name, err);
+        }
+
+        fn agentLoadDeferredMode(ctx: *anyopaque) !@import("../agent/deferred_tool_mode.zig").Mode {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            if (comptime @hasField(App, "session_persistence")) {
+                if (app.session_persistence.v2) |v2| {
+                    var prefs = try v2.currentPreferences(app.alloc);
+                    defer prefs.deinit(app.alloc);
+                    return prefs.deferred_tool_mode;
+                }
+            }
+            return .native;
+        }
+
+        fn agentSaveDeferredMode(ctx: *anyopaque, mode: @import("../agent/deferred_tool_mode.zig").Mode) !void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            if (comptime @hasField(App, "session_persistence")) {
+                if (app.session_persistence.v2) |v2| {
+                    var prefs = try v2.currentPreferences(app.alloc);
+                    defer prefs.deinit(app.alloc);
+                    prefs.deferred_tool_mode = mode;
+                    try v2.setPreferences(prefs);
+                }
+                if (app.session_persistence.session_preferences) |*prefs| prefs.deferred_tool_mode = mode;
+            }
         }
 
         fn agentReportUsage(ctx: *anyopaque, usage: types.Usage) void {

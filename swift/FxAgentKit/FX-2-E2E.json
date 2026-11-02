@@ -1,0 +1,375 @@
+{
+  "files_checked": 68,
+  "passed": 1969,
+  "skipped": 62,
+  "filtered": 1,
+  "failed": 0,
+  "excluded_files": [
+    "notifications.test.ts"
+  ],
+  "retry_warnings": [
+    "gateway-stream-lifecycle.test.ts: initial MCP fixture HTTP 403; full-file retry and three isolated rechecks passed"
+  ],
+  "files": [
+    {
+      "file": "acp.test.ts",
+      "pass": 160,
+      "skip": 16,
+      "fail": 0
+    },
+    {
+      "file": "ask-presentation.test.ts",
+      "pass": 19,
+      "fail": 0
+    },
+    {
+      "file": "auth-refresh.test.ts",
+      "pass": 7,
+      "fail": 0
+    },
+    {
+      "file": "auto-mode-reliability.test.ts",
+      "pass": 36,
+      "fail": 0
+    },
+    {
+      "file": "ci-shards.test.ts",
+      "pass": 11,
+      "fail": 0
+    },
+    {
+      "file": "cli.test.ts",
+      "pass": 128,
+      "skip": 5,
+      "fail": 0
+    },
+    {
+      "file": "compaction-policy.test.ts",
+      "pass": 2,
+      "fail": 0
+    },
+    {
+      "file": "config-persistence.test.ts",
+      "pass": 32,
+      "fail": 0
+    },
+    {
+      "file": "configured-providers.test.ts",
+      "pass": 48,
+      "fail": 0
+    },
+    {
+      "file": "context-limits-live.test.ts",
+      "pass": 0,
+      "skip": 1,
+      "fail": 0
+    },
+    {
+      "file": "file-tool-paths.test.ts",
+      "pass": 25,
+      "skip": 2,
+      "fail": 0
+    },
+    {
+      "file": "file-tool-permissions.test.ts",
+      "pass": 2,
+      "fail": 0
+    },
+    {
+      "file": "gateway-stream-lifecycle.test.ts",
+      "pass": 136,
+      "skip": 1,
+      "fail": 0
+    },
+    {
+      "file": "host-managed-auth.test.ts",
+      "pass": 4,
+      "fail": 0
+    },
+    {
+      "file": "mcp-auth.test.ts",
+      "pass": 97,
+      "fail": 0
+    },
+    {
+      "file": "mcp-http.test.ts",
+      "pass": 41,
+      "fail": 0
+    },
+    {
+      "file": "mcp-legacy-remote.test.ts",
+      "pass": 42,
+      "fail": 0
+    },
+    {
+      "file": "mcp-stdio.test.ts",
+      "pass": 131,
+      "fail": 0
+    },
+    {
+      "file": "mcp-verbs.test.ts",
+      "pass": 13,
+      "fail": 0
+    },
+    {
+      "file": "oauth-keychain-migration.test.ts",
+      "pass": 3,
+      "fail": 0
+    },
+    {
+      "file": "permission-errors.test.ts",
+      "pass": 5,
+      "fail": 0
+    },
+    {
+      "file": "poisoned-repository.test.ts",
+      "pass": 7,
+      "fail": 0
+    },
+    {
+      "file": "prompt-history.test.ts",
+      "pass": 4,
+      "fail": 0
+    },
+    {
+      "file": "review-model-override.test.ts",
+      "pass": 7,
+      "fail": 0
+    },
+    {
+      "file": "session-recovery.test.ts",
+      "pass": 33,
+      "fail": 0
+    },
+    {
+      "file": "session-title.test.ts",
+      "pass": 7,
+      "fail": 0
+    },
+    {
+      "file": "sessions.test.ts",
+      "pass": 99,
+      "fail": 0
+    },
+    {
+      "file": "slack-install.test.ts",
+      "pass": 8,
+      "fail": 0
+    },
+    {
+      "file": "tmux-helpers.test.ts",
+      "pass": 10,
+      "fail": 0
+    },
+    {
+      "file": "tui-agent.test.ts",
+      "pass": 0,
+      "skip": 1,
+      "fail": 0
+    },
+    {
+      "file": "tui-auth-source-selection.test.ts",
+      "pass": 155,
+      "skip": 1,
+      "fail": 0
+    },
+    {
+      "file": "tui-command-permissions.test.ts",
+      "pass": 49,
+      "filtered out": 1,
+      "fail": 0
+    },
+    {
+      "file": "tui-compaction-activity.test.ts",
+      "pass": 15,
+      "fail": 0
+    },
+    {
+      "file": "tui-composer-edit-contracts.test.ts",
+      "pass": 34,
+      "fail": 0
+    },
+    {
+      "file": "tui-decision-prompts.test.ts",
+      "pass": 50,
+      "fail": 0
+    },
+    {
+      "file": "tui-direct-write-audit.test.ts",
+      "pass": 4,
+      "fail": 0
+    },
+    {
+      "file": "tui-file-picker.test.ts",
+      "pass": 23,
+      "skip": 1,
+      "fail": 0
+    },
+    {
+      "file": "tui-full-transcript-brutal.test.ts",
+      "pass": 5,
+      "skip": 3,
+      "fail": 0
+    },
+    {
+      "file": "tui-gateway-stream-lifecycle.test.ts",
+      "pass": 67,
+      "fail": 0
+    },
+    {
+      "file": "tui-input-line-delete.test.ts",
+      "pass": 1,
+      "fail": 0
+    },
+    {
+      "file": "tui-input-navigation.test.ts",
+      "pass": 40,
+      "fail": 0
+    },
+    {
+      "file": "tui-interrupt-recovery.test.ts",
+      "pass": 11,
+      "fail": 0
+    },
+    {
+      "file": "tui-keybindings.test.ts",
+      "pass": 0,
+      "skip": 3,
+      "fail": 0
+    },
+    {
+      "file": "tui-native-clear-recovery.test.ts",
+      "pass": 6,
+      "fail": 0
+    },
+    {
+      "file": "tui-performance.test.ts",
+      "pass": 4,
+      "skip": 2,
+      "fail": 0
+    },
+    {
+      "file": "tui-permissions.test.ts",
+      "pass": 25,
+      "fail": 0
+    },
+    {
+      "file": "tui-render-lab.test.ts",
+      "pass": 26,
+      "fail": 0
+    },
+    {
+      "file": "tui-render-live-stress.test.ts",
+      "pass": 0,
+      "skip": 1,
+      "fail": 0
+    },
+    {
+      "file": "tui-render-replay.test.ts",
+      "pass": 8,
+      "skip": 1,
+      "fail": 0
+    },
+    {
+      "file": "tui-render-stress.test.ts",
+      "pass": 1,
+      "fail": 0
+    },
+    {
+      "file": "tui-resize.test.ts",
+      "pass": 57,
+      "fail": 0
+    },
+    {
+      "file": "tui-resume-brutal.test.ts",
+      "pass": 1,
+      "skip": 3,
+      "fail": 0
+    },
+    {
+      "file": "tui-resume.test.ts",
+      "pass": 65,
+      "fail": 0
+    },
+    {
+      "file": "tui-slash-commands.test.ts",
+      "pass": 4,
+      "skip": 4,
+      "fail": 0
+    },
+    {
+      "file": "tui-slash-extra.test.ts",
+      "pass": 10,
+      "skip": 8,
+      "fail": 0
+    },
+    {
+      "file": "tui-slash-menu.test.ts",
+      "pass": 35,
+      "fail": 0
+    },
+    {
+      "file": "tui-startup.test.ts",
+      "pass": 18,
+      "skip": 3,
+      "fail": 0
+    },
+    {
+      "file": "tui-terminal-tool.test.ts",
+      "pass": 18,
+      "fail": 0
+    },
+    {
+      "file": "tui-usage.test.ts",
+      "pass": 3,
+      "fail": 0
+    },
+    {
+      "file": "ultrafast-fake-gateway.test.ts",
+      "pass": 25,
+      "fail": 0
+    },
+    {
+      "file": "vision-route-fake-gateway.test.ts",
+      "pass": 52,
+      "fail": 0
+    },
+    {
+      "file": "web-fetch-fake-network.test.ts",
+      "pass": 8,
+      "fail": 0
+    },
+    {
+      "file": "web-fetch-live.test.ts",
+      "pass": 0,
+      "skip": 4,
+      "fail": 0
+    },
+    {
+      "file": "web-fetch-permission-progress.test.ts",
+      "pass": 1,
+      "fail": 0
+    },
+    {
+      "file": "web-search-fake-gateway.test.ts",
+      "pass": 18,
+      "fail": 0
+    },
+    {
+      "file": "web-search-live.test.ts",
+      "pass": 0,
+      "skip": 2,
+      "fail": 0
+    },
+    {
+      "file": "web-search-permission-progress.test.ts",
+      "pass": 2,
+      "fail": 0
+    },
+    {
+      "file": "yolo-permission-mode.test.ts",
+      "pass": 11,
+      "fail": 0
+    }
+  ]
+}

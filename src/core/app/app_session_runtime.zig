@@ -3959,7 +3959,7 @@ pub fn Runtime(comptime App: type) type {
         ) !void {
             for (history) |turn| {
                 switch (turn) {
-                    .compacted_summary => {},
+                    .compacted_summary, .host_context => {},
                     .assistant => |entry| {
                         if (entry.execution.turn_summary) |summary| {
                             sink.setCreatedAtMs(summary.started_at_ms);

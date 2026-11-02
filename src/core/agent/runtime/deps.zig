@@ -200,6 +200,8 @@ pub const DiffMarkerStyles = struct {
 };
 
 pub const AgentRuntimeDeps = struct {
+    load_deferred_tool_mode: ?*const fn (*anyopaque) anyerror!@import("../deferred_tool_mode.zig").Mode = null,
+    save_deferred_tool_mode: ?*const fn (*anyopaque, @import("../deferred_tool_mode.zig").Mode) anyerror!void = null,
     ctx: *anyopaque,
     observer: ?*observation.Observer = null,
     agent_stream_provider: agent_stream_provider.Provider = agent_stream_provider.unavailable_provider,

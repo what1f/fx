@@ -250,3 +250,5 @@ After CI passes on `main`, the dev release workflow publishes binaries for that 
 ## License
 
 fx is licensed under [Apache-2.0](LICENSE). Unless you state otherwise, a contribution you submit for inclusion in fx is licensed under the same terms, as section 5 of the license describes.
+
+Run a focused Zig regression with `zig build test-focused -Dtest-filter="test name"`. This builds the local binary and runs matching runtime tests.

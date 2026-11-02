@@ -35,6 +35,8 @@ pub const Config = struct {
     gateway_chat_url: []const u8,
     advertised_tool_names: []const []const u8 = &.{},
     advertised_functions: []const model_tool_schema.FunctionSchema = &.{},
+    /// Current catalog reminder to append again after context compaction.
+    context_snapshots: []const types.HistoryTurn = &.{},
     initial_dynamic_tools: []const stream_provider.DynamicFunctionTool = &.{},
     provider_capabilities: provider_set.Bundle.Capabilities = .{
         .gateway_prompt_caching = true,
@@ -46,6 +48,7 @@ pub const Config = struct {
     max_tool_result_bytes: usize = tool_result_limits.default_max_tool_result_bytes,
     /// Share of the model's usable input at which automatic compaction starts.
     auto_compact_percent: u8 = compactor.default_percent,
+    auto_compact: ?compactor.Trigger = null,
     step_limit_notice: []const u8 = default_step_limit_notice,
     cancel_flag: *std.atomic.Value(bool),
     review_enabled: bool = false,

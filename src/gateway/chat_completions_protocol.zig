@@ -124,6 +124,7 @@ fn select_functions(alloc: Allocator, tools: stream_provider.ToolSelection, choi
     }
     var schema_budget: SchemaBudget = .{};
     for (tools.selected_dynamic) |function| {
+        if (function.deferred) continue;
         if (contains_name(tools.advertised_names, function.name)) continue;
         if (function.input_schema != .object) return error.InvalidToolSchema;
         try validate_dynamic_schema(function.input_schema, 0, &schema_budget);
@@ -167,7 +168,7 @@ fn validate_request(request: stream_provider.RequestData) Error!void {
     try request.validatePrompt();
     configured_provider.validate_model_id(request.model) catch return error.InvalidModel;
     const options = request.provider_options;
-    if (options.reasoning != null or options.fast or options.prompt_caching) return error.UnsupportedProviderOption;
+    if (options.fast or options.prompt_caching) return error.UnsupportedProviderOption;
     if (options.provider_order.len != 0) return error.UnsupportedProviderOption;
     if (request.response_format != null) return error.UnsupportedResponseFormat;
     // The vision tool runs through a separate provider request; inline image
@@ -422,7 +423,7 @@ pub fn build_request(alloc: Allocator, input: stream_provider.RequestData, optio
     return out.toOwnedSlice();
 }
 
-fn toolResultDenied(message: types.ChatMessage) bool {
+pub fn toolResultDenied(message: types.ChatMessage) bool {
     const failed = if (message.tool_result_status) |status|
         status == .failure
     else
@@ -541,7 +542,14 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
             if (message.role == .user and message.images.len != 0) {
                 try write_user_content_parts(writer, alloc, message);
             } else {
-                try std.json.Stringify.value(message.content, .{}, writer);
+                const definitions = if (message.role == .tool and message.tool_result_memory != null) message.tool_result_memory.?.loaded_tools_json else null;
+                if (definitions) |saved| {
+                    const current = try @import("deferred_definitions.zig").snapshot(alloc, saved);
+                    defer alloc.free(current);
+                    try std.json.Stringify.value(if (std.mem.eql(u8, current, "[]")) message.content orelse current else current, .{}, writer);
+                } else {
+                    try std.json.Stringify.value(message.content, .{}, writer);
+                }
             }
             try write_replay(writer, alloc, message);
             if (message.role == .tool) {
@@ -601,6 +609,10 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
             try writer.writeAll(",\"parallel_tool_calls\":");
             try std.json.Stringify.value(parallel, .{}, writer);
         }
+    }
+    if (request.provider_options.reasoning) |effort| {
+        try writer.writeAll(",\"reasoning_effort\":");
+        try std.json.Stringify.value(effort.label(), .{}, writer);
     }
     if (request.max_output_tokens) |limit| try writer.print(",\"max_tokens\":{d}", .{limit});
     try writer.writeByte('}');
@@ -885,6 +897,9 @@ pub const Reducer = struct {
         const usage = types.Usage{
             .input_tokens = incoming.input_tokens orelse self.usage.input_tokens,
             .output_tokens = incoming.output_tokens orelse self.usage.output_tokens,
+            .cache_read_tokens = (try nested_token_count(fields, "prompt_tokens_details", "cached_tokens")) orelse (try token_count(fields, "prompt_cache_hit_tokens")) orelse self.usage.cache_read_tokens,
+            .cache_write_tokens = (try nested_token_count(fields, "prompt_tokens_details", "cache_write_tokens")) orelse self.usage.cache_write_tokens,
+            .reasoning_tokens = (try nested_token_count(fields, "completion_tokens_details", "reasoning_tokens")) orelse self.usage.reasoning_tokens,
         };
         const total = incoming_total orelse self.usage_total;
         var final_fields = self.usage_final_fields;
@@ -1006,6 +1021,11 @@ fn integer(value: std.json.Value) Error!i64 {
 
 fn index_value(value: std.json.Value) Error!usize {
     return std.math.cast(usize, try integer(value)) orelse error.InvalidChunk;
+}
+
+fn nested_token_count(fields: std.json.ObjectMap, parent: []const u8, key: []const u8) Error!?u64 {
+    const value = non_null(fields, parent) orelse return null;
+    return token_count(try object(value), key);
 }
 
 fn token_count(fields: std.json.ObjectMap, key: []const u8) Error!?u64 {
@@ -2006,8 +2026,6 @@ test "chat completions serializes user message images as content parts" {
 test "chat completions rejects unsupported requests and ambiguous selection" {
     const alloc = std.testing.allocator;
     var request = test_request();
-    request.provider_options.reasoning = .auto;
-    try std.testing.expectError(error.UnsupportedProviderOption, build_request(alloc, request, .{}));
     request.provider_options = .{ .fast = true };
     try std.testing.expectError(error.UnsupportedProviderOption, build_request(alloc, request, .{}));
     request.provider_options = .{ .prompt_caching = true };
@@ -2580,4 +2598,78 @@ test "chat completions prose resembling a call stays prose and cancellation afte
     try test_accept(&cancelled, test_stop);
     try test_accept(&cancelled, "[DONE]");
     try std.testing.expectError(error.Cancelled, cancelled.finish(true));
+}
+
+test "deferred tools preserve Chat Completions request bytes" {
+    const alloc = std.testing.allocator;
+    var request = test_tool_request();
+    const before = try build_request(alloc, request, .{});
+    defer alloc.free(before);
+    const schema: std.json.ObjectMap = .empty;
+    const definition: stream_provider.DynamicFunctionTool = .{ .name = "plugin.action", .description = "changed", .input_schema = .{ .object = schema }, .deferred = true };
+    request.tools.selected_dynamic = &.{definition};
+    const after = try build_request(alloc, request, .{});
+    defer alloc.free(after);
+    try std.testing.expectEqualStrings(before, after);
+    request.tools.selected_dynamic = &.{};
+    const removed = try build_request(alloc, request, .{});
+    defer alloc.free(removed);
+    try std.testing.expectEqualStrings(before, removed);
+}
+
+test "deferred definitions survive ordinary tool output truncation" {
+    const alloc = std.testing.allocator;
+    var request = test_request();
+    request.messages = &.{
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "search", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "search", .tool_name = "tool_search", .content = "truncated preview", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"full_definition\"}]" } },
+    };
+    request.tools.selected_dynamic = &.{.{ .name = "full_definition", .description = "Full definition", .input_schema = .{ .object = .empty }, .deferred = true }};
+    const body = try build_request(alloc, request, .{});
+    defer alloc.free(body);
+    try std.testing.expect(std.mem.find(u8, body, "full_definition") != null);
+    try std.testing.expect(std.mem.find(u8, body, "truncated preview") == null);
+}
+
+test "chat completions preserves cache and reasoning usage across final trailers" {
+    const alloc = std.testing.allocator;
+    var reducer = try Reducer.init(alloc, test_request(), .{});
+    defer reducer.deinit();
+    try test_accept(&reducer, "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":128,\"prompt_tokens_details\":{\"cached_tokens\":64,\"cache_write_tokens\":16}}}");
+    try test_accept(&reducer, "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":8,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}");
+    _ = try reducer.accept("[DONE]", false);
+    var result = try reducer.finish(false);
+    defer result.deinit(alloc);
+    try std.testing.expectEqual(@as(?u64, 64), result.completed.completion.usage.cache_read_tokens);
+    try std.testing.expectEqual(@as(?u64, 16), result.completed.completion.usage.cache_write_tokens);
+    try std.testing.expectEqual(@as(?u64, 4), result.completed.completion.usage.reasoning_tokens);
+}
+
+test "deferred Chat Completions replay keeps saved schema text after catalog replacement and removal" {
+    const alloc = std.testing.allocator;
+    var request = test_request();
+    request.instructions = &.{};
+    request.messages = &.{
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "search", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "search", .tool_name = "tool_search", .content = "Search results", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"action\",\"description\":\"old\"},{\"name\":\"removed\"},{\"name\":\"action\"}]" } },
+    };
+    const schema = try std.json.parseFromSlice(std.json.Value, alloc, "{\"type\":\"object\",\"required\":[\"updated\"]}", .{});
+    defer schema.deinit();
+    request.tools.selected_dynamic = &.{.{ .name = "action", .description = "current", .input_schema = schema.value, .deferred = true }};
+    const body = try build_request(alloc, request, .{});
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const content = parsed.value.object.get("messages").?.array.items[1].object.get("content").?.string;
+    const definitions = try std.json.parseFromSlice(std.json.Value, alloc, content, .{});
+    defer definitions.deinit();
+    try std.testing.expectEqual(@as(usize, 3), definitions.value.array.items.len);
+    try std.testing.expect(std.mem.find(u8, content, "updated") == null);
+    try std.testing.expect(std.mem.find(u8, content, "old") != null);
+    request.tools.selected_dynamic = &.{};
+    const removed = try build_request(alloc, request, .{});
+    defer alloc.free(removed);
+    const removed_parsed = try std.json.parseFromSlice(std.json.Value, alloc, removed, .{});
+    defer removed_parsed.deinit();
+    try std.testing.expectEqualStrings(content, removed_parsed.value.object.get("messages").?.array.items[1].object.get("content").?.string);
 }

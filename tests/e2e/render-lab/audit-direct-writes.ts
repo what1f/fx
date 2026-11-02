@@ -75,6 +75,7 @@ const allowlist: AllowRule[] = [
   rule("src/core/auth/grok_oauth.zig", "writeStdout", /stdio_acquisition_write/, "noninteractive_output", "Grok CLI login output"),
   rule("src/core/slack/install.zig", "run", /stdio_acquisition_write/, "noninteractive_output", "Slack CLI installation authorization prompt"),
   rule("src/core/shared/debug_trace.zig", "(?:writeLine|writeNoninteractiveStderr)", /debug_print/, "noninteractive_output", "opt-in tracing"),
+  rule("src/gateway/responses_diagnostics.zig", "record", /stdio_acquisition_write/, "noninteractive_output", "opt-in Responses metadata diagnostics"),
   rule("tests/json-schema/corpus_runner.zig", "printLine", /stdio_acquisition/, "noninteractive_output", "JSON Schema corpus report output"),
   rule("src/main.zig", "(?:writeStdoutFast|writeStderrFast)", /(?:stdio_acquisition_write|fixed_fd_write|raw_fd_write)/, "noninteractive_output", "top-level help and CLI validation output"),
   rule("src/main.zig", "(?:stdoutIsTerminal|stdoutTerminalColumns)", /fixed_descriptor/, "terminal_probe", "top-level help terminal capability probe"),

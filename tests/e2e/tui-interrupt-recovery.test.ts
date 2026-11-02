@@ -858,10 +858,10 @@ while :; do sleep 1; done
       mkdirSync(join(home, ".fx"), { recursive: true });
       mkdirSync(corpus, { recursive: true });
       writeFileSync(join(home, ".fx", "settings.json"), "{}");
-      // The search must still be running when the second Escape lands, about
-      // half a second after it starts. Linux searches 30,000 files in about a
-      // third of a second, so it needs a larger corpus than macOS.
-      const corpusFiles = process.platform === "darwin" ? 30_000 : 120_000;
+      // Optimized builds can finish 30,000 files before Escape confirmation.
+      // Keep the Linux-sized corpus on both platforms so success settles after
+      // cancellation, as the event-order assertion below requires.
+      const corpusFiles = 120_000;
       for (let index = 0; index < corpusFiles; index += 1) {
         writeFileSync(
           join(corpus, `candidate-${String(index).padStart(6, "0")}.txt`),

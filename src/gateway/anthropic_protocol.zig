@@ -1,0 +1,854 @@
+//! Messages transport for text, images, and tools. Inline tool additions follow pi's
+//! packages/ai/src/api/anthropic-messages.ts; definitions stay at discovery time.
+const std = @import("std");
+const streams = @import("../core/agent/stream_provider.zig");
+const cc = @import("chat_completions_protocol.zig");
+const sse = @import("sse.zig");
+const types = @import("../core/shared/types.zig");
+const image_attachments = @import("../core/images/image_attachments.zig");
+const Allocator = std.mem.Allocator;
+
+pub const headers = [_]std.http.Header{
+    .{ .name = "content-type", .value = "application/json" },
+    .{ .name = "accept", .value = "text/event-stream" },
+    .{ .name = "anthropic-version", .value = "2023-06-01" },
+    .{ .name = "anthropic-beta", .value = "inline-tools-2026-09-15" },
+};
+
+fn json(w: *std.Io.Writer, value: anytype) !void {
+    try std.json.Stringify.value(value, .{}, w);
+}
+
+fn imageBlockStart(w: *std.Io.Writer, media_type: []const u8) !void {
+    try w.writeAll("{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":");
+    try json(w, media_type);
+    try w.writeAll(",\"data\":\"");
+}
+
+/// Encodes in chunks so a large attachment is not duplicated in memory.
+fn writeImageBlock(w: *std.Io.Writer, media_type: []const u8, bytes: []const u8) !void {
+    try imageBlockStart(w, media_type);
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const end = @min(offset + 3 * 1024, bytes.len);
+        try std.base64.standard.Encoder.encodeWriter(w, bytes[offset..end]);
+        offset = end;
+    }
+    try w.writeAll("\"}}");
+}
+
+fn writeEncodedImageBlock(w: *std.Io.Writer, image: types.ToolImage) !void {
+    try imageBlockStart(w, image.mime_type);
+    try w.writeAll(image.data);
+    try w.writeAll("\"}}");
+}
+
+/// Caller owns the request. This first Messages surface accepts text and tools.
+pub fn build(alloc: Allocator, request: streams.RequestData) ![]u8 {
+    return buildFor(alloc, request, null);
+}
+
+pub fn buildFor(alloc: Allocator, input: streams.RequestData, provider: ?@import("../core/config/model_provider.zig").ProviderId) ![]u8 {
+    return buildConfigured(alloc, input, provider, .native);
+}
+
+pub fn buildConfigured(alloc: Allocator, input: streams.RequestData, provider: ?@import("../core/config/model_provider.zig").ProviderId, mode: @import("../core/agent/deferred_tool_mode.zig").Mode) ![]u8 {
+    var request = input;
+    const projected = if (provider) |identity| try types.projectProviderReplay(alloc, input.messages, .{ .provider = identity, .model = input.model }) else null;
+    defer if (projected) |messages| alloc.free(messages);
+    request.messages = projected orelse input.messages;
+    const encoded = try cc.build_request(alloc, request, .{ .provider = if (provider) |*identity| identity else null });
+    defer alloc.free(encoded);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, encoded, .{});
+    defer parsed.deinit();
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    const w = &out.writer;
+    try w.writeAll("{\"model\":");
+    try json(w, request.model);
+    try w.print(",\"stream\":true,\"max_tokens\":{d},\"system\":[", .{request.max_output_tokens orelse 4096});
+    for (request.instructions, 0..) |message, index| {
+        if (index > 0) try w.writeByte(',');
+        try w.writeAll("{\"type\":\"text\",\"text\":");
+        try json(w, message.content orelse "");
+        try w.writeByte('}');
+    }
+    try w.writeByte(']');
+    if (request.provider_options.reasoning) |effort| {
+        if (std.mem.eql(u8, effort.label(), "none")) {
+            try w.writeAll(",\"thinking\":{\"type\":\"disabled\"}");
+        } else {
+            try w.writeAll(",\"thinking\":{\"type\":\"adaptive\"},\"output_config\":{\"effort\":");
+            try json(w, effort.label());
+            try w.writeByte('}');
+        }
+    }
+    try w.writeAll(",\"tools\":[");
+    var count: usize = 0;
+    var deferred = false;
+    if (parsed.value.object.get("tools")) |tools| for (tools.array.items) |entry| {
+        const f = entry.object.get("function").?;
+        const name = f.object.get("name").?.string;
+        if (std.mem.eql(u8, name, "tool_search")) deferred = true;
+        if (count > 0) try w.writeByte(',');
+        count += 1;
+        try w.writeAll("{\"name\":");
+        try json(w, name);
+        try w.writeAll(",\"description\":");
+        try json(w, f.object.get("description").?);
+        try w.writeAll(",\"input_schema\":");
+        try json(w, f.object.get("parameters").?);
+        try w.writeByte('}');
+    };
+    if (mode == .reference) {
+        var references = @import("deferred_definitions.zig").Declarations.init(alloc);
+        defer references.deinit();
+        for (request.messages) |message| if (message.tool_result_memory) |memory| if (memory.loaded_tools_json) |definitions| {
+            const first = try references.first(alloc, definitions);
+            defer alloc.free(first);
+            const loaded = try std.json.parseFromSlice(std.json.Value, alloc, first, .{});
+            defer loaded.deinit();
+            for (loaded.value.array.items) |entry| {
+                if (count > 0) try w.writeByte(',');
+                count += 1;
+                try w.writeAll("{\"name\":");
+                try json(w, entry.object.get("name").?);
+                try w.writeAll(",\"description\":");
+                try json(w, entry.object.get("description").?);
+                try w.writeAll(",\"input_schema\":");
+                try json(w, entry.object.get("inputSchema").?);
+                try w.writeAll(",\"defer_loading\":true}");
+            }
+        };
+    }
+    if (deferred and mode == .native) {
+        if (count > 0) try w.writeByte(',');
+        try w.writeAll("{\"name\":\"__fx_deferred_placeholder__\",\"description\":\"Reserved. Never call.\",\"input_schema\":{\"type\":\"object\",\"properties\":{}},\"defer_loading\":true}");
+    }
+    try w.writeAll("],\"messages\":[");
+    count = 0;
+    var declarations = @import("deferred_definitions.zig").Declarations.init(alloc);
+    defer declarations.deinit();
+    for (request.messages, 0..) |message, message_index| {
+        if (count > 0) try w.writeByte(',');
+        count += 1;
+        try w.writeAll("{\"role\":");
+        try json(w, if (message.role == .assistant) "assistant" else "user");
+        try w.writeAll(",\"content\":[");
+        var blocks: usize = 0;
+        if (message.provider_replay) |replay| {
+            const saved = try std.json.parseFromSlice(std.json.Value, alloc, replay.parts_json, .{});
+            defer saved.deinit();
+            if (saved.value.object.get("reasoning_details")) |details| if (details == .array) {
+                for (details.array.items) |block| {
+                    const kind = block.object.get("type") orelse return error.InvalidProviderState;
+                    if (kind != .string or (!std.mem.eql(u8, kind.string, "thinking") and !std.mem.eql(u8, kind.string, "redacted_thinking"))) return error.InvalidProviderState;
+                    if (blocks > 0) try w.writeByte(',');
+                    try json(w, block);
+                    blocks += 1;
+                }
+            };
+        }
+        if (message.role == .tool) {
+            try w.writeAll("{\"type\":\"tool_result\",\"tool_use_id\":");
+            try json(w, message.tool_call_id orelse "");
+            try w.writeAll(",\"content\":");
+            const definitions = if (message.tool_result_memory) |memory| memory.loaded_tools_json else null;
+            const tool_images = if (message.tool_result_memory) |memory| memory.tool_images else &.{};
+            const with_images = tool_images.len > 0 and !cc.toolResultDenied(message);
+            const with_references = mode == .reference and definitions != null;
+            if (with_images or with_references) try w.writeAll("[{\"type\":\"text\",\"text\":");
+            if (mode == .call_tool and definitions != null) {
+                const current = try @import("deferred_definitions.zig").snapshot(alloc, definitions.?);
+                defer alloc.free(current);
+                try json(w, if (std.mem.eql(u8, current, "[]")) message.content orelse current else current);
+            } else {
+                try json(w, message.content orelse "");
+            }
+            if (with_images or with_references) {
+                try w.writeByte('}');
+                if (with_references) {
+                    const loaded = try std.json.parseFromSlice(std.json.Value, alloc, definitions.?, .{});
+                    defer loaded.deinit();
+                    for (loaded.value.array.items) |entry| {
+                        try w.writeAll(",{\"type\":\"tool_reference\",\"tool_name\":");
+                        try json(w, entry.object.get("name").?);
+                        try w.writeByte('}');
+                    }
+                }
+                for (tool_images) |image| {
+                    try w.writeByte(',');
+                    try writeEncodedImageBlock(w, image);
+                }
+                try w.writeByte(']');
+            }
+            if (message.tool_result_status == .failure) try w.writeAll(",\"is_error\":true");
+            try w.writeByte('}');
+            blocks += 1;
+        } else if (message.content) |text| if (text.len > 0) {
+            if (blocks > 0) try w.writeByte(',');
+            try w.writeAll("{\"type\":\"text\",\"text\":");
+            try json(w, text);
+            try w.writeByte('}');
+            blocks += 1;
+        };
+        if (message.role == .user) for (message.images) |image| {
+            var snapshot = image_attachments.loadVerifiedSnapshot(alloc, image, .{}) catch return error.ImageUnavailable;
+            defer snapshot.deinit(alloc);
+            if (blocks > 0) try w.writeByte(',');
+            try writeImageBlock(w, snapshot.media_type, snapshot.bytes);
+            blocks += 1;
+        };
+        for (message.tool_calls) |call| {
+            if (blocks > 0) try w.writeByte(',');
+            blocks += 1;
+            try w.writeAll("{\"type\":\"tool_use\",\"id\":");
+            try json(w, call.id);
+            try w.writeAll(",\"name\":");
+            try json(w, call.name);
+            try w.writeAll(",\"input\":");
+            const args = try std.json.parseFromSlice(std.json.Value, alloc, call.arguments_json, .{});
+            defer args.deinit();
+            try json(w, args.value);
+            try w.writeByte('}');
+        }
+        try w.writeAll("]}");
+        if (mode != .native) continue;
+        if (message.role == .assistant or (message_index + 1 < request.messages.len and request.messages[message_index + 1].role != .assistant)) continue;
+        var group_start = message_index;
+        while (group_start > 0 and request.messages[group_start - 1].role != .assistant) group_start -= 1;
+        for (request.messages[group_start .. message_index + 1]) |result| if (result.tool_result_memory) |memory| if (memory.loaded_tools_json) |definitions| {
+            const current = try declarations.first(alloc, definitions);
+            defer alloc.free(current);
+            const loaded = try std.json.parseFromSlice(std.json.Value, alloc, current, .{});
+            defer loaded.deinit();
+            if (loaded.value.array.items.len == 0) continue;
+            try w.writeAll(",{\"role\":\"system\",\"content\":[");
+            for (loaded.value.array.items, 0..) |entry, index| {
+                if (index > 0) try w.writeByte(',');
+                try w.writeAll("{\"type\":\"tool_addition\",\"tool\":{\"type\":\"tool_definition\",\"definition\":{\"name\":");
+                try json(w, entry.object.get("name").?);
+                try w.writeAll(",\"description\":");
+                try json(w, entry.object.get("description").?);
+                try w.writeAll(",\"input_schema\":");
+                try json(w, entry.object.get("inputSchema").?);
+                try w.writeAll("}}}");
+            }
+            try w.writeAll("]}");
+        };
+    }
+    try w.writeAll("]}");
+    return mergeUsers(alloc, out.written());
+}
+
+/// Rewrites only the wire projection. Stored messages and result bytes stay intact.
+fn mergeUsers(alloc: Allocator, body: []const u8) ![]u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    const w = &out.writer;
+    try w.writeByte('{');
+    var fields = parsed.value.object.iterator();
+    var field_count: usize = 0;
+    while (fields.next()) |field| {
+        if (field_count > 0) try w.writeByte(',');
+        field_count += 1;
+        try json(w, field.key_ptr.*);
+        try w.writeByte(':');
+        if (!std.mem.eql(u8, field.key_ptr.*, "messages")) {
+            try json(w, field.value_ptr.*);
+            continue;
+        }
+        const messages = field.value_ptr.array.items;
+        try w.writeByte('[');
+        var start: usize = 0;
+        while (start < messages.len) {
+            if (start > 0) try w.writeByte(',');
+            const message = messages[start];
+            if (!std.mem.eql(u8, message.object.get("role").?.string, "user")) {
+                try json(w, message);
+                start += 1;
+                continue;
+            }
+            var end = start + 1;
+            while (end < messages.len and std.mem.eql(u8, messages[end].object.get("role").?.string, "user")) : (end += 1) {}
+            try w.writeAll("{\"role\":\"user\",\"content\":[");
+            var blocks: usize = 0;
+            for ([_]bool{ true, false }) |results| {
+                for (messages[start..end]) |part| for (part.object.get("content").?.array.items) |block| {
+                    const is_result = std.mem.eql(u8, block.object.get("type").?.string, "tool_result");
+                    if (results != is_result) continue;
+                    if (blocks > 0) try w.writeByte(',');
+                    blocks += 1;
+                    try json(w, block);
+                };
+            }
+            try w.writeAll("]}");
+            start = end;
+        }
+        try w.writeByte(']');
+    }
+    try w.writeByte('}');
+    return out.toOwnedSlice();
+}
+
+/// Inspect typed JSON blocks, never provider error wording.
+pub fn hasDeferredContent(alloc: Allocator, body: []const u8, mode: @import("../core/agent/deferred_tool_mode.zig").Mode) !bool {
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    if (mode == .reference) if (parsed.value.object.get("tools")) |tools| {
+        if (tools == .array) for (tools.array.items) |tool| {
+            if (tool != .object) continue;
+            if (tool.object.get("defer_loading")) |flag| if (flag == .bool and flag.bool) return true;
+        };
+    };
+    const messages = parsed.value.object.get("messages") orelse return false;
+    if (messages != .array) return false;
+    for (messages.array.items) |message| {
+        if (message != .object) continue;
+        const content = message.object.get("content") orelse continue;
+        if (content != .array) continue;
+        for (content.array.items) |block| {
+            if (block != .object) continue;
+            const kind = block.object.get("type") orelse continue;
+            if (kind != .string) continue;
+            if (mode == .native and std.mem.eql(u8, kind.string, "tool_addition")) return true;
+            if (mode == .reference and std.mem.eql(u8, kind.string, "tool_result")) {
+                const result = block.object.get("content") orelse continue;
+                if (result != .array) continue;
+                for (result.array.items) |entry| {
+                    if (entry != .object) continue;
+                    const entry_kind = entry.object.get("type") orelse continue;
+                    if (entry_kind == .string and std.mem.eql(u8, entry_kind.string, "tool_reference")) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+const Usage = struct {
+    input_tokens: ?u64 = null,
+    output_tokens: ?u64 = null,
+    cache_read_input_tokens: ?u64 = null,
+    cache_creation_input_tokens: ?u64 = null,
+};
+const Event = struct {
+    type: []const u8,
+    index: ?usize = null,
+    content_block: ?struct {
+        type: []const u8,
+        id: ?[]const u8 = null,
+        name: ?[]const u8 = null,
+        text: ?[]const u8 = null,
+        thinking: ?[]const u8 = null,
+        signature: ?[]const u8 = null,
+    } = null,
+    delta: ?struct {
+        type: ?[]const u8 = null,
+        text: ?[]const u8 = null,
+        partial_json: ?[]const u8 = null,
+        thinking: ?[]const u8 = null,
+        signature: ?[]const u8 = null,
+        stop_reason: ?[]const u8 = null,
+    } = null,
+    message: ?struct { usage: ?Usage = null } = null,
+    usage: ?Usage = null,
+};
+
+/// Reuses the bounded function accumulator after translating Messages events.
+pub fn consume(alloc: Allocator, source: *std.Io.Reader, request: streams.ModelRequest, progress: ?sse.Progress) !streams.Result {
+    var reducer = try cc.Reducer.init(alloc, request.data(), .{});
+    defer reducer.deinit();
+    var framing: sse.Reader = .{ .max_event_bytes = 1024 * 1024, .max_total_bytes = 16 * 1024 * 1024, .progress = progress };
+    defer framing.deinit(alloc);
+    var finished = false;
+    var thinking_index: ?usize = null;
+    var thinking: std.Io.Writer.Allocating = .init(alloc);
+    defer thinking.deinit();
+    var signature: std.Io.Writer.Allocating = .init(alloc);
+    defer signature.deinit();
+    var tools: [256]bool = @splat(false);
+    var tool_indices: [256]?usize = @splat(null);
+    var tool_count: usize = 0;
+    var arguments: [256]bool = @splat(false);
+    while (try framing.next(alloc, source, request.cancel_flag)) |bytes| {
+        const parsed = std.json.parseFromSlice(Event, alloc, bytes, .{ .ignore_unknown_fields = true }) catch return error.InvalidEvent;
+        defer parsed.deinit();
+        const event = parsed.value;
+        const kind = event.type;
+        if (std.mem.eql(u8, kind, "error")) return error.ProviderError;
+        if (std.mem.eql(u8, kind, "message_stop")) {
+            if (!finished or thinking_index != null) return error.IncompleteStream;
+            _ = try reducer.accept("[DONE]", request.cancel_flag.load(.seq_cst));
+            return reducer.finish(request.cancel_flag.load(.seq_cst));
+        }
+        if (event.index) |index| if (index >= tools.len) return error.TooManyTools;
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        const w = &out.writer;
+        try w.writeAll("{\"choices\":[{\"index\":0,\"delta\":{");
+        var reason: ?[]const u8 = null;
+        var usage: ?Usage = null;
+        if (std.mem.eql(u8, kind, "content_block_start")) {
+            const block = event.content_block orelse return error.InvalidEvent;
+            const index = event.index orelse return error.InvalidEvent;
+            if (std.mem.eql(u8, block.type, "tool_use")) {
+                if (tools[index]) return error.InvalidEvent;
+                tools[index] = true;
+                tool_indices[index] = tool_count;
+                tool_count += 1;
+                try w.print("\"tool_calls\":[{{\"index\":{d},\"id\":", .{tool_indices[index].?});
+                try json(w, block.id orelse return error.InvalidEvent);
+                try w.writeAll(",\"type\":\"function\",\"function\":{\"name\":");
+                try json(w, block.name orelse return error.InvalidEvent);
+                try w.writeAll(",\"arguments\":\"\"}}]");
+            } else if (std.mem.eql(u8, block.type, "text")) {
+                try w.writeAll("\"content\":");
+                try json(w, block.text orelse "");
+            } else if (std.mem.eql(u8, block.type, "thinking")) {
+                if (thinking_index != null) return error.InvalidEvent;
+                thinking_index = index;
+                thinking.clearRetainingCapacity();
+                signature.clearRetainingCapacity();
+                try thinking.writer.writeAll(block.thinking orelse "");
+                try signature.writer.writeAll(block.signature orelse "");
+                try w.writeAll("\"reasoning_content\":");
+                try json(w, block.thinking orelse "");
+            } else return error.UnsupportedProviderContent;
+        } else if (std.mem.eql(u8, kind, "content_block_delta")) {
+            const delta = event.delta orelse return error.InvalidEvent;
+            const delta_type = delta.type orelse return error.InvalidEvent;
+            const index = event.index orelse return error.InvalidEvent;
+            if (std.mem.eql(u8, delta_type, "text_delta")) {
+                try w.writeAll("\"content\":");
+                try json(w, delta.text orelse return error.InvalidEvent);
+            } else if (std.mem.eql(u8, delta_type, "input_json_delta")) {
+                if (!tools[index]) return error.InvalidEvent;
+                const partial = delta.partial_json orelse return error.InvalidEvent;
+                arguments[index] = arguments[index] or partial.len > 0;
+                try w.print("\"tool_calls\":[{{\"index\":{d},\"function\":{{\"arguments\":", .{tool_indices[index].?});
+                try json(w, partial);
+                try w.writeAll("}}]");
+            } else if (std.mem.eql(u8, delta_type, "thinking_delta") or std.mem.eql(u8, delta_type, "signature_delta")) {
+                if (thinking_index != index) return error.InvalidEvent;
+                if (std.mem.eql(u8, delta_type, "thinking_delta")) {
+                    const text = delta.thinking orelse return error.InvalidEvent;
+                    if (thinking.written().len + text.len > 1024 * 1024) return error.ProviderStateTooLarge;
+                    try thinking.writer.writeAll(text);
+                    try w.writeAll("\"reasoning_content\":");
+                    try json(w, text);
+                } else {
+                    const text = delta.signature orelse return error.InvalidEvent;
+                    if (signature.written().len + text.len > 1024 * 1024) return error.ProviderStateTooLarge;
+                    try signature.writer.writeAll(text);
+                }
+            } else return error.UnsupportedProviderContent;
+        } else if (std.mem.eql(u8, kind, "content_block_stop")) {
+            const index = event.index orelse return error.InvalidEvent;
+            if (thinking_index == index) {
+                try w.writeAll("\"reasoning_details\":[{\"type\":\"thinking\",\"thinking\":");
+                try json(w, thinking.written());
+                try w.writeAll(",\"signature\":");
+                try json(w, signature.written());
+                try w.writeAll("}]");
+                thinking_index = null;
+            }
+            if (tools[index] and !arguments[index]) {
+                try w.print("\"tool_calls\":[{{\"index\":{d},\"function\":{{\"arguments\":\"{{}}\"}}}}]", .{tool_indices[index].?});
+                arguments[index] = true;
+            }
+        } else if (std.mem.eql(u8, kind, "message_start")) {
+            usage = (event.message orelse return error.InvalidEvent).usage;
+            // The start output count is provisional; retain the final count only.
+            if (usage) |*value| value.output_tokens = null;
+        } else if (std.mem.eql(u8, kind, "message_delta")) {
+            const stop = (event.delta orelse return error.InvalidEvent).stop_reason orelse return error.InvalidEvent;
+            reason = if (std.mem.eql(u8, stop, "tool_use")) "tool_calls" else if (std.mem.eql(u8, stop, "max_tokens")) "length" else if (std.mem.eql(u8, stop, "end_turn") or std.mem.eql(u8, stop, "stop_sequence")) "stop" else return error.InvalidFinishReason;
+            usage = event.usage;
+            finished = true;
+        } else if (std.mem.eql(u8, kind, "ping")) continue else return error.UnsupportedProviderContent;
+        try w.writeByte('}');
+        if (reason) |value| {
+            try w.writeAll(",\"finish_reason\":");
+            try json(w, value);
+        }
+        try w.writeAll("}]");
+        if (usage) |value| {
+            try w.writeAll(",\"usage\":{");
+            if (value.input_tokens) |input| try w.print("\"prompt_tokens\":{d},", .{input +| (value.cache_read_input_tokens orelse 0) +| (value.cache_creation_input_tokens orelse 0)});
+            try w.writeAll("\"completion_tokens\":");
+            try json(w, value.output_tokens);
+            if (value.cache_read_input_tokens != null or value.cache_creation_input_tokens != null) {
+                try w.writeAll(",\"prompt_tokens_details\":{");
+                if (value.cache_read_input_tokens) |cached| try w.print("\"cached_tokens\":{d}", .{cached});
+                if (value.cache_creation_input_tokens) |created| {
+                    if (value.cache_read_input_tokens != null) try w.writeByte(',');
+                    try w.print("\"cache_write_tokens\":{d}", .{created});
+                }
+                try w.writeByte('}');
+            }
+            try w.writeByte('}');
+        }
+        try w.writeByte('}');
+        const deltas = try reducer.accept(out.written(), request.cancel_flag.load(.seq_cst));
+        if (deltas.content) |text| request.events.emit(.{ .content_delta = text });
+        for (deltas.reasoning) |delta| if (delta) |text| request.events.emit(.{ .reasoning_delta = text });
+    }
+    return error.IncompleteStream;
+}
+
+test "deferred tools preserve Anthropic prefix and append definitions" {
+    const alloc = std.testing.allocator;
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "Find action" },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "search-1", .name = "tool_search", .arguments_json = "{\"query\":\"action\"}" }} },
+        .{ .role = .tool, .tool_call_id = "search-1", .tool_name = "tool_search", .content = "Act", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"action\",\"description\":\"Act\",\"inputSchema\":{\"type\":\"object\"}}]" } },
+    };
+    var request: streams.RequestData = .{ .model = "claude-test", .instructions = &.{.{ .role = .system, .content = "Stable" }}, .messages = messages[0..1], .tool_choice = .auto, .provider_options = .{}, .tools = .{ .advertised_names = &.{"tool_search"}, .advertised_functions = &.{.{ .name = "tool_search", .description = "Search" }} } };
+    const before = try build(alloc, request);
+    defer alloc.free(before);
+    request.messages = &messages;
+    request.tools.selected_dynamic = &.{.{ .name = "action", .description = "Changed", .input_schema = .{ .object = .empty }, .deferred = true }};
+    const after = try build(alloc, request);
+    defer alloc.free(after);
+    // Remove only the closing messages-array bracket and root brace.
+    try std.testing.expect(std.mem.startsWith(u8, after, before[0 .. before.len - 2]));
+    try std.testing.expect(std.mem.find(u8, after, "\"tool_addition\"") != null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, after, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.value.object.get("tools").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 4), parsed.value.object.get("messages").?.array.items.len);
+    request.messages = messages[0..1];
+    request.tools.advertised_names = &.{ "tool_search", "call_tool" };
+    request.tools.advertised_functions = &.{ .{ .name = "tool_search", .description = "Search" }, .{ .name = "call_tool", .description = "Call a discovered action" } };
+    const compatible_before = try buildConfigured(alloc, request, null, .call_tool);
+    defer alloc.free(compatible_before);
+    request.messages = &messages;
+    const compatible_after = try buildConfigured(alloc, request, null, .call_tool);
+    defer alloc.free(compatible_after);
+    try std.testing.expect(std.mem.startsWith(u8, compatible_after, compatible_before[0 .. compatible_before.len - 2]));
+    try std.testing.expect(std.mem.find(u8, compatible_after, "\"call_tool\"") != null);
+    try std.testing.expect(std.mem.find(u8, compatible_after, "tool_addition") == null);
+    const compatible = try std.json.parseFromSlice(std.json.Value, alloc, compatible_after, .{});
+    defer compatible.deinit();
+    try std.testing.expectEqual(@as(usize, 2), compatible.value.object.get("tools").?.array.items.len);
+    const content = compatible.value.object.get("messages").?.array.items[2].object.get("content").?.array.items[0].object.get("content").?.string;
+    try std.testing.expect(std.mem.find(u8, content, "Changed") == null);
+    try std.testing.expect(std.mem.find(u8, content, "Act\"") != null);
+}
+
+test "Anthropic stream rejects malformed and incomplete events" {
+    const Fake = @import("host_transport_testing.zig").FakeTransport;
+    var fake: Fake = .{ .responses = &.{} };
+    defer fake.deinit();
+    const cases = [_]struct { body: []const u8, expected: anyerror }{
+        .{ .body = "data: {\"type\":\"content_block_start\",\"index\":0}\n\n", .expected = error.InvalidEvent },
+        .{ .body = "data: {\"type\":\"message_stop\"}\n\n", .expected = error.IncompleteStream },
+        .{ .body = "data: {\"type\":\"content_block_start\",\"index\":256}\n\n", .expected = error.TooManyTools },
+        .{ .body = "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"unknown\"}}\n\n", .expected = error.UnsupportedProviderContent },
+        .{ .body = "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n", .expected = error.IncompleteStream },
+    };
+    for (cases) |case| {
+        var reader: std.Io.Reader = .fixed(case.body);
+        try std.testing.expectError(case.expected, consume(std.testing.allocator, &reader, fake.request(.host_managed), null));
+    }
+}
+
+test "Anthropic thinking signatures replay and cache usage survives message delta" {
+    const alloc = std.testing.allocator;
+    const Fake = @import("host_transport_testing.zig").FakeTransport;
+    var fake = Fake{ .responses = &.{} };
+    defer fake.deinit();
+    const body =
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":64,\"output_tokens\":0,\"cache_read_input_tokens\":128,\"cache_creation_input_tokens\":32}}}\n\n" ++
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n" ++
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Inspect carefully\"}}\n\n" ++
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"opaque-signed\"}}\n\n" ++
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" ++
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"reply\"}}\n\n" ++
+        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n" ++
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n" ++
+        "data: {\"type\":\"message_stop\"}\n\n";
+    var reader: std.Io.Reader = .fixed(body);
+    var result = try consume(alloc, &reader, fake.request(.host_managed), null);
+    defer result.deinit(alloc);
+    const completion = result.completed.completion;
+    try std.testing.expectEqual(@as(?u64, 224), completion.usage.input_tokens);
+    try std.testing.expectEqual(@as(?u64, 7), completion.usage.output_tokens);
+    try std.testing.expectEqual(@as(?u64, 128), completion.usage.cache_read_tokens);
+    try std.testing.expectEqual(@as(?u64, 32), completion.usage.cache_write_tokens);
+    const messages = [_]types.ChatMessage{.{ .role = .assistant, .content = "reply", .provider_replay = .{
+        .source = .{ .provider = .codex, .model = "test" },
+        .parts_json = completion.provider_state_json.?,
+    } }};
+    const next = try buildFor(alloc, .{ .model = "test", .messages = &messages, .instructions = &.{}, .provider_options = .{}, .tool_choice = .auto }, .codex);
+    defer alloc.free(next);
+    const valid = try std.json.parseFromSlice(std.json.Value, alloc, next, .{});
+    defer valid.deinit();
+    try std.testing.expect(std.mem.find(u8, next, "\"thinking\":\"Inspect carefully\",\"signature\":\"opaque-signed\"") != null);
+}
+
+test "Anthropic content block indices map to contiguous tool ordinals" {
+    const alloc = std.testing.allocator;
+    const Fake = @import("host_transport_testing.zig").FakeTransport;
+    var fake = Fake{ .responses = &.{} };
+    defer fake.deinit();
+    var request = fake.request(.host_managed);
+    request.tools = .{ .advertised_names = &.{"lookup"}, .advertised_functions = &.{.{ .name = "lookup", .description = "Lookup" }} };
+    const body =
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"Checking\"}}\n\n" ++
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" ++
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_lookup\",\"name\":\"lookup\"}}\n\n" ++
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n" ++
+        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n" ++
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":7}}\n\n" ++
+        "data: {\"type\":\"message_stop\"}\n\n";
+    var reader: std.Io.Reader = .fixed(body);
+    var result = try consume(alloc, &reader, request, null);
+    defer result.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), result.completed.completion.tool_calls.len);
+    try std.testing.expectEqualStrings("call_lookup", result.completed.completion.tool_calls[0].id);
+    try std.testing.expectEqualStrings("{}", result.completed.completion.tool_calls[0].arguments_json);
+}
+
+test "deferred Messages native and callTool preserve saved schemas after repeated search" {
+    const alloc = std.testing.allocator;
+    const saved = "[{\"name\":\"action\",\"description\":\"old\",\"inputSchema\":{}},{\"name\":\"removed\",\"description\":\"removed\",\"inputSchema\":{}}]";
+    const messages = [_]types.ChatMessage{
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "s1", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "s1", .tool_name = "tool_search", .content = "Search results", .tool_result_memory = .{ .loaded_tools_json = saved } },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "s2", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "s2", .tool_name = "tool_search", .content = "Search results", .tool_result_memory = .{ .loaded_tools_json = saved } },
+    };
+    const schema = try std.json.parseFromSlice(std.json.Value, alloc, "{\"type\":\"object\",\"required\":[\"updated\"]}", .{});
+    defer schema.deinit();
+    var request: streams.RequestData = .{ .model = "claude-test", .instructions = &.{}, .messages = &messages, .tool_choice = .auto, .provider_options = .{}, .tools = .{ .selected_dynamic = &.{.{ .name = "action", .description = "current", .input_schema = schema.value, .deferred = true }} } };
+    for ([_]@import("../core/agent/deferred_tool_mode.zig").Mode{ .native, .call_tool }) |mode| {
+        const body = try buildConfigured(alloc, request, null, mode);
+        defer alloc.free(body);
+        try std.testing.expect(std.mem.find(u8, body, "updated") == null);
+        try std.testing.expect(std.mem.find(u8, body, "removed") != null);
+        try std.testing.expect(std.mem.find(u8, body, "old") != null);
+        if (mode == .native) try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\"type\":\"tool_addition\""));
+    }
+    request.tools.selected_dynamic = &.{};
+    for ([_]@import("../core/agent/deferred_tool_mode.zig").Mode{ .native, .call_tool }) |mode| {
+        const body = try buildConfigured(alloc, request, null, mode);
+        defer alloc.free(body);
+        try std.testing.expect(std.mem.find(u8, body, "action") != null);
+        try std.testing.expect(std.mem.find(u8, body, "removed") != null);
+    }
+}
+
+test "Anthropic messages carry user and tool-result images as image blocks" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const png = try alloc.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(png_b64));
+    defer alloc.free(png);
+    try std.base64.standard.Decoder.decode(png, png_b64);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pixel.png", .data = png });
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const abs = try @import("../core/shared/io.zig").dirRealpathAlloc(arena, tmp.dir, "pixel.png");
+    var attachment: types.ImageAttachment = .{ .id = 1, .path = try arena.dupe(u8, abs), .media_type = try arena.dupe(u8, "image/png") };
+    try image_attachments.captureImageSnapshot(arena, &attachment, std.Io.Dir.path.dirname(abs).?);
+    var tool_image: types.ToolImage = .{ .data = try arena.dupe(u8, png_b64), .mime_type = try arena.dupe(u8, "image/png") };
+    _ = &tool_image;
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "what is this", .images = &.{attachment} },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "read-1", .name = "read_file", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "read-1", .tool_name = "read_file", .content = "shot", .tool_result_memory = .{ .tool_images = &.{tool_image} } },
+        .{ .role = .user, .content = "again" },
+    };
+    const request: streams.RequestData = .{ .model = "claude-test", .instructions = &.{.{ .role = .system, .content = "Stable" }}, .messages = messages[0..1], .tool_choice = .auto, .provider_options = .{}, .tools = .{} };
+    const first = try build(alloc, request);
+    defer alloc.free(first);
+    var later = request;
+    later.messages = &messages;
+    const second = try build(alloc, later);
+    defer alloc.free(second);
+    // The image turn stays a byte-identical prefix of the next request.
+    try std.testing.expect(std.mem.startsWith(u8, second, first[0 .. first.len - 2]));
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, second, .{});
+    defer parsed.deinit();
+    const items = parsed.value.object.get("messages").?.array.items;
+    const user = items[0].object.get("content").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), user.len);
+    try std.testing.expectEqualStrings("what is this", user[0].object.get("text").?.string);
+    const source = user[1].object.get("source").?.object;
+    try std.testing.expectEqualStrings("image", user[1].object.get("type").?.string);
+    try std.testing.expectEqualStrings("base64", source.get("type").?.string);
+    try std.testing.expectEqualStrings("image/png", source.get("media_type").?.string);
+    try std.testing.expectEqualStrings(png_b64, source.get("data").?.string);
+    const result = items[2].object.get("content").?.array.items[0].object;
+    try std.testing.expectEqualStrings("tool_result", result.get("type").?.string);
+    const parts = result.get("content").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), parts.len);
+    try std.testing.expectEqualStrings("shot", parts[0].object.get("text").?.string);
+    try std.testing.expectEqualStrings(png_b64, parts[1].object.get("source").?.object.get("data").?.string);
+}
+
+/// Retries the same typed turn, without committing a mode until a reply succeeds.
+pub fn negotiate(
+    raw: ?*anyopaque,
+    alloc: Allocator,
+    initial: streams.ModelRequest,
+    provider_name: []const u8,
+    build_fn: *const fn (?*anyopaque, Allocator, streams.RequestData) anyerror![]u8,
+    send_fn: *const fn (?*anyopaque, Allocator, streams.ModelRequest) anyerror!streams.Result,
+) !streams.Result {
+    var request = initial;
+    var owned: ?[]u8 = null;
+    defer if (owned) |body| alloc.free(body);
+    while (true) {
+        if (request.prepared_request_body == null) {
+            owned = try build_fn(raw, alloc, request.data());
+            request.prepared_request_body = owned;
+        }
+        var result = try send_fn(raw, alloc, request);
+        if (result == .completed) {
+            const previous = if (initial.negotiated_deferred_tool_mode) |saved| saved.* else initial.deferred_tool_mode;
+            // A checkpoint requested by persistence must see the same mode as
+            // the event it is about to cover. Failed persistence rolls back.
+            if (initial.negotiated_deferred_tool_mode) |saved| saved.* = request.deferred_tool_mode;
+            if (request.deferred_tool_mode != initial.deferred_tool_mode) if (initial.deferred_tool_mode_commit) |commit| {
+                commit.save(request.deferred_tool_mode) catch |err| {
+                    if (initial.negotiated_deferred_tool_mode) |saved| saved.* = previous;
+                    result.deinit(alloc);
+                    return err;
+                };
+            };
+            return result;
+        }
+        const status = result.failed.http_status orelse return result;
+        const next = request.deferred_tool_mode.next() orelse return result;
+        if ((status != 400 and status != 422) or !try hasDeferredContent(alloc, request.prepared_request_body.?, request.deferred_tool_mode)) return result;
+        @import("../core/shared/debug_trace.zig").logf("gateway", "deferred_tool_downgrade provider={s} model={s} from={s} to={s} status={d}", .{ provider_name, request.model, @tagName(request.deferred_tool_mode), @tagName(next), status });
+        result.deinit(alloc);
+        if (owned) |body| alloc.free(body);
+        owned = null;
+        request.prepared_request_body = null;
+        request.deferred_tool_mode = next;
+        // This is the same admitted logical request, with no streamed output.
+        // The gateway step's admission guard permits exactly one admission.
+        request.admission = .{ .context = initial.admission.context, .admit_fn = alreadyAdmitted };
+    }
+}
+
+test "deferred Messages merge parallel results images and user interruptions with stable bytes" {
+    const alloc = std.testing.allocator;
+    const messages = [_]types.ChatMessage{
+        .{ .role = .assistant, .tool_calls = &.{ .{ .id = "a", .name = "one", .arguments_json = "{}" }, .{ .id = "b", .name = "two", .arguments_json = "{}" } } },
+        .{ .role = .tool, .tool_call_id = "a", .content = "first", .tool_result_memory = .{ .tool_images = &.{.{ .mime_type = @constCast("image/png"), .data = @constCast("aW1hZ2U=") }} } },
+        .{ .role = .tool, .tool_call_id = "b", .content = "second" },
+        .{ .role = .user, .content = "interruption" },
+        .{ .role = .user, .content = "another" },
+    };
+    for ([_]@import("../core/agent/deferred_tool_mode.zig").Mode{ .native, .reference, .call_tool }) |mode| {
+        var request: streams.RequestData = .{ .model = "fixture", .messages = messages[0..3], .tool_choice = .auto, .provider_options = .{} };
+        const first = try buildConfigured(alloc, request, null, mode);
+        defer alloc.free(first);
+        request.messages = messages[0..4];
+        const parallel = try buildConfigured(alloc, request, null, mode);
+        defer alloc.free(parallel);
+        // Only reopen the final user's content array, message, messages array and root.
+        try std.testing.expect(std.mem.startsWith(u8, parallel, first[0 .. first.len - 4]));
+        request.messages = &messages;
+        const interrupted = try buildConfigured(alloc, request, null, mode);
+        defer alloc.free(interrupted);
+        try std.testing.expect(std.mem.startsWith(u8, interrupted, parallel[0 .. parallel.len - 4]));
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, interrupted, .{});
+        defer parsed.deinit();
+        const wire = parsed.value.object.get("messages").?.array.items;
+        try std.testing.expectEqual(@as(usize, 2), wire.len);
+        const blocks = wire[1].object.get("content").?.array.items;
+        try std.testing.expectEqual(@as(usize, 4), blocks.len);
+        try std.testing.expectEqualStrings("tool_result", blocks[0].object.get("type").?.string);
+        try std.testing.expectEqualStrings("image", blocks[0].object.get("content").?.array.items[1].object.get("type").?.string);
+        try std.testing.expectEqualStrings("tool_result", blocks[1].object.get("type").?.string);
+        try std.testing.expectEqualStrings("interruption", blocks[2].object.get("text").?.string);
+        try std.testing.expectEqualStrings("another", blocks[3].object.get("text").?.string);
+    }
+    const hoisted = try mergeUsers(alloc, "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"before\"},{\"type\":\"tool_result\",\"tool_use_id\":\"a\",\"content\":\"result\"},{\"type\":\"text\",\"text\":\"after\"}]}]}");
+    defer alloc.free(hoisted);
+    try std.testing.expect(std.mem.find(u8, hoisted, "tool_result").? < std.mem.find(u8, hoisted, "before").?);
+    try std.testing.expect(std.mem.find(u8, hoisted, "before").? < std.mem.find(u8, hoisted, "after").?);
+}
+
+test "deferred reference declarations append first saved schemas and survive catalog removal" {
+    const alloc = std.testing.allocator;
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "Find tools" },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "a", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "a", .content = "First", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"first\",\"description\":\"original\",\"inputSchema\":{\"type\":\"object\"}}]" } },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "b", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "b", .content = "Next", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"first\",\"description\":\"changed\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"second\",\"description\":\"second\",\"inputSchema\":{\"type\":\"object\"}}]" } },
+    };
+    for ([_]@import("../core/agent/deferred_tool_mode.zig").Mode{ .native, .reference, .call_tool }) |mode| {
+        var request: streams.RequestData = .{ .model = "fixture", .messages = messages[0..3], .tool_choice = .auto, .provider_options = .{}, .tools = .{ .advertised_names = &.{ "tool_search", "call_tool" }, .advertised_functions = &.{ .{ .name = "tool_search", .description = "Search" }, .{ .name = "call_tool", .description = "Call a deferred tool by name" } } } };
+        const first = try buildConfigured(alloc, request, null, mode);
+        defer alloc.free(first);
+        request.messages = &messages;
+        const second = try buildConfigured(alloc, request, null, mode);
+        defer alloc.free(second);
+        const first_parsed = try std.json.parseFromSlice(std.json.Value, alloc, first, .{});
+        defer first_parsed.deinit();
+        const second_parsed = try std.json.parseFromSlice(std.json.Value, alloc, second, .{});
+        defer second_parsed.deinit();
+        const tools1 = first_parsed.value.object.get("tools").?.array.items;
+        const tools2 = second_parsed.value.object.get("tools").?.array.items;
+        for (tools1, 0..) |entry, i| {
+            const old = try std.json.Stringify.valueAlloc(alloc, entry, .{});
+            defer alloc.free(old);
+            const new = try std.json.Stringify.valueAlloc(alloc, tools2[i], .{});
+            defer alloc.free(new);
+            try std.testing.expectEqualStrings(old, new);
+        }
+        const marker = "\"messages\":[";
+        const start1 = std.mem.find(u8, first, marker).?;
+        const start2 = std.mem.find(u8, second, marker).?;
+        try std.testing.expect(std.mem.startsWith(u8, second[start2..], first[start1 .. first.len - 2]));
+        // Restore the actual checkpoint, including its first saved definitions.
+        const Agent = @import("../core/agent/runtime/agent.zig").Agent;
+        var agent: Agent = .{ .deferred_tool_mode = mode };
+        defer agent.deinit(alloc);
+        var steps: [2]types.ToolExecutionStep = undefined;
+        var results: [2]types.PersistedToolResult = undefined;
+        for (0..2) |i| {
+            const result = messages[2 + i * 2];
+            results[i] = .{ .tool_call_id = @constCast(result.tool_call_id.?), .tool_name = @constCast("tool_search"), .status = .success, .output = @constCast(result.content.?), .output_bytes = result.content.?.len, .stored_output_bytes = result.content.?.len, .loaded_tools_json = result.tool_result_memory.?.loaded_tools_json };
+            steps[i] = .{ .tool_calls = @constCast(messages[1 + i * 2].tool_calls), .tool_results = results[i .. i + 1] };
+        }
+        try agent.appendHistoryEntry(alloc, .{ .assistant = .{ .user = .{ .text = @constCast("Find tools") }, .assistant = @constCast(""), .execution = .{ .tool_steps = &steps } } });
+        const checkpoint = try agent.checkpoint(alloc, .{});
+        defer alloc.free(checkpoint);
+        var reopened: Agent = .{};
+        defer reopened.deinit(alloc);
+        const meta = try reopened.restoreCheckpoint(alloc, checkpoint);
+        defer meta.free(alloc);
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        var replayed: std.ArrayList(types.ChatMessage) = .empty;
+        try @import("../core/session/session.zig").appendHistoryChatMessages(arena.allocator(), &replayed, reopened.history.items);
+        request.messages = replayed.items;
+        // No live selected tools remain; removed historical names still serialize.
+        const restored = try buildConfigured(alloc, request, null, reopened.deferred_tool_mode);
+        defer alloc.free(restored);
+        try std.testing.expectEqualStrings(second, restored);
+        if (mode == .reference) {
+            try std.testing.expectEqual(@as(usize, 4), tools2.len);
+            try std.testing.expectEqualStrings("original", tools2[2].object.get("description").?.string);
+            try std.testing.expectEqualStrings("second", tools2[3].object.get("name").?.string);
+            try std.testing.expect(std.mem.find(u8, second, "tool_reference") != null);
+            try std.testing.expect(std.mem.find(u8, second, "tool_addition") == null);
+        }
+    }
+}
+
+fn alreadyAdmitted(_: *anyopaque) !void {}

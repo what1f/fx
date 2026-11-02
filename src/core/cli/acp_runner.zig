@@ -39,6 +39,7 @@ pub const Config = struct {
     /// Raw reasoning-effort override using the kernel's ReasoningEffort.parse
     /// vocabulary. Borrowed; must outlive the server run.
     effort_override: ?[]const u8 = null,
+    auto_compact: ?@import("../compactor/compactor.zig").Trigger = null,
     /// Fast-lane override matching --fast/--no-fast. Null leaves the startup
     /// and session defaults untouched.
     fast_override: ?bool = null,

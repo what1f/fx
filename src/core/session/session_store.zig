@@ -647,7 +647,7 @@ fn resolveSessionSnapshotLocators(
 
     for (history) |*turn| {
         const images = switch (turn.*) {
-            .compacted_summary => continue,
+            .compacted_summary, .host_context => continue,
             .assistant => |*entry| entry.user.images,
             .interrupted => |*entry| entry.user.images,
         };

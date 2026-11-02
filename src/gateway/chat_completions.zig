@@ -17,14 +17,18 @@ const types = @import("../core/shared/types.zig");
 const model_provider = @import("../core/config/model_provider.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
 const sse = @import("sse.zig");
+const responses = @import("configured_responses.zig");
+const anthropic = @import("anthropic_protocol.zig");
+
 const Allocator = std.mem.Allocator;
 
 /// Every callback borrows the immutable definition from the owning profile runtime.
 pub fn bundle(definition: *const definitions.Definition) provider_set.Bundle {
     const context: *anyopaque = @ptrCast(@constCast(definition));
     return .{
-        .agent_stream = .{ .context = context, .stream_fn = stream, .build_request_fn = build, .project_replay_fn = project_replay },
+        .agent_stream = .{ .context = context, .stream_fn = stream, .build_request_fn = build, .project_replay_fn = if (definition.protocol == .@"openai-responses") @import("responses_protocol.zig").selectReplayParts else project_replay },
         .model_catalog = model_catalog_provider(definition),
+        .fallback_model_capabilities_fn = fallbackCapabilities,
         .cli_model_catalog = .{ .context = context, .fetch_fn = fetch_cli_catalog },
         .permission_reviewer = .{ .context = context, .review_fn = review },
     };
@@ -54,6 +58,8 @@ fn build(raw: ?*anyopaque, alloc: Allocator, request: streams.RequestData) ![]u8
 /// The request body for `definition`, omitting replay parts recorded for
 /// another endpoint. Caller owns the result.
 pub fn build_for(definition: *const definitions.Definition, alloc: Allocator, request: streams.RequestData) ![]u8 {
+    if (definition.protocol == .@"anthropic-messages") return anthropic.buildConfigured(alloc, request, bound_identity(definition), request.deferred_tool_mode);
+    if (definition.protocol == .@"openai-responses") return responses.build(alloc, request, bound_identity(definition));
     const identity = bound_identity(definition);
     for (request.messages) |message| if (message.provider_replay) |replay| {
         if (!replay.matches(.{ .provider = identity, .model = request.model })) {
@@ -107,6 +113,12 @@ test "chat completions adapter binds replay to endpoint authority and wires proj
 }
 
 fn stream(raw: ?*anyopaque, alloc: Allocator, request: streams.ModelRequest) !streams.Result {
+    const definition = definition_at(raw);
+    if (definition.protocol == .@"anthropic-messages") return anthropic.negotiate(raw, alloc, request, definition.id, build, streamOnce);
+    return streamOnce(raw, alloc, request);
+}
+
+fn streamOnce(raw: ?*anyopaque, alloc: Allocator, request: streams.ModelRequest) !streams.Result {
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
     const definition = definition_at(raw);
     if (request.credential.credentialSource() != .configured) return error.ConfiguredProviderCredentialRequired;
@@ -151,8 +163,13 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
     var operation = client_mod.PostOperation{
         .client = &client,
         .uri = uri,
-        .authorization = authorization,
-        .extra_headers = &.{.{ .name = "accept", .value = "text/event-stream" }},
+        .authorization = if (definition.protocol == .@"anthropic-messages") null else authorization,
+        .extra_headers = if (definition.protocol == .@"anthropic-messages") (&[_]std.http.Header{
+            .{ .name = "x-api-key", .value = token orelse "" },
+            anthropic.headers[1],
+            anthropic.headers[2],
+            anthropic.headers[3],
+        })[0..(if (request.deferred_tool_mode == .native) @as(usize, 4) else 3)] else &.{.{ .name = "accept", .value = "text/event-stream" }},
     };
     try request.admission.admit();
     var opened = try client_mod.openBoundedPost(alloc, request.cancel_flag, phase_deadline(30_000, request.deadline), &operation);
@@ -202,9 +219,9 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
             detail = redacted;
         }
 
-        return .{ .failed = .{ .kind = failure_kind(response.head.status), .detail = detail, .retry_after_seconds = retry_after, .ownership = .owned } };
+        return .{ .failed = .{ .http_status = @intCast(@backingInt(response.head.status)), .kind = failure_kind(response.head.status), .detail = detail, .retry_after_seconds = retry_after, .ownership = .owned } };
     }
-    var result = consume(alloc, reader, request, watch.progress()) catch |err| return watch.failure(err);
+    var result = (if (definition.protocol == .@"anthropic-messages") anthropic.consume(alloc, reader, request, watch.progress()) else if (definition.protocol == .@"openai-responses") responses.consume(alloc, request, reader, watch.progress()) else consume(alloc, reader, request, watch.progress())) catch |err| return watch.failure(err);
     if (watch.finish()) |err| {
         result.deinit(alloc);
         return err;
@@ -236,11 +253,18 @@ pub fn consume(alloc: Allocator, reader: *std.Io.Reader, request: streams.ModelR
 }
 
 /// The returned entry borrows its strings; fetch_catalog replaces them with owned copies.
+const configured_efforts = model_capabilities.ReasoningEffortOptions.fromSlice(&.{
+    .literal("none"), .literal("minimal"), .literal("low"), .literal("medium"),
+    .literal("high"), .literal("xhigh"),   .literal("max"), .literal("ultra"),
+});
+
 fn metadata_entry(metadata: definitions.ModelMetadata) catalog.ModelCatalogEntry {
     const vision = metadata.supports_vision orelse false;
     return .{
         .id = @constCast(metadata.id),
         .model_type = @constCast("language"),
+        .has_reasoning = true,
+        .reasoning_efforts = .fromOwnedSlice(@constCast(configured_efforts.slice())),
         .has_tool_use = metadata.supports_tool_use orelse false,
         // Chat completions sends images as inline base64 content parts, so
         // vision support implies file input through the same path.
@@ -251,8 +275,12 @@ fn metadata_entry(metadata: definitions.ModelMetadata) catalog.ModelCatalogEntry
     };
 }
 
+pub fn fallbackCapabilities(_: []const u8) model_capabilities.Capabilities {
+    return .{ .supports_reasoning = true, .reasoning_efforts = configured_efforts };
+}
+
 fn lookup_capabilities(raw: ?*anyopaque, model: []const u8) model_capabilities.Capabilities {
-    const metadata = definition_at(raw).model(model) orelse return .{};
+    const metadata = definition_at(raw).model(model) orelse return fallbackCapabilities(model);
     return model_capabilities.mergeCapabilities(.{}, model_catalog_metadata.fromCatalogEntry(metadata_entry(metadata.*)));
 }
 
@@ -263,6 +291,9 @@ fn fetch_catalog(raw: ?*anyopaque, alloc: Allocator, input: catalog.FetchInput) 
     errdefer catalog.freeModelCatalog(alloc, &entries);
     for (definition.model_metadata) |metadata| {
         var entry = metadata_entry(metadata);
+        entry.reasoning_efforts = .empty;
+        try entry.reasoning_efforts.appendSlice(alloc, configured_efforts.slice());
+        errdefer entry.reasoning_efforts.deinit(alloc);
         entry.id = try alloc.dupe(u8, entry.id);
         errdefer alloc.free(entry.id);
         entry.model_type = try alloc.dupe(u8, entry.model_type);
@@ -295,7 +326,7 @@ test "configured capability lookup matches catalog projection and preserves unkn
     try std.testing.expectEqual(@as(?u32, 1024), provider.lookupCapabilities("large").?.max_output_tokens);
     try std.testing.expect(provider.lookupCapabilities("partial").?.context_window == null);
     try std.testing.expect(provider.lookupCapabilities("unknown").?.max_output_tokens == null);
-    try std.testing.expectEqualDeep(model_capabilities.Capabilities{}, provider.lookupCapabilities("missing-fast").?);
+    try std.testing.expect(provider.lookupCapabilities("missing-fast").?.supports_reasoning);
 }
 
 fn fetch_cli_catalog(raw: ?*anyopaque, alloc: Allocator, input: gateway_provider.CliModelCatalogInput) gateway_provider.CliModelCatalogResult {

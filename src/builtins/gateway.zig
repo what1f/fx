@@ -320,6 +320,7 @@ fn buildAgentToolsJson(
         try model_tool_schema.writeBuiltinFunctionSchema(alloc, &out.writer, tool);
     }
     for (request.tools.selected_dynamic) |tool| {
+        if (tool.deferred) continue;
         if (toolNameSelected(request.tools.advertised_names, tool.name)) continue;
         if (!first) try out.writer.writeByte(',');
         first = false;

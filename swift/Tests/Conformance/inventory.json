@@ -1,0 +1,509 @@
+{
+  "baseline": "current fork checkout; regenerate and review when upstream test owners change",
+  "tests": [
+    {
+      "upstream": "sdk/tests/test-agent-bootstrap.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream native file through Swift; 65 invalid checkpoint creations fail before a later engine opens and closes successfully"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-codex.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete upstream native file unchanged against JavaScript and Swift through the provider-suite runner; Swift owns engine, session, storage, credentials and refresh behavior; adapter validates JavaScript-only input shapes"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-custom.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete upstream native file unchanged against JavaScript and Swift through the provider-suite runner; Swift owns engine, session, storage, credentials and refresh behavior; adapter validates JavaScript-only input shapes"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-effort.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete upstream native file unchanged through Swift; real core validates capabilities and effort strings; adapter alone translates JavaScript model shapes, deprecated top-level options, and error classes"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-fast.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete upstream native file unchanged through Swift; real core validates capabilities and effort strings; adapter alone translates JavaScript model shapes, deprecated top-level options, and error classes"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-grok.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete upstream native file unchanged against JavaScript and Swift through the provider-suite runner; Swift owns engine, session, storage, credentials and refresh behavior; adapter validates JavaScript-only input shapes"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-images.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete upstream native file through Swift with original assertions; includes synchronous admission, Blob/File reads, preparation, transport failures, queued steering limits, cancellation before dispatch, checkpoints and recovery, image dimensions and history windows, rich tool fallback and response frame limits"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-provider-tools.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream native file through Swift; provider advertisement, streamed search events and results, and checkpoint restoration without a host executor"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-request-context.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream native file through Swift; instructions, session affinity, host fetch ownership, request attempts, response identifiers and credential exclusion use the public Swift transport observer"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-reserved-tool-names.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged native file through Swift; write_file and edit_file host executors receive full arguments and return successful results under their original names; this fixture does not qualify a public permission callback"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-steering.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed via Swift adapter on macOS arm64, Node.js 25.9.0"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-step-limit.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed via Swift adapter on macOS arm64, Node.js 25.9.0"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-tool-start.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: all upstream assertions through Swift; loader normalizes only the expected JSON preview object-key order to Swift canonical order; five native tests separately cover byte boundaries, UTF-8, full executor input, stable event records and SQLite reopen"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-transport-retry.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream native file through Swift; bounded pre-header retry, sampled cumulative body progress, ordinary cancellation and cancellation awaited from the retry observer; adapter translates host error names and synchronizes the JavaScript callback boundary only"
+    },
+    {
+      "upstream": "sdk/tests/test-agent-ultrafast-options.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream native file through Swift; kernel-selected default models, ultrafast routing, pricing eligibility, mode precedence, warnings and rejection; adapter reports actual Swift driver process exit after runtime use"
+    },
+    {
+      "upstream": "sdk/tests/test-backend-info.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: JS backend selection and Wasm probe/cache mechanisms do not apply to a fixed linked Swift core; native startup failure, ABI checking and cleanup have C/Swift evidence. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-browser-wasm.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: browser-suite import wrapper; browser rendering/JSPI do not apply; prompt, cancellation and recovery map to native engine owners. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-chatgpt-sign-in.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream file through Swift; PKCE, callbacks, device polling, cancellation and host refresh use FxSignIn and existing native credential refresh"
+    },
+    {
+      "upstream": "sdk/tests/test-checkpoint.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: all five upstream native/native checkpoint scenarios through Swift, retaining original assertions for text, reasoning with text, reasoning-only, provider terminal tools and image restoration; loader skips only the unused WASM fixture read in native mode"
+    },
+    {
+      "upstream": "sdk/tests/test-core-browser.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: browser DOM/terminal rendering and JSPI do not apply; native stream/cancel/steering/checkpoint owners qualify the underlying agent behavior. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-core-cancel.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "original owner not executed through Swift: the Wasm-specific original file has not run through Swift; native cancellation and catalog/preparation cancellation have separate direct evidence, without claiming every original headers/body/late-response assertion."
+    },
+    {
+      "upstream": "sdk/tests/test-core-home-unavailable.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "original owner not executed through Swift: the original models a Wasm virtual filesystem with unavailable HOME; Swift uses real macOS absolute paths. Native text turns and relative-path admission have separate direct evidence."
+    },
+    {
+      "upstream": "sdk/tests/test-core-live.mjs",
+      "classification": "adapted",
+      "reason": "Credentialed gateway acceptance remains required; the original owner requires a real gateway key.",
+      "status": "pending: no credentialed live Swift gateway result; fixture HTTP and provider-suite results do not qualify this gate"
+    },
+    {
+      "upstream": "sdk/tests/test-core-output-pressure.mjs",
+      "classification": "adapted",
+      "reason": "Retain original pressure assertions through the Swift pull iterator; exclude only the final JavaScript-addon corruption injection, which cannot enter the C ABI.",
+      "status": "partial: original native pressure assertions pass through the real Swift pull iterator, including paused consumption, byte/event bounds, cancellation and reuse, independent owners, queued-tool suppression, pressure callback cancellation, and pending iterator return/throw. Only the final JavaScript-addon drainCore corruption injection is explicitly excluded. Native malformed-frame tests provide separate C/RPC boundary evidence. See output-pressure-loader.mjs and the current selected-runner qualification recorded in VALIDATION.md."
+    },
+    {
+      "upstream": "sdk/tests/test-core-output.mjs",
+      "classification": "adapted",
+      "reason": "Permission cancellation assertions execute through Swift; the loader adds required typed tool metadata. Original CoreOutput framing assertions still execute JavaScript. RPCBoundaryTests.swift and RPCClientTests.swift provide separate native Swift framing evidence.",
+      "status": "passed: the original output-control owner passes through Swift. The fixture transport acknowledges request-form cancellation after the mock processes its write; original assertions are unchanged. Native RPC tests separately cover malformed frames and lifecycle joins. This fixture does not prove a permission initiated by the real minimal kernel, whose built-in tools are disabled."
+    },
+    {
+      "upstream": "sdk/tests/test-core.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "original owner not executed through Swift: the Wasm-specific original file has not run through Swift; native stream, usage, provider request identity, checkpoint and close have direct Swift and original native-owner evidence."
+    },
+    {
+      "upstream": "sdk/tests/test-default-import.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: ESM export shape does not apply; separate Swift products and independent public SwiftPM consumers qualify imports; no original import-time zero-fetch assertion execution is claimed. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-durable-core.mjs",
+      "classification": "adapted",
+      "reason": "Select original cases by checked exact names and retain every assertion. The original JavaScript scripted fixture, closures and counters execute through a callback relay to FxDurableAgent<JSONValue, JSONValue>; Swift owns scheduling, leases, atomic journal marks, persistence and replay. Upstream pure log helpers remain fixture utilities and do not qualify Swift behavior. FxAgentRouter owns cross-agent forwarding; agents with distinct names on one store share a driver connection while callbacks remain scoped to their agent tokens. The JavaScript settings hook converts fixture options into native JSON settings persisted separately from context.",
+      "status": "partial: 25 selected original memory cases pass through Swift, covering replay and exported checkpoints, delivery yields with each step once, two-agent ordering, separate named agents' own sessions, message deduplication, refusal before any record, stopped-executor replacement, bounded stop and engine-open retries, cancellation of repeatedly stopped turns, recovery after engine-open outages, session halting, late end records, caller context and session settings retained across resumed turns, own-signal cancellation, image-shaped JSON retry and getter evaluation, preallocated session identity, and next input starting before terminal cleanup ends. Two additional original named-forwarding cases pass, one memory and one local, through FxAgentRouter and the shared driver transport. Exact memory selections are in generic-core.mjs; generic-core-results.json records exit 0, no signal and empty stderr. The named-forwarding selections are in generic-routing.mjs. Explicit completed marks commit atomically with opaque records and remain in the native snapshot after compaction. The separate generic-fresh-host companion kills host and driver after terminal append acknowledgement, then verifies no completed prompt or step executes in a fresh process; exported history and subsequent work remain correct. This companion is additional proof and is not counted as another original case. The full original World, public-route and queue-fault owner assertions have not executed. Portable HTTP wake, authenticated redelivery and compatible same-name admission now have separate native and public-consumer evidence recorded in VALIDATION.md. The local named-forwarding case qualifies Swift routing; it does not qualify World lifecycle or public route hooks. Native and independent public-consumer proofs remain separate from these selected upstream assertions. Direct native RouterReplicaTests qualifies compatible named workers on independent SQLite connections; this is separate from unexecuted original World route assertions."
+    },
+    {
+      "upstream": "sdk/tests/test-durable-harness.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "original owner not executed through Swift: the original validates JavaScript benchmark helper algorithms and spawns benchmark/crash drivers; no complete equivalent workload execution is claimed. Native tool ordering and crash recovery are qualified separately."
+    },
+    {
+      "upstream": "sdk/tests/test-durable-provider-crash.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream native file through Swift; six host SIGKILL/restart scenarios cover Codex, Grok and custom providers during reply/tool execution, new credentials on resume, session/account headers, safe lookup rerun and credential-free saved files; local fixture directories map to actual Swift SQLite stores; separate companion checks SIGKILL the Swift process itself"
+    },
+    {
+      "upstream": "sdk/tests/test-durable.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "partial: eleven unchanged session selections cover replay/cursors, isolation, completed-message deduplication, two-worker ordering, per-call tool context, model/instruction overrides, cancellation versus dropped views, image bytes, one read of an image getter, rejected model options with the original error code and explicit JavaScript idempotency declarations; five checkpoint, seven steering and seven delivery selections also pass. The two added local delivery cases cover acceptance immediately before a host crash and recovery of a non-idempotent send without sending twice; durable-additions-results.json records all four additions exiting 0 with no signal and empty stderr. One additional original local save-crash case passes with stable execution identity through the Swift driver, recorded separately in generic-durable-additions-results.json. The active-executor settled/flush bridge is now implemented and the original lookup-crash case passes, as recorded in the later qualification below. The complete original generic/World scenario set has not executed; portable contract evidence is separate; an earlier combined run failed queued-turn cancellation once; 100 normal reruns, twenty Address Sanitizer reruns and a subsequent 90/90 combined runner pass without explaining that failure, so its cause remains open. Public injectable host storage has native and independent-consumer proof, and the host queue contract has native and independent HTTP consumer proof. The complete original forwarding, World and queue-fault assertions have not executed; a deployed World/Vercel integration remains unqualified. Portable HTTP wake, authenticated queue redelivery, compatible replica admission and release recovery have separate native evidence; see DURABLE-ACCEPTANCE.md. Later qualification: the active-executor flush bridge is implemented; original local lookup-crash and save-crash, input/tool/steered image persistence, and eight text/image steer-start cases pass through Swift. generic-durable-steer-start.mjs retains original assertions, but does not implement the supplied JavaScript World queue descriptor. The historical selection passed 103/103; the current selected runner passes 106/106, without claiming every original owner assertion. Native SessionLeaseTests and AgentLeaseTests qualify timed renewal, noncooperative renewal expiry, fenced takeover and recovery without repeating a completed non-idempotent effect. OpeningRetryTests qualifies bounded transient stored-image read recovery. IntakeCancellationTests qualifies pre/postcommit cancellation for prompt and steer. These are direct Swift contracts; full World/provider coverage is not claimed. DurablePlacementTests and DurableVisibilityTests add direct native proof for waiting-prompt steering placement, idle cancellation, duplicate wakeups, rejected-input ID reuse, checkpointed steering, early subscriptions, completion without another journal read and bounded checkpointed worker loads across 128 turns. Eight test functions pass normally and under both sanitizers; they are not counted as original World cases. Additional direct native qualification: AgentOwnershipAdmissionTests holds successful claim/HTTP/tool ownership replies through real takeover and suppresses stale effects and writes (owners 598/628/659); DurableRecoveryBoundaryTests qualifies unrelated-load-independent acceptance (925) and unsafe-snapshot refusal with unplaced steering retained after reopen (1181). native-steer-redelivery.mjs executes actual text and image steers through timed SQLite ownership, observes renewal, SIGKILLs the Swift worker, retries before expiry, and completes from a fresh process after the final database expiry with one tool/start/end and stable execution identity (1504/1547). This is separate native evidence, not execution of the original World queue implementation."
+    },
+    {
+      "upstream": "sdk/tests/test-grok-sign-in.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream file through Swift; PKCE, callbacks, device polling, slowdown, cancellation, account lookup, refresh and credential normalization use Swift"
+    },
+    {
+      "upstream": "sdk/tests/test-hooks.mjs",
+      "classification": "adapted",
+      "reason": "All upstream assertions execute through Swift, including engine/journal behavior, durable resume, input waits, MCP spans, injected-runtime descendant authority and standalone helper cancellation. Both helper fixtures use actual Swift scopes and child options. Checked loader markers guard asynchronous frame/effect/cancellation acknowledgements and fixture cleanup; no assertion block is excluded. The bridge supplies omitted protocol metadata and preserves JavaScript callback/result identity. Native and differential checks additionally cover original errors, cyclic late results, already-cancelled scopes, effect call counts, bounds and invalidation.",
+      "status": "passed: complete hooks assertions through Swift with explicit IPC timing and protocol metadata adaptations"
+    },
+    {
+      "upstream": "sdk/tests/test-host-tool-cancel.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed via Swift adapter on macOS arm64, Node.js 25.9.0"
+    },
+    {
+      "upstream": "sdk/tests/test-host-tools.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed via Swift adapter on macOS arm64, Node.js 25.9.0"
+    },
+    {
+      "upstream": "sdk/tests/test-instruction-limits.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete upstream native file with original assertions through Swift; 65536-byte engine, skill and MCP bounds, including framing and rejection before runtime factory; bridge supplies omitted MCP protocol envelopes and closes its added foreign adapter"
+    },
+    {
+      "upstream": "sdk/tests/test-journal.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: all 77 upstream native/native cases through Swift, including named prompt/tool images, count/byte windows, 4104-image and 4112-image recovery, large checkpoints, original store failures, slow barriers, fencing, handoff and turn-ID replay; loader changes only fixture asset loading and IPC receipt waits; Swift-native tests also verify cancellation, SQLite image recovery and session image isolation"
+    },
+    {
+      "upstream": "sdk/tests/test-libfx-benchmark.mjs",
+      "classification": "platform-specific",
+      "reason": "Validates Node/Bun native and Wasm benchmark executables, report schemas, capacity counters and benchmark comparison tooling. These JavaScript benchmark programs are not Swift SDK features.",
+      "status": "original owner not executed through Swift: Node/Bun/Pi benchmark programs and thresholds do not apply; no Swift performance equivalence is claimed. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-libfx-loader.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: dynamic addon/Wasm selection, JS getters and API shape checks do not apply; C creation failure recovery, Swift ABI guard, bootstrap and lifecycle tests qualify startup and cleanup. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-linux-abi.py",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: GLIBC parser and Linux package baseline do not apply to the macOS XCFramework; Linux runtime support remains unqualified. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-list-models.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed via Swift adapter on macOS arm64, Node.js 25.9.0"
+    },
+    {
+      "upstream": "sdk/tests/test-mcp-adapter.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: native stdio and HTTP text, images, image-only and image-error modes retain all upstream assertions through the actual Swift MCP adapter and core; the bridge expands the stdio fixture prompt content array into standard single-block messages without dropping content or roles; native MCP span identity/correlation, error containment and cancellation have separate Swift and differential evidence"
+    },
+    {
+      "upstream": "sdk/tests/test-minimal-api.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream file; minimal JavaScript surface projects the native Swift engine; bridge-only fixture controls are nonenumerable; streaming, reasoning, usage, authorization, model selection, checkpoint and repeated close retain original assertions"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-cancel-before-fetch.mjs",
+      "classification": "adapted",
+      "reason": "Qualify both pre-dispatch cancellation and actual fetch publication after an idle native abort through the Swift C backend; injected JavaScript addon handles are not copied.",
+      "status": "qualified native equivalents: NativeTransportTests.nativeCancellationBeforeHTTPDispatchSuppressesFetchAndAllowsReuse and NativeLatePublicationCancellationTests.aRealFetchPublishedAfterIdleAbortCannotStartHTTPAfterTheEffectGuardStops pass normally and under Swift Thread Sanitizer. The latter observes a real native publication after idle abort, suppresses HTTP through the production effect guard, and completes a follow-up. Original direct N-API assertions are not executed through Swift."
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-cancel.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream file through Swift; stalled host response cancels and runtime closes"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-config-isolation.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream file through Swift; explicit host instructions, no workspace context or MCP startup, and no native billing requests"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-env-growth.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "native counterpart: test-c-env-growth.sh passes arm64 and x86_64 under Rosetta, with 0/10/200 libc environment additions after first create, three isolated processes per size and three real model turns per process; all 18 processes exit 0 with empty stdout/stderr. This qualifies native environment relocation, not Node process.env or addon loading."
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-exit-code.mjs",
+      "classification": "adapted",
+      "reason": "Qualify public C output pressure, runtime status, graceful drain and blocked destruction directly.",
+      "status": "native counterpart: test-c-abi.sh passes on arm64 and x86_64 under Rosetta with 180000 lossless replies after five seconds unread, successful exit and blocked-output destruction; drain deadline is 20 seconds, so the original five-second drain bound remains unqualified"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-fetch-failure.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream file through Swift; unrelated host AbortError retries once and fails without hanging"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-http-cleanup.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "partial: native Swift delayed EOF, successful response cleanup, bounded tails and model-step ordering tests plus real TCP JavaScript/Swift differential pass; original owner injects N-API disposition wrappers and legacy-addon fallbacks not used by Swift"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-image-framing.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream file through the Swift C ABI backend; 7 MiB tool images survive framing, provider request overflow evicts only older images with a notice, and image-free overflow fails before host fetch"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-misuse.mjs",
+      "classification": "adapted",
+      "reason": "Qualify the C ABI value and handle boundaries directly; JavaScript argument counts, getters and object brands have no Swift counterpart.",
+      "status": "native counterparts: test-c-abi.sh qualifies options/input/attachment bounds and relative-path rejection; test-c-fetch.sh qualifies fetch identity, stale operations, body backpressure, abort revocation, normal close and all three gateway URL rejections on both packaged architectures; original JavaScript-only misuse assertions are not executed"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-ready.mjs",
+      "classification": "adapted",
+      "reason": "Qualify readiness coalescing, ordered drain and native handle cleanup through the public C ABI.",
+      "status": "native counterpart: test-c-abi.sh passes 1000 ordered readiness replies and descriptor cleanup on both packaged architectures; JavaScript Socket ownership and takeCoreReadyFd transfer assertions do not apply to the borrowed C readiness descriptor"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-security.mjs",
+      "classification": "adapted",
+      "reason": "Qualify runtime capacity, failed-creation resource recovery and raw ACP MCP rejection directly through the C ABI; JavaScript value-shape checks are not C contracts.",
+      "status": "qualified native equivalent: test-c-security.sh passes on arm64 and x86_64 under Rosetta with isolated home/workspace, 64 simultaneously live cores, precise refusal of the 65th, slot reuse after destruction, raw session/new stdio MCP rejection (-32602), and a valid session creation on the same core afterward. Both exit 0 with empty stderr. test-c-abi.sh separately qualifies failed-create recovery and descriptor cleanup. The original N-API file is not executed through Swift."
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-stream.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream file through Swift; split terminal tail, matching cancellation, next prompt isolation, large Unicode streaming and graceful close"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-worker-termination.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: Node Worker termination/finalizer mechanics do not apply; explicit native close, stalled-fetch cancellation and bounded C destruction qualify teardown; cancelling a Swift Task is not automatic engine destruction. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-native-core-workers.mjs",
+      "classification": "adapted",
+      "reason": "Qualify native engine isolation and explicit lifetime; Node Worker environments and garbage-collection finalizers are platform-specific.",
+      "status": "partial native counterpart: normal engine lifecycle and NativeTransportBoundaryTests qualify native operation, repeated explicit cleanup and slot reuse while 70 closed wrappers remain retained; the original four Worker environments and GC finalizer assertions are not executed"
+    },
+    {
+      "upstream": "sdk/tests/test-native-core.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream file through Swift. The adapter translates the first actual Swift wire send after NativeTransport.start into JavaScript runtime.ready; native initialization, checkpoint, close and received-wire observations execute through Swift. No production readiness callback or historical compatibility API is added."
+    },
+    {
+      "upstream": "sdk/tests/test-native-host-tool-frame-limit.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "qualified native equivalent: HostToolFrameBoundaryTests uses the actual incoming RPC ID to send a text-only full frame exactly 8 MiB and one byte above. The exact frame reaches the real core and gets its separate configured content-limit error; the oversized frame becomes the Swift frame-limit fallback. Both continue the provider turn and reuse the same engine with one tool execution and one response. Normal, ASan and TSan runs pass both parameter cases. The original empty-image/double-encoded JavaScript fixture is not counted as executed."
+    },
+    {
+      "upstream": "sdk/tests/test-native-host-tool-late-settle.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged upstream file through Swift; late tool completion after cancellation or close sends no further frame, does not replay and causes no unhandled rejection"
+    },
+    {
+      "upstream": "sdk/tests/test-next-package.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: Next/webpack route tracing does not apply; underlying durable streaming, reopening and wake delivery have native and independent SwiftPM consumer evidence; Next deployment itself is unqualified. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-node-async-assets.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: dynamic Wasm asset formats/resolvers/repair/cache do not apply; actual engine turns and isolation are qualified by native lifecycle/model tests. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-node-bundled-assets.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: webpack asset URLs and dynamic backend fallback do not apply; independent SwiftPM consumers qualify native package linking and startup. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-node-napi.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: Node runner mechanics do not apply; its child agent/core owners require their individual dispositions, rather than a blanket platform exemption. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-node-package.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: npm tarballs, conditional CJS/ESM exports and addon relocation do not apply; independent SwiftPM Release consumers and native checkpoint owners qualify packaging and engine behavior. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-node-tracing.mjs",
+      "classification": "platform-specific",
+      "reason": "Validates ESM/CJS deployment produced by nodeFileTrace, including relocation of the Node native addon. Swift uses SwiftPM and an XCFramework.",
+      "status": "original owner not executed through Swift: Node output-file tracing does not apply; independent public SwiftPM consumers qualify linked engine/checkpoint/storage; ambient runtime tracing isolation is separately qualified by the C fetch consumer. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-node-wasm.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: Node/Bun JSPI runner mechanics do not apply; child prompt/cancel/persistence contracts require their native equivalents. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-package-resilience.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: npm/addon/Wasm mutation and module repair do not apply; tool success/rejection, checkpoint restoration, agent isolation, late-settlement suppression and retained-wrapper cleanup have native equivalents; the original long randomized workload and performance bounds are not qualified. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-packed-example.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: packed npm CJS/ESM examples do not apply; actual Swift public consumers and SQLite recovery qualify underlying prompt and persistence behavior. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-pi-benchmark.mjs",
+      "classification": "platform-specific",
+      "reason": "Validates the external Pi benchmark target selected by LIBFX_BENCH_PI_ROOT, rather than libfx SDK behavior.",
+      "status": "original owner not executed through Swift: external Pi benchmark executable does not apply; no Pi or Swift performance equivalence is claimed. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-sdk.mjs",
+      "classification": "platform-specific",
+      "reason": "Aggregates the JavaScript terminal and forced Wasm/JSPI smoke executables. It adds no distinct Swift SDK contract.",
+      "status": "original owner not executed through Swift: Wasm smoke runner mechanics do not apply; child prompt/cancel/checkpoint contracts map to native owners; virtual Wasm HOME behavior is not a native filesystem contract. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-skills-adapter.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "passed: complete unchanged records/native and disk/native modes through Swift file loading, instruction composition and actual core conversation; host resources and original tool closures remain typed Swift values; YAML decoding uses Yams"
+    },
+    {
+      "upstream": "sdk/tests/test-term-demo-package.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: web terminal asset hashes and cache headers do not apply to the Swift SDK product. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-term-login.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: terminal URL/code rendering and UI OAuth records do not apply; public Swift sign-in, credential refresh and persisted authorization have separate native/provider-suite evidence; no terminal UI migration is claimed. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-term-session-resume.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: JS terminal snapshots and legacy 0.0.13 UI formats do not apply; complete checkpoint/journal owners and SQLite recovery qualify conversation restoration. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-term.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: terminal DOM, draft rendering and polling do not apply; actual steering, assistant-prefix continuity and cancellation isolation are qualified by native stream/steering owners. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-tool-contract.mjs",
+      "classification": "adapted",
+      "reason": "All assertions run through the real Swift SDK and shared Zig scheduler. The bridge converts object-keyed JavaScript tools to typed Swift descriptors and validates JavaScript-only name/type shapes. A checked loader adaptation skips the fixture's unused WASM asset read in native mode. Swift owns writer admission, overlapping readers, result order, context identity, persisted sessions and nonempty tool error text. Native barrier tests and localized/returned/thrown error cases add direct Swift proof.",
+      "status": "passed: complete upstream file with assertions unchanged"
+    },
+    {
+      "upstream": "sdk/tests/test-types.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: TypeScript export/declaration tests do not apply; Swift compilation, typed public APIs and independent SwiftPM consumers are the equivalent gates; minimum-compiler qualification remains separately recorded. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-vercel-package.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: Vercel/Linux deployment packaging is unqualified, not a JavaScript-syntax exemption; portable model/tool/checkpoint/MCP cleanup has Swift evidence, which does not prove a deployed Vercel service. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-vercel-storage.mjs",
+      "classification": "adapted",
+      "reason": "This owner tests only setup validation for the JavaScript remote-test fixture with fake credentials and disabled network. Real remote provider qualification is separate.",
+      "status": "original owner not executed through Swift: fixture preflight is not a Swift provider or hosted-service proof. Portable storage, fencing and recovery have direct native evidence; a deployed World/Vercel storage and queue integration remains unqualified."
+    },
+    {
+      "upstream": "sdk/tests/test-wasm-jspi-tier-up.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: JSPI call/suspension counters do not apply to the native C core. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-wasm-memory.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: Wasm linear-memory page limits do not apply; no native memory-budget equivalence is claimed. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-wasm-module-cache.mjs",
+      "classification": "platform-specific",
+      "reason": "JavaScript runtime, package, ABI, browser, or terminal-specific proof; Swift packaging is verified separately.",
+      "status": "original owner not executed through Swift: Wasm compile caches, repair and WeakRefs do not apply; native isolation/cancellation and closed-wrapper resource release have direct Swift/C evidence. See BRIDGE-VALIDATION.md#platform-owner-dispositions."
+    },
+    {
+      "upstream": "sdk/tests/test-world-persistence.mjs",
+      "classification": "adapted",
+      "reason": "Retain behavioral assertions; redirect SDK entry point to Swift adapter and translate language-specific values.",
+      "status": "original owner not executed through Swift: the original external World persistence implementation has not run through Swift. Public storage protocols, SQLite fencing, checkpoint recovery and actual Swift process-death recovery have native evidence; a World service adapter remains unqualified."
+    }
+  ]
+}

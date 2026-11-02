@@ -8,6 +8,7 @@ const image_attachments = @import("../core/images/image_attachments.zig");
 const tool_call_ids = @import("tool_call_ids.zig");
 const json_comparison = @import("../core/shared/json_comparison.zig");
 const text_utils = @import("../core/shared/text_utils.zig");
+const diagnostics = @import("responses_diagnostics.zig");
 
 pub fn selectReplayParts(alloc: std.mem.Allocator, replay: ?types.ProviderReplay, _: []const types.ToolCall, text: bool, reasoning: bool) !?types.ProviderReplay {
     const source = replay orelse return null;
@@ -68,6 +69,8 @@ pub fn writeInput(
     }
     var ids = try tool_call_ids.Projection.init(scratch_alloc, messages);
     defer ids.deinit(scratch_alloc);
+    var declarations = @import("deferred_definitions.zig").Declarations.init(scratch_alloc);
+    defer declarations.deinit();
     var first = true;
     for (messages) |message| {
         try budget.check();
@@ -147,6 +150,16 @@ pub fn writeInput(
                 } else if (content.len > 0) try write_assistant_text(writer, &first, content, legacy_phase);
                 for (message.tool_calls) |call| {
                     try writeComma(writer, &first);
+                    if (std.mem.eql(u8, call.name, "tool_search")) {
+                        try writer.writeAll("{\"type\":\"tool_search_call\",\"execution\":\"client\",\"call_id\":");
+                        try std.json.Stringify.value(ids.resolve(call.id), .{}, writer);
+                        try writer.writeAll(",\"arguments\":");
+                        const arguments = try std.json.parseFromSlice(std.json.Value, scratch_alloc, call.arguments_json, .{});
+                        defer arguments.deinit();
+                        try std.json.Stringify.value(arguments.value, .{}, writer);
+                        try writer.writeByte('}');
+                        continue;
+                    }
                     try writer.writeAll("{\"type\":\"function_call\",\"call_id\":");
                     try std.json.Stringify.value(ids.resolve(call.id), .{}, writer);
                     try writer.writeAll(",\"name\":");
@@ -158,6 +171,39 @@ pub fn writeInput(
             },
             .tool => {
                 try writeComma(writer, &first);
+                if (std.mem.eql(u8, message.tool_name orelse "", "tool_search")) {
+                    try writer.writeAll("{\"type\":\"tool_search_output\",\"execution\":\"client\",\"status\":\"completed\",\"call_id\":");
+                    try std.json.Stringify.value(ids.resolve(message.tool_call_id orelse ""), .{}, writer);
+                    try writer.writeAll(",\"tools\":[");
+                    const definitions = if (message.tool_result_memory) |memory| memory.loaded_tools_json else null;
+                    var declaration_count: usize = 0;
+                    if (definitions) |json| {
+                        const projected_definitions = try declarations.first(scratch_alloc, json);
+                        defer scratch_alloc.free(projected_definitions);
+                        const parsed = try std.json.parseFromSlice(std.json.Value, scratch_alloc, projected_definitions, .{});
+                        defer parsed.deinit();
+                        declaration_count = parsed.value.array.items.len;
+                        for (parsed.value.array.items, 0..) |entry, index| {
+                            if (index > 0) try writer.writeByte(',');
+                            try writer.writeAll("{\"type\":\"function\",\"defer_loading\":true,\"name\":");
+                            try std.json.Stringify.value(entry.object.get("name").?, .{}, writer);
+                            try writer.writeAll(",\"description\":");
+                            try std.json.Stringify.value(entry.object.get("description").?, .{}, writer);
+                            try writer.writeAll(",\"parameters\":");
+                            try std.json.Stringify.value(entry.object.get("inputSchema").?, .{}, writer);
+                            try writer.writeByte('}');
+                        }
+                    }
+                    try writer.writeAll("]}");
+                    // An empty native result can still carry current schemas or errors.
+                    if (declaration_count == 0) if (message.content) |text| if (text.len > 0) {
+                        try writeComma(writer, &first);
+                        try writer.writeAll("{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":");
+                        try std.json.Stringify.value(text, .{}, writer);
+                        try writer.writeAll("}]}");
+                    };
+                    continue;
+                }
                 try writer.writeAll("{\"type\":\"function_call_output\",\"call_id\":");
                 try std.json.Stringify.value(ids.resolve(message.tool_call_id orelse ""), .{}, writer);
                 try writer.writeAll(",\"output\":");
@@ -641,6 +687,14 @@ pub fn writeTools(
 
     for (tools.advertised_names) |name| {
         const tool = tools.advertisedFunction(name) orelse continue;
+        if (std.mem.eql(u8, name, "tool_search")) {
+            if (count > 0) try out.writer.writeByte(',');
+            try out.writer.writeAll("{\"type\":\"tool_search\",\"execution\":\"client\",\"description\":");
+            try std.json.Stringify.value(tool.description, .{}, &out.writer);
+            try out.writer.writeAll(",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\"}},\"required\":[\"query\"]}}");
+            count += 1;
+            continue;
+        }
         if (count > 0) try out.writer.writeByte(',');
         try writeFunctionTool(
             &out.writer,
@@ -664,6 +718,7 @@ pub fn writeTools(
         count += 1;
     }
     for (tools.selected_dynamic) |tool| {
+        if (tool.deferred) continue;
         if (containsName(tools.advertised_names, tool.name)) continue;
         if (count > 0) try out.writer.writeByte(',');
         try writeFunctionTool(
@@ -843,6 +898,7 @@ pub const Reducer = struct {
         output_index: i64,
         id_hash: ?[TextDigest.digest_length]u8,
         phase: ?AssistantMessagePhase,
+        phase_finalized: bool = false,
         offset: usize = 0,
         length: usize = 0,
 
@@ -921,13 +977,17 @@ pub const Reducer = struct {
         defer parsed.deinit();
         if (parsed.value != .object) return false;
         const event_type = stringField(parsed.value.object, "type") orelse return false;
+        diagnostics.event(alloc, @intFromPtr(self), self.event_count, parsed.value.object);
+        errdefer diagnostics.record(alloc, .{ .stream = @intFromPtr(self), .sequence = self.event_count, .failure = true });
 
         if (std.mem.eql(u8, event_type, "response.output_item.added")) {
             const output_index = try optional_index(parsed.value.object, "output_index") orelse return false;
             const item = parsed.value.object.get("item") orelse return false;
             if (item != .object) return false;
             const item_type = stringField(item.object, "type") orelse return false;
-            if (std.mem.eql(u8, item_type, "function_call")) {
+            if (std.mem.eql(u8, item_type, "tool_search_call")) {
+                try self.acceptSearchItem(alloc, output_index, item.object, callbacks, limits, false);
+            } else if (std.mem.eql(u8, item_type, "function_call")) {
                 try self.check_output_kind(output_index, .function_call);
                 const call_id = stringField(item.object, "call_id") orelse return false;
                 const name = stringField(item.object, "name") orelse return false;
@@ -949,7 +1009,7 @@ pub const Reducer = struct {
             } else if (std.mem.eql(u8, item_type, "reasoning")) {
                 try self.reconcile_reasoning(alloc, output_index, item.object, .identity, limits);
             } else if (std.mem.eql(u8, item_type, "message")) {
-                _ = try self.reconcile_message(alloc, output_index, try text_identity(item.object, "id"), try assistantMessagePhase(item.object), limits);
+                _ = try self.reconcile_message(alloc, output_index, try text_identity(item.object, "id"), try assistantMessagePhase(item.object), false, limits);
             } else {
                 try self.check_output_kind(output_index, .unknown);
             }
@@ -1008,7 +1068,9 @@ pub const Reducer = struct {
             const item = parsed.value.object.get("item") orelse return false;
             if (item != .object) return false;
             const item_type = stringField(item.object, "type") orelse return false;
-            if (std.mem.eql(u8, item_type, "function_call")) {
+            if (std.mem.eql(u8, item_type, "tool_search_call")) {
+                try self.acceptSearchItem(alloc, output_index, item.object, callbacks, limits, true);
+            } else if (std.mem.eql(u8, item_type, "function_call")) {
                 try self.reconcileToolItem(alloc, output_index, item.object, callbacks, limits);
             } else if (std.mem.eql(u8, item_type, "reasoning")) {
                 try self.reconcile_reasoning(alloc, output_index, item.object, .completed, limits);
@@ -1036,7 +1098,9 @@ pub const Reducer = struct {
                     if (item != .object) continue;
                     const item_type = stringField(item.object, "type") orelse continue;
                     const index = std.math.cast(i64, output_index) orelse return error.ResourceLimitExceeded;
-                    if (std.mem.eql(u8, item_type, "function_call")) {
+                    if (std.mem.eql(u8, item_type, "tool_search_call")) {
+                        try self.acceptSearchItem(alloc, index, item.object, callbacks, limits, true);
+                    } else if (std.mem.eql(u8, item_type, "function_call")) {
                         try self.reconcileToolItem(alloc, index, item.object, callbacks, limits);
                     } else if (std.mem.eql(u8, item_type, "reasoning")) {
                         try self.reconcile_reasoning(alloc, index, item.object, .completed, limits);
@@ -1127,7 +1191,7 @@ pub const Reducer = struct {
         self.reasoning_bytes = total;
     }
 
-    fn reconcile_message(self: *Reducer, alloc: std.mem.Allocator, output_index: i64, id_hash: ?[TextDigest.digest_length]u8, phase: ?AssistantMessagePhase, limits: StreamLimits) !*MessageItem {
+    fn reconcile_message(self: *Reducer, alloc: std.mem.Allocator, output_index: i64, id_hash: ?[TextDigest.digest_length]u8, phase: ?AssistantMessagePhase, completed: bool, limits: StreamLimits) !*MessageItem {
         try self.check_output_kind(output_index, .message);
         var low: usize = 0;
         var high = self.message_items.items.len;
@@ -1144,32 +1208,53 @@ pub const Reducer = struct {
         if (low < self.message_items.items.len and self.message_items.items[low].output_index == output_index) {
             const prior = &self.message_items.items[low];
             if (phase) |value| {
-                if (prior.phase) |old| if (old != value) return error.ResponsesTextConflict;
+                // The added item is provisional. Providers can classify a message
+                // as commentary only once they decide to follow it with a tool.
+                if (prior.phase) |old| if (old != value and (prior.phase_finalized or !completed)) {
+                    diagnostics.record(alloc, .{ .check = "message_phase", .output_index = output_index, .prior_phase = old, .phase = value, .finalized = prior.phase_finalized });
+                    return error.ResponsesTextConflict;
+                };
                 prior.phase = value;
+                if (completed) prior.phase_finalized = true;
             }
             if (id_hash != null) prior.id_hash = id_hash;
             return prior;
         }
         if (self.message_items.items.len >= limits.events) return error.ResourceLimitExceeded;
-        try self.message_items.insert(alloc, low, .{ .output_index = output_index, .id_hash = id_hash, .phase = phase });
+        try self.message_items.insert(alloc, low, .{ .output_index = output_index, .id_hash = id_hash, .phase = phase, .phase_finalized = completed and phase != null });
         return &self.message_items.items[low];
     }
 
     fn accept_failure(self: *Reducer, alloc: std.mem.Allocator, fields: std.json.ObjectMap) !void {
-        const code = stringField(fields, "code") orelse "provider_error";
-        const message = stringField(fields, "message") orelse "Provider response failed";
+        // A bare `error` event and some proxies nest the details under "error".
+        const source = if (fields.get("error")) |nested| if (nested == .object) nested.object else fields else fields;
+        const type_name = stringField(source, "type");
+        const code = stringField(source, "code") orelse
+            if (type_name != null and !std.mem.eql(u8, type_name.?, "error")) type_name.? else "provider_error";
+        const message = stringField(source, "message") orelse stringField(fields, "message") orelse "Provider response failed";
         const bounded_code = types.ModelFailureDiagnostic.init(code);
         const bounded_message = types.ModelFailureDiagnostic.init(message);
         var buffer: [2 * types.ModelFailureDiagnostic.max_bytes + 2]u8 = undefined;
         const text = try std.mem.print(&buffer, "{s}: {s}", .{ bounded_code.view(), bounded_message.view() });
         const detail = types.ModelFailureDiagnostic.init(text);
         self.provider_failure_detail = try alloc.dupe(u8, detail.view());
-        self.provider_failure_cause = if (std.mem.eql(u8, code, "server_error"))
-            null
-        else if (std.mem.eql(u8, code, "rate_limit_exceeded"))
-            .rate_limited
-        else
-            .non_retryable;
+        self.provider_failure_cause = failureCause(code);
+    }
+
+    /// Like Codex, only failures that a retry cannot fix stop the turn.
+    /// Unknown codes, including proxy-defined ones, are treated as transient.
+    fn failureCause(code: []const u8) ?types.ProviderFailureCause {
+        if (std.mem.eql(u8, code, "rate_limit_exceeded")) return .rate_limited;
+        const terminal = [_][]const u8{
+            "context_length_exceeded",     "insufficient_quota",               "credit_balance_exhausted",
+            "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "usage_not_included",
+            "invalid_prompt",              "invalid_request_error",            "invalid_api_key",
+            "authentication_error",        "permission_error",                 "permission_denied",
+            "model_not_found",             "content_filter",                   "content_policy_violation",
+            "cyber_policy",                "bio_policy",                       "misalignment_policy_violation",
+        };
+        for (terminal) |name| if (std.mem.eql(u8, code, name)) return .non_retryable;
+        return null;
     }
 
     fn accept_text(
@@ -1180,14 +1265,18 @@ pub const Reducer = struct {
         capture_limit: ?usize,
         limits: StreamLimits,
     ) !void {
-        const message = try self.reconcile_message(alloc, update.key.output_index, update.item_id_hash, null, limits);
+        const message = try self.reconcile_message(alloc, update.key.output_index, update.item_id_hash, null, false, limits);
         if (self.text_parts.count() >= limits.events and !self.text_parts.contains(update.key)) return error.ResourceLimitExceeded;
         const entry = try self.text_parts.getOrPut(alloc, update.key);
         if (!entry.found_existing) entry.value_ptr.* = .{ .kind = update.kind };
         const part = entry.value_ptr;
         if (part.kind != update.kind) return error.ResponsesTextConflict;
         const suffix = switch (update.mode) {
-            .final => try part.final_suffix(update.text),
+            .final => part.final_suffix(update.text) catch |err| {
+                var digest = part.digest;
+                diagnostics.record(alloc, .{ .check = "final_text", .output_index = update.key.output_index, .content_index = update.key.content_index, .received_bytes = part.received_bytes, .final_bytes = update.text.len, .finalized = part.finalized, .received_sha256 = std.fmt.bytesToHex(digest.finalResult(), .lower) });
+                return err;
+            },
             .delta => blk: {
                 if (part.finalized and update.text.len != 0) return error.ResponsesTextConflict;
                 break :blk update.text;
@@ -1245,7 +1334,7 @@ pub const Reducer = struct {
         capture_limit: ?usize,
         limits: StreamLimits,
     ) !void {
-        _ = try self.reconcile_message(alloc, output_index, try text_identity(fields, "id"), try assistantMessagePhase(fields), limits);
+        _ = try self.reconcile_message(alloc, output_index, try text_identity(fields, "id"), try assistantMessagePhase(fields), true, limits);
         const parts = fields.get("content") orelse return error.InvalidEvent;
         if (parts != .array) return error.InvalidEvent;
         const identity = try text_identity(fields, "id");
@@ -1256,6 +1345,26 @@ pub const Reducer = struct {
                 .output_index = output_index,
                 .content_index = std.math.cast(i64, content_index) orelse return error.ResourceLimitExceeded,
             }, identity, part.object, callbacks, capture_limit, limits);
+        }
+    }
+
+    fn acceptSearchItem(self: *Reducer, alloc: std.mem.Allocator, output_index: i64, fields: std.json.ObjectMap, callbacks: StreamCallbacks, limits: StreamLimits, final: bool) !void {
+        const execution = stringField(fields, "execution") orelse return error.InvalidEvent;
+        if (!std.mem.eql(u8, execution, "client")) return error.InvalidEvent;
+        try self.check_output_kind(output_index, .function_call);
+        if (findTool(self.tools.items, output_index) == null) {
+            const id = stringField(fields, "call_id") orelse return error.InvalidEvent;
+            try appendTool(alloc, &self.tools, output_index, id, "tool_search", limits);
+            if (callbacks.on_tool_start) |callback| callback(callbacks.context, id, "tool_search", null, null);
+        }
+        const tool = &self.tools.items[findTool(self.tools.items, output_index).?];
+        try tool.reconcileIdentity(alloc, fields, "id", limits);
+        if (final) {
+            const arguments = fields.get("arguments") orelse return error.InvalidEvent;
+            if (arguments != .object) return error.InvalidEvent;
+            const json = try std.json.Stringify.valueAlloc(alloc, arguments, .{});
+            defer alloc.free(json);
+            try tool.finalizeArguments(alloc, json, callbacks, limits);
         }
     }
 
@@ -1872,7 +1981,8 @@ test "Responses terminal failure classification is conservative and diagnostics 
         .{ "server_error", false },
         .{ "rate_limit_exceeded", false },
         .{ "invalid_prompt", true },
-        .{ "unknown_code", true },
+        .{ "insufficient_quota", true },
+        .{ "unknown_code", false },
     };
     inline for (cases) |case| {
         var stream = ToolRecordTest.init(std.testing.allocator);
@@ -1902,8 +2012,34 @@ test "Responses terminal failure classification is conservative and diagnostics 
     const completion = try stream.finish();
     defer stream.freeCompletion(completion);
     try std.testing.expectEqual(types.ProviderFinishReason.provider_error, completion.finish_reason.?);
-    try std.testing.expectEqual(types.ProviderFailureCause.non_retryable, completion.provider_failure_cause.?);
+    try std.testing.expectEqual(@as(?types.ProviderFailureCause, null), completion.provider_failure_cause);
     try std.testing.expect(completion.provider_failure_detail.?.len > 0);
+}
+
+test "Responses error events read nested proxy details and retry unknown types" {
+    var stream = ToolRecordTest.init(std.testing.allocator);
+    defer stream.deinit();
+    try stream.apply("{\"type\":\"error\",\"error\":{\"type\":\"upstream_error\",\"message\":\"upstream response incomplete\"}}");
+    const completion = try stream.finish();
+    defer stream.freeCompletion(completion);
+    try std.testing.expectEqual(types.ProviderFinishReason.provider_error, completion.finish_reason.?);
+    try std.testing.expectEqual(@as(?types.ProviderFailureCause, null), completion.provider_failure_cause);
+    try std.testing.expectEqualStrings("upstream_error: upstream response incomplete", completion.provider_failure_detail.?);
+
+    var terminal = ToolRecordTest.init(std.testing.allocator);
+    defer terminal.deinit();
+    try terminal.apply("{\"type\":\"error\",\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"too long\"}}");
+    const stopped = try terminal.finish();
+    defer terminal.freeCompletion(stopped);
+    try std.testing.expectEqual(types.ProviderFailureCause.non_retryable, stopped.provider_failure_cause.?);
+
+    var flat = ToolRecordTest.init(std.testing.allocator);
+    defer flat.deinit();
+    try flat.apply("{\"type\":\"error\",\"code\":\"server_error\",\"message\":\"busy\"}");
+    const flat_completion = try flat.finish();
+    defer flat.freeCompletion(flat_completion);
+    try std.testing.expectEqual(@as(?types.ProviderFailureCause, null), flat_completion.provider_failure_cause);
+    try std.testing.expectEqualStrings("server_error: busy", flat_completion.provider_failure_detail.?);
 }
 
 test "Responses terminal metadata rejects contradictions before publishing final text" {
@@ -2202,7 +2338,49 @@ test "Responses captures assistant phase from terminal output" {
     try std.testing.expectEqualStrings("final_answer", replay.value.array.items[0].object.get("phase").?.string);
 }
 
-test "Responses omits unknown phases and rejects contradictory phases within one message" {
+test "Responses DeepSeek captured stream finalizes a provisional answer as commentary" {
+    // Metadata capture retained all 79 event types and text byte lengths. The
+    // fixture substitutes x bytes and stable IDs; no response text is retained.
+    for ([_]?usize{ null, 1 }) |capture_limit| {
+        var stream = TextRecordTest.init(std.testing.allocator);
+        defer stream.deinit();
+        stream.capture_limit = capture_limit;
+        var events = std.mem.splitScalar(u8, @embedFile("fixtures/deepseek-provisional-phase.jsonl"), '\n');
+        while (events.next()) |event| {
+            if (event.len != 0) try stream.apply(event);
+        }
+        const message = stream.reducer.message_items.items[0];
+        try std.testing.expectEqual(AssistantMessagePhase.commentary, message.phase.?);
+        try std.testing.expect(message.phase_finalized);
+        // A later completed snapshot must still agree with the completed item.
+        try std.testing.expectError(error.ResponsesTextConflict, stream.apply(
+            \\{"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"message","phase":"final_answer","content":[]}}
+        ));
+        try stream.finish(comptime text_utils.repeat("x", 77));
+    }
+}
+
+test "Responses completed phase replaces provisional commentary and persists final replay" {
+    var stream = ToolRecordTest.init(std.testing.allocator);
+    defer stream.deinit();
+    try stream.apply(
+        \\{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"message","phase":"commentary"}}
+    );
+    try stream.apply(
+        \\{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"message","phase":"final_answer","content":[{"type":"output_text","text":"42"}]}}
+    );
+    try stream.apply(
+        \\{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","id":"message","phase":"final_answer","content":[{"type":"output_text","text":"42"}]}]}}
+    );
+    const completion = try stream.finish();
+    defer stream.freeCompletion(completion);
+    try std.testing.expectEqualStrings("42", completion.content.?);
+    const replay = try std.json.parseFromSlice(std.json.Value, stream.alloc, completion.provider_state_json.?, .{});
+    defer replay.deinit();
+    try std.testing.expectEqualStrings("final_answer", replay.value.array.items[0].object.get("phase").?.string);
+}
+
+test "Responses omits unknown phases and rejects contradictory completed phases" {
     var unknown = ToolRecordTest.init(std.testing.allocator);
     defer unknown.deinit();
     try unknown.apply(
@@ -2216,7 +2394,7 @@ test "Responses omits unknown phases and rejects contradictory phases within one
     var conflicting = ToolRecordTest.init(std.testing.allocator);
     defer conflicting.deinit();
     try conflicting.apply(
-        "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"phase\":\"commentary\"}}",
+        "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"phase\":\"commentary\",\"content\":[]}}",
     );
     try std.testing.expectError(error.ResponsesTextConflict, conflicting.apply(
         "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"phase\":\"final_answer\",\"content\":[]}}",
@@ -2692,4 +2870,54 @@ test "Responses usage projection retains optional cached and reasoning detail" {
     try std.testing.expectEqual(@as(?u64, 5), usage.cache_read_tokens);
     try std.testing.expectEqual(@as(?u64, 2), usage.cache_write_tokens);
     try std.testing.expectEqual(@as(?u64, 3), usage.reasoning_tokens);
+}
+
+test "deferred tools preserve Responses tools and prior input bytes" {
+    const alloc = std.testing.allocator;
+    const definitions = "[{\"name\":\"action\",\"description\":\"Act\",\"inputSchema\":{\"type\":\"object\"},\"deferred\":true}]";
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "Find action" },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "search-1", .name = "tool_search", .arguments_json = "{\"query\":\"action\"}" }} },
+        .{ .role = .tool, .tool_call_id = "search-1", .tool_name = "tool_search", .content = "Act", .tool_result_memory = .{ .loaded_tools_json = definitions } },
+    };
+    var before: std.Io.Writer.Allocating = .init(alloc);
+    defer before.deinit();
+    var after: std.Io.Writer.Allocating = .init(alloc);
+    defer after.deinit();
+    try writeInput(&before.writer, alloc, messages[0..2], null, ImageInputTest.limits, .{});
+    try writeInput(&after.writer, alloc, &messages, null, ImageInputTest.limits, .{});
+    try std.testing.expect(std.mem.startsWith(u8, after.written(), before.written()));
+    try std.testing.expect(std.mem.find(u8, after.written(), "\"type\":\"tool_search_output\"") != null);
+    try std.testing.expect(std.mem.find(u8, after.written(), "\"defer_loading\":true") != null);
+    before.clearRetainingCapacity();
+    after.clearRetainingCapacity();
+    const base: stream_provider.ToolSelection = .{ .advertised_names = &.{"tool_search"}, .advertised_functions = &.{.{ .name = "tool_search", .description = "Search" }} };
+    _ = try writeTools(&before.writer, alloc, base);
+    var loaded = base;
+    loaded.selected_dynamic = &.{.{ .name = "action", .description = "Changed", .input_schema = .{ .object = .empty }, .deferred = true }};
+    _ = try writeTools(&after.writer, alloc, loaded);
+    try std.testing.expectEqualStrings(before.written(), after.written());
+}
+
+test "deferred Responses replay preserves first declarations and the append-only prefix" {
+    const alloc = std.testing.allocator;
+    const old = "[{\"name\":\"action\",\"description\":\"old\",\"inputSchema\":{}},{\"name\":\"removed\",\"description\":\"removed\",\"inputSchema\":{}}]";
+    const current = "[{\"name\":\"action\",\"description\":\"updated\",\"inputSchema\":{}}]";
+    const messages = [_]types.ChatMessage{
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "s1", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "s1", .tool_name = "tool_search", .tool_result_memory = .{ .loaded_tools_json = old } },
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "s2", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "s2", .tool_name = "tool_search", .content = "Current definition: updated", .tool_result_memory = .{ .loaded_tools_json = current } },
+    };
+    var before: std.Io.Writer.Allocating = .init(alloc);
+    defer before.deinit();
+    var after: std.Io.Writer.Allocating = .init(alloc);
+    defer after.deinit();
+    try writeInput(&before.writer, alloc, messages[0..2], null, ImageInputTest.limits, .{});
+    try writeInput(&after.writer, alloc, &messages, null, ImageInputTest.limits, .{});
+    try std.testing.expect(std.mem.startsWith(u8, after.written(), before.written()));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, after.written(), "\"name\":\"action\""));
+    try std.testing.expect(std.mem.find(u8, after.written(), "Current definition: updated") != null);
+    try std.testing.expect(std.mem.find(u8, after.written(), "removed") != null);
+    try std.testing.expect(std.mem.find(u8, after.written(), "old") != null);
 }
