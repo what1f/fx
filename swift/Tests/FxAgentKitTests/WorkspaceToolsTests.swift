@@ -43,6 +43,16 @@ private func input(_ fields: [String: String]) -> JSONValue { .object(fields.map
         #expect(second.text.contains("second"))
     }
 
+    @Test func shellKeepsOutputUpToTheHostLimit() async throws {
+        let fixture = try WorkspaceFixture()
+        defer { fixture.close() }
+        let shell = FxWorkspaceTools(workspace: fixture.url, approval: FxToolApproval { _ in .allowOnce }, pluginID: "fixture",
+                                     shellOutputLimit: 200 * 1024).tools([.shell])[0]
+        #expect(shell.description.contains("limited to 200 KiB"))
+        let result = try await shell.execute(input(["command": "head -c 120000 /dev/zero | tr '\\0' a; printf END"]), context)
+        #expect(result.text.contains("aEND") && !result.text.contains("Output truncated"))
+    }
+
     @Test(arguments: ["aa", "missing", ""])
     func editRejectsAmbiguousOverlappingMissingAndEmptyMatches(old: String) async throws {
         let fixture = try WorkspaceFixture()

@@ -44,7 +44,7 @@ Model-facing names and parameters follow pi's read/bash/edit/write surface:
 
 Text files are limited to 4 MiB. Reads reject invalid UTF-8 and NUL bytes. Edits preserve unmatched bytes, including line endings. No whitespace normalization or fuzzy matching occurs.
 
-Bash uses `/bin/bash`, inherits the host process environment plus the variables the optional `environment` closure returns (read before each command; they replace inherited ones with the same name), and starts in the configured workspace. It does not read interactive shell startup files. It supplies no interactive input, TTY, or background session handle. stdout and stderr share one pipe. The owner continues draining after the retained 50 KiB window fills. Invalid output bytes use replacement characters.
+Bash uses `/bin/bash`, inherits the host process environment plus the variables the optional `environment` closure returns (read before each command; they replace inherited ones with the same name), and starts in the configured workspace. It does not read interactive shell startup files. It supplies no interactive input, TTY, or background session handle. stdout and stderr share one pipe. The owner continues draining after the retained window fills: 50 KiB, or the `shellOutputLimit` the host passes when it shortens long results itself. Invalid output bytes use replacement characters.
 
 Cancellation sends TERM to the verified process group, then KILL after 500 ms, including descendants whose shell has already exited. The call waits for its owned shell to exit and for the escalation before reporting cancellation. The launch waits until the owner has verified and recorded the group before executing the supplied command.
 

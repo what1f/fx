@@ -8,6 +8,7 @@ public struct FxWorkspaceTools: Sendable {
     private let approval: FxToolApproval
     private let pluginID: String
     private let environment: (@Sendable () async throws -> [String: String])?
+    private let shellOutputLimit: Int
     private static let fileLimit = 4 * 1024 * 1024
     private static let outputLimit = 50 * 1024
 
@@ -17,13 +18,16 @@ public struct FxWorkspaceTools: Sendable {
 
     /// Every returned tool uses this approval policy before it executes. `environment` is read before
     /// each shell command; its variables are added to the inherited process environment, replacing
-    /// any with the same name.
+    /// any with the same name. `shellOutputLimit` bounds the command output kept in bytes; a host that
+    /// shortens long results itself can keep more of it.
     public init(workspace: URL, approval: FxToolApproval, pluginID: String,
-                environment: (@Sendable () async throws -> [String: String])? = nil) {
+                environment: (@Sendable () async throws -> [String: String])? = nil,
+                shellOutputLimit: Int = 50 * 1024) {
         self.workspace = workspace.standardizedFileURL
         self.approval = approval
         self.pluginID = pluginID
         self.environment = environment
+        self.shellOutputLimit = max(1024, shellOutputLimit)
     }
 
     public func tools(_ selected: [Tool]) -> [FxTool] {
@@ -100,14 +104,14 @@ public struct FxWorkspaceTools: Sendable {
     }
 
     private var shell: FxTool {
-        tool("bash", description: "Run a foreground command with /bin/bash in the workspace. Optional timeout is in seconds. No TTY or background handles. stdout and stderr are combined and limited to 50 KiB. Nonzero exit codes report failure.",
+        tool("bash", description: "Run a foreground command with /bin/bash in the workspace. Optional timeout is in seconds. No TTY or background handles. stdout and stderr are combined and limited to \(shellOutputLimit / 1024) KiB. Nonzero exit codes report failure.",
              properties: ["command": Self.stringSchema, "timeout": .object(["type": .string("number"), "exclusiveMinimum": .number(0), "maximum": .number(86400)])], required: ["command"], effect: .dangerous) { input, _ in
             let command = try Self.string(input, "command")
             guard !command.isEmpty, !command.utf8.contains(0), command.utf8.count <= 64 * 1024 else {
                 throw FxError.invalidInput("Command must contain 1 to 65536 bytes without NUL")
             }
             let extra = try await environment?() ?? [:]
-            let execution = WorkspaceCommand(command: command, workspace: workspace, environment: extra, limit: Self.outputLimit)
+            let execution = WorkspaceCommand(command: command, workspace: workspace, environment: extra, limit: shellOutputLimit)
             if let value = input["timeout"] {
                 guard case .number(let timeout) = value, timeout.isFinite, timeout > 0, timeout <= 86400 else {
                     throw FxError.invalidInput("timeout must be between 0 and 86400 seconds")
