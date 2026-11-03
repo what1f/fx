@@ -4047,7 +4047,7 @@ test "context overflow after automatic compaction retries with new execution" {
         .{ .content = "The first read completed." },
         .{ .tool_calls = &later_calls },
         .{ .status = .bad_request, .err_body = "{\"error\":{\"message\":\"input exceeds the context window\"}}" },
-        .{ .content = "The prior reads both completed." },
+        .{ .content = "The prior reads both completed.\n\nEarlier:\nThe earlier work was done." },
         .{ .content = "Recovered after a second compaction." },
     });
     defer gateway.deinit();

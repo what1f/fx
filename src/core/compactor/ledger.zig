@@ -4,7 +4,8 @@
 //! facts, decisions and status. The conversation's model writes them for the
 //! new turns only; nothing it wrote before is ever changed. When a later
 //! compaction folds the previous one away, the model also writes the summary
-//! that stands in for it, saved whole as its L record. This file says what
+//! that stands in for it; with a store the previous one is saved whole as its
+//! L record, without one the summary is all that stays. This file says what
 //! the model is asked for and reads what it wrote:
 //! - a note counts only for a turn or tool call of this compaction;
 //! - entries are only added: one repeated word for word is left out, and one
@@ -53,10 +54,17 @@ pub const Asked = struct {
     /// The request follows the conversation itself rather than the turns
     /// written out with their IDs.
     after_conversation: bool = false,
-    /// The previous compaction is saved whole as L<fold> and its turns leave
-    /// what the next assistant sees, so the model summarizes it. Zero when
-    /// there is none.
-    fold: usize = 0,
+    /// The previous compaction, whose turns leave what the next assistant
+    /// sees, so the model summarizes it.
+    fold: Fold = .none,
+};
+
+/// The previous compaction a compaction folds away: none, saved whole as
+/// L<number>, or not saved, so its summary is all that stays of it.
+pub const Fold = union(enum) {
+    none,
+    saved: usize,
+    unsaved,
 };
 
 /// A request that follows the conversation reads like the user's next
@@ -99,28 +107,31 @@ pub fn writeRequest(alloc: Allocator, text: *std.ArrayList(u8), asked: Asked) Al
         "Decisions:\nD1, D2, ...: each decision and why. When it changes an earlier entry, end with \"replaces\" and that entry's ID.\n\n" ++
         "Status:\nS1, S2, ...: where each part of the work stands now. When it updates an earlier entry, or answers or finishes an earlier open entry, end with \"replaces\" and that entry's ID.\n\n" ++
         "Open:\nO1, O2, ...: questions waiting on the user, and next steps the user asked for.\n\n");
-    if (asked.fold > 0) try writeEarlierSection(alloc, text, asked.fold, asked.after_conversation);
+    if (asked.fold != .none) try writeEarlierSection(alloc, text, asked.fold, asked.after_conversation);
     try text.appendSlice(alloc, "Never repeat or rewrite an entry that already exists; add a new one that replaces it. Write \"none\" under a section with nothing new.");
     try writeHighestIds(alloc, text, asked.highest);
     try text.appendSlice(alloc, " Be exact: say what was verified, and mark anything only planned, assumed or not checked. Write only these notes.");
 }
 
-/// The section for the summary that stands in for the previous compaction,
-/// saved whole as L<fold>.
-fn writeEarlierSection(alloc: Allocator, text: *std.ArrayList(u8), fold: usize, after_conversation: bool) Allocator.Error!void {
-    try text.print(alloc, "Earlier:\nthree to five sentences that stand in for the earlier compacted conversation {s}, which is saved whole as L{d} and leaves what the next assistant sees: what the user wanted, what was done and found, the decisions still in force, and where the work stood when it ended. Cover only that conversation; the turns after it and any turn in progress stay in view with the user's messages word for word, so leave them out. Its rules, status and open entries stay as they are, so do not repeat them.\n\n", .{
-        if (after_conversation) "at the start of the conversation above" else "shown above",
-        fold,
-    });
+/// The section for the summary that stands in for the previous compaction.
+/// Saved whole, a few sentences point the way into it; not saved, the
+/// summary has to carry what the work still needs of it.
+fn writeEarlierSection(alloc: Allocator, text: *std.ArrayList(u8), fold: Fold, after_conversation: bool) Allocator.Error!void {
+    const where = if (after_conversation) "at the start of the conversation above" else "shown above";
+    switch (fold) {
+        .none => return,
+        .saved => |number| try text.print(alloc, "Earlier:\nthree to five sentences that stand in for the earlier compacted conversation {s}, which is saved whole as L{d} and leaves what the next assistant sees: what the user wanted, what was done and found, the decisions still in force, and where the work stood when it ended.", .{ where, number }),
+        .unsaved => try text.print(alloc, "Earlier:\nat most twelve short lines that stand in for the earlier compacted conversation {s}, which leaves what the next assistant sees and is not saved anywhere it can be read again: what the user wanted, what was done and found, the facts the work still needs (names, paths, values, causes), the decisions still in force, and where the work stood when it ended.", .{where}),
+    }
+    try text.appendSlice(alloc, " Cover only that conversation; the turns after it and any turn in progress stay in view with the user's messages word for word, so leave them out. Its rules, status and open entries stay as they are, so do not repeat them.\n\n");
 }
 
 const entry_kinds = checkpoint.entry_kinds;
 
 /// Appends the request for what a first reply left out: the complete turns
-/// `missing`, and with a nonzero `fold` the summary of the previous
-/// compaction, saved whole as L<fold>. `highest` counts every entry so far,
-/// the first reply's too.
-pub fn writeFollowUp(alloc: Allocator, text: *std.ArrayList(u8), missing: []const Heading, highest: [entry_kinds.len]usize, after_conversation: bool, fold: usize) Allocator.Error!void {
+/// `missing`, and with a `fold` the summary of the previous compaction.
+/// `highest` counts every entry so far, the first reply's too.
+pub fn writeFollowUp(alloc: Allocator, text: *std.ArrayList(u8), missing: []const Heading, highest: [entry_kinds.len]usize, after_conversation: bool, fold: Fold) Allocator.Error!void {
     if (missing.len == 0) {
         try text.appendSlice(alloc, "Your notes left out the summary of the earlier compacted conversation. Write only that now, under this heading:\n\n");
         try writeEarlierSection(alloc, text, fold, after_conversation);
@@ -133,7 +144,7 @@ pub fn writeFollowUp(alloc: Allocator, text: *std.ArrayList(u8), missing: []cons
     try text.appendSlice(alloc, "\nUnder each heading, " ++ in_between_label ++ " with what the assistant did before its final reply, then a line for every tool call, starting with its ID, on why it was used and what it showed.\n\n" ++
         "Then any new entries from those turns under the same sections, each starting with its ID and the turn or tool call it comes from.");
     try writeHighestIds(alloc, text, highest);
-    if (fold > 0) {
+    if (fold != .none) {
         try text.appendSlice(alloc, " Your notes also left out the summary of the earlier compacted conversation; after the entries, write it under this heading:\n\n");
         try writeEarlierSection(alloc, text, fold, after_conversation);
         try text.appendSlice(alloc, "Write only these notes.");
@@ -405,8 +416,9 @@ fn noteFor(notes: []const Note, number: usize) []const u8 {
 const max_work_bytes = 1200;
 const max_tool_note_bytes = 300;
 /// The summary of earlier compactions replaces the one before it, so this
-/// bounds it however many there are.
-const max_earlier_bytes = 2400;
+/// bounds it however many there are. Without a store it carries the facts
+/// and decisions too, so it may say more than a pointer into a saved ledger.
+const max_earlier_bytes = 4096;
 /// An entry numbered this far above the highest of its kind is renumbered.
 const max_id_gap = 1000;
 /// A reply in none of the asked form may say more, for every turn at once.

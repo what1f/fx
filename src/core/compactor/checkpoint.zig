@@ -325,7 +325,8 @@ fn appendTools(alloc: Allocator, text: *std.ArrayList(u8), heading: []const u8, 
     if (tools.len > 0) {
         try text.print(alloc, "{s}:\n", .{heading});
         for (tools) |tool| {
-            try text.print(alloc, "  T{d} {s}", .{ tool.number, tool.line });
+            try text.print(alloc, "  T{d}", .{tool.number});
+            if (tool.line.len > 0) try text.print(alloc, " {s}", .{tool.line});
             if (tool.why.len > 0) try text.print(alloc, ": {s}", .{tool.why});
             try text.append(alloc, '\n');
         }
