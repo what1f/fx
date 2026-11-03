@@ -1,6 +1,6 @@
 import Foundation
 
-/// Automatic compaction uses either a share of usable input or a token limit.
+/// Automatic compaction uses either a share of usable input or a token limit, capped at the usable input.
 public enum FxAutoCompaction: Sendable, Equatable {
     case percent(Int)
     case tokens(Int)

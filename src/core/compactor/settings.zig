@@ -3,7 +3,8 @@
 
 const std = @import("std");
 
-/// One automatic compaction trigger. Token limits retain the window safety cap.
+/// One automatic compaction trigger: a share of the usable input window, or
+/// a token count, which never passes the usable input itself.
 pub const Trigger = union(enum) {
     percent: u8,
     tokens: usize,

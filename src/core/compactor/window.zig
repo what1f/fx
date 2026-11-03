@@ -144,7 +144,8 @@ pub const Size = struct {
 fn compactAtTrigger(capabilities: model_capabilities.Capabilities, trigger: settings.Trigger) ?usize {
     return switch (trigger) {
         .percent => |percent| compactAtTokens(capabilities, percent),
-        .tokens => |tokens| if (compactAtTokens(capabilities, settings.max_percent)) |limit| @min(tokens, limit) else tokens,
+        // A host that names the point keeps its own room below the window.
+        .tokens => |tokens| if (usableInputTokens(capabilities)) |usable| @min(tokens, usable) else tokens,
     };
 }
 
@@ -612,10 +613,11 @@ test "a request after the conversation gets what the conversation leaves" {
     try testing.expectEqual(@as(?usize, null), (Size{ .compact_at_tokens = 96_000, .usable_tokens = 120_000, .request_tokens = 100_000, .overflow = true }).roomAfterConversation());
 }
 
-test "token trigger respects the window cap and works without a known window" {
+test "token trigger stays within the usable input and works without a known window" {
     const capabilities = model_capabilities.Capabilities{ .context_window = 8192, .max_output_tokens = 1024 };
     try testing.expectEqual(@as(?usize, 3000), compactAtTrigger(capabilities, .{ .tokens = 3000 }));
-    try testing.expectEqual(@as(?usize, 5734), compactAtTrigger(capabilities, .{ .tokens = 9000 }));
+    try testing.expectEqual(@as(?usize, 7168), compactAtTrigger(capabilities, .{ .tokens = 9000 }));
+    try testing.expectEqual(@as(?usize, 7000), compactAtTrigger(capabilities, .{ .tokens = 7000 }));
     try testing.expectEqual(@as(?usize, 131072), compactAtTrigger(.{}, .{ .tokens = 131072 }));
     try testing.expectEqual(compactAtTokens(capabilities, 10), compactAtTrigger(capabilities, .{ .percent = 10 }));
     try testing.expectEqual(compactAtTokens(capabilities, 80), compactAtTrigger(capabilities, .{ .percent = 80 }));
