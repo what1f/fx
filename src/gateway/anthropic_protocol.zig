@@ -692,6 +692,13 @@ test "Anthropic messages carry user and tool-result images as image blocks" {
     try std.testing.expectEqual(@as(usize, 2), parts.len);
     try std.testing.expectEqualStrings("shot", parts[0].object.get("text").?.string);
     try std.testing.expectEqualStrings(png_b64, parts[1].object.get("source").?.object.get("data").?.string);
+    // Token measurement prices both image payloads as images, not text.
+    const prompt_context = @import("../core/agent/runtime/prompt_context.zig");
+    const measured = try prompt_context.measureProviderRequest(alloc, second, later);
+    try std.testing.expect(measured.image_identity != null);
+    const blanked = try std.mem.replaceOwned(u8, alloc, second, png_b64, "");
+    defer alloc.free(blanked);
+    try std.testing.expectEqual(@import("../core/shared/token_estimate.zig").textTokens(blanked), measured.text_tokens);
 }
 
 /// Retries the same typed turn, without committing a mode until a reply succeeds.
