@@ -227,7 +227,25 @@ test "length resend lowers effort to low only when that reasons less" {
     try std.testing.expectEqual(@as(?types.ReasoningEffort, null), lengthResendEffort(.{}, .auto));
 }
 
-/// Output tokens to request and reserve for one model call, or null to leave the limit unset.
+/// Most of the window compaction keeps free for output: room for the
+/// summary it writes. A reply may still ask for its full output limit.
+pub const compaction_output_reserve: u32 = 20_000;
+
+/// Output tokens compaction keeps below the window, and the limit of a
+/// summary request: the request's limit, at most `compaction_output_reserve`.
+pub fn compactionOutputTokens(capabilities: Capabilities) ?u32 {
+    const limit = requestOutputTokens(capabilities) orelse return null;
+    return @min(limit, compaction_output_reserve);
+}
+
+test "compaction output reserve stays at or below the request limit" {
+    try std.testing.expectEqual(@as(?u32, null), compactionOutputTokens(.{}));
+    try std.testing.expectEqual(@as(?u32, 8_000), compactionOutputTokens(.{ .max_output_tokens = 8_000 }));
+    try std.testing.expectEqual(@as(?u32, 20_000), compactionOutputTokens(.{ .context_window = 200_000, .max_output_tokens = 128_000 }));
+    try std.testing.expectEqual(@as(?u32, 128_000), requestOutputTokens(.{ .context_window = 200_000, .max_output_tokens = 128_000 }));
+}
+
+/// Output tokens to request for one model call, or null to leave the limit unset.
 pub fn requestOutputTokens(capabilities: Capabilities) ?u32 {
     const advertised = capabilities.max_output_tokens orelse return null;
     const window = capabilities.context_window orelse return advertised;
