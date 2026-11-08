@@ -871,9 +871,16 @@ pub const Reducer = struct {
             .output_tokens = try token_count(fields, "completion_tokens"),
         };
         const incoming_total = try token_count(fields, "total_tokens");
+        // `prompt_tokens` already counts the cached part, as Responses'
+        // `input_tokens` does. DeepSeek reports cache hits at the top level.
+        const cache_read = (try nested_token_count(fields, "prompt_tokens_details", "cached_tokens")) orelse
+            try token_count(fields, "prompt_cache_hit_tokens");
         const usage = types.Usage{
             .input_tokens = incoming.input_tokens orelse self.usage.input_tokens,
             .output_tokens = incoming.output_tokens orelse self.usage.output_tokens,
+            .cache_read_tokens = cache_read orelse self.usage.cache_read_tokens,
+            .cache_write_tokens = (try nested_token_count(fields, "prompt_tokens_details", "cache_write_tokens")) orelse self.usage.cache_write_tokens,
+            .reasoning_tokens = (try nested_token_count(fields, "completion_tokens_details", "reasoning_tokens")) orelse self.usage.reasoning_tokens,
         };
         const total = incoming_total orelse self.usage_total;
         var final_fields = self.usage_final_fields;
@@ -1000,6 +1007,11 @@ fn integer(value: std.json.Value) Error!i64 {
 
 fn index_value(value: std.json.Value) Error!usize {
     return std.math.cast(usize, try integer(value)) orelse error.InvalidChunk;
+}
+
+fn nested_token_count(fields: std.json.ObjectMap, parent: []const u8, key: []const u8) Error!?u64 {
+    const value = non_null(fields, parent) orelse return null;
+    return token_count(try object(value), key);
 }
 
 fn token_count(fields: std.json.ObjectMap, key: []const u8) Error!?u64 {
@@ -2662,4 +2674,34 @@ test "chat completions prose resembling a call stays prose and cancellation afte
     try test_accept(&cancelled, test_stop);
     try test_accept(&cancelled, "[DONE]");
     try std.testing.expectError(error.Cancelled, cancelled.finish(true));
+}
+
+test "chat completions reads cache and reasoning usage across trailers" {
+    const alloc = std.testing.allocator;
+    var reducer = try Reducer.init(alloc, test_request(), .{});
+    defer reducer.deinit();
+    try test_accept(&reducer, "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":128,\"prompt_tokens_details\":{\"cached_tokens\":64,\"cache_write_tokens\":16}}}");
+    try test_accept(&reducer, "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":8,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}");
+    _ = try reducer.accept("[DONE]", false);
+    var result = try reducer.finish(false);
+    defer result.deinit(alloc);
+    const usage = result.completed.completion.usage;
+    try std.testing.expectEqual(@as(?u64, 128), usage.input_tokens);
+    try std.testing.expectEqual(@as(?u64, 64), usage.cache_read_tokens);
+    try std.testing.expectEqual(@as(?u64, 16), usage.cache_write_tokens);
+    try std.testing.expectEqual(@as(?u64, 4), usage.reasoning_tokens);
+}
+
+test "chat completions reads DeepSeek cache hits" {
+    const alloc = std.testing.allocator;
+    var reducer = try Reducer.init(alloc, test_request(), .{});
+    defer reducer.deinit();
+    try test_accept(&reducer, "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"total_tokens\":105,\"prompt_cache_hit_tokens\":96,\"prompt_cache_miss_tokens\":4}}");
+    _ = try reducer.accept("[DONE]", false);
+    var result = try reducer.finish(false);
+    defer result.deinit(alloc);
+    const usage = result.completed.completion.usage;
+    try std.testing.expectEqual(@as(?u64, 96), usage.cache_read_tokens);
+    try std.testing.expectEqual(@as(?u64, null), usage.cache_write_tokens);
+    try std.testing.expectEqual(@as(?u64, null), usage.reasoning_tokens);
 }
