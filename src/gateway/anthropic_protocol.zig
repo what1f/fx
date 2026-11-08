@@ -733,7 +733,7 @@ pub fn negotiate(
             };
             return result;
         }
-        const status = result.failed.http_status orelse return result;
+        const status = @backingInt(result.failed.http_status orelse return result);
         const next = request.deferred_tool_mode.next() orelse return result;
         if ((status != 400 and status != 422) or !try hasDeferredContent(alloc, request.prepared_request_body.?, request.deferred_tool_mode)) return result;
         @import("../core/shared/debug_trace.zig").logf("gateway", "deferred_tool_downgrade provider={s} model={s} from={s} to={s} status={d}", .{ provider_name, request.model, @tagName(request.deferred_tool_mode), @tagName(next), status });

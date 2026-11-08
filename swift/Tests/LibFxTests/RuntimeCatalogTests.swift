@@ -221,19 +221,6 @@ private actor CatalogUpdateGate {
     await #expect(throws: FxError.closed) { try await engine.upsertTools([]) }
 }
 
-@Test func runtimeCatalogSearchSharesTheResidentCapacityAtOpen() async throws {
-    let calls = CatalogCalls()
-    let tools = (0..<64).map { index in
-        FxTool(name: "resident_\(index)", description: "Resident", inputSchema: .object(["type": .string("object")]), isIdempotent: true) { input, _ in
-            await calls.record(input); return "called"
-        }
-    }
-    var configuration = FxConfiguration(apiKey: "fixture", model: "swift/catalog", tools: tools, httpClient: CatalogHTTP(actions: []))
-    configuration.toolSearchEnabled = true
-    do { let engine = try await FxEngine.open(configuration: configuration); try await engine.close(); Issue.record("Resident capacity ignored search tool") }
-    catch {}
-}
-
 private actor MessagesCatalogHTTP: FxHTTPClient {
     var requests: [Data] = []
     var step = 0

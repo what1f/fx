@@ -7,6 +7,7 @@ const stream_provider = @import("../core/agent/stream_provider.zig");
 const provider_set = @import("../core/gateway/provider_set.zig");
 const definitions = @import("../core/config/configured_provider.zig");
 const chat_completions = @import("chat_completions.zig");
+const gateway_client = @import("client.zig");
 const host_stream = @import("host_stream_provider.zig");
 
 const anthropic = @import("anthropic_protocol.zig");
@@ -90,12 +91,16 @@ fn streamOnce(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.Model
 
     const opened = try host_stream.openPost(alloc, transport, request, endpoint, if (definition.protocol == .@"anthropic-messages") anthropic.headers[0..(if (request.deferred_tool_mode == .native) @as(usize, 4) else 3)] else &headers, payload);
     defer transport.close(opened.handle);
-    if (opened.status != .ok) return .{ .failed = .{
-        .http_status = @intCast(@backingInt(opened.status)),
-        .kind = chat_completions.failure_kind(opened.status),
-        .detail = try host_stream.readErrorBody(alloc, transport, opened.handle, request),
-        .ownership = .owned,
-    } };
+    if (opened.status != .ok) {
+        const body = try host_stream.readErrorBody(alloc, transport, opened.handle, request);
+        return .{ .failed = .{
+            .kind = gateway_client.httpFailureKind(alloc, .fromHttpStatus(opened.status), body),
+            .http_status = opened.status,
+            .detail = body,
+            .retry_after_seconds = opened.retry_after_seconds,
+            .ownership = .owned,
+        } };
+    }
 
     var reader: host_stream.HostStreamReader = undefined;
     reader.init(transport, opened.handle, request.cancel_flag, request.deadline, request.cooperative_pulse);
@@ -275,7 +280,7 @@ test "deferred Messages negotiate HTTP status and checkpoint only successful mod
         try std.testing.expectEqual(case.statuses.len, fake.calls);
         try std.testing.expectEqual(fake.calls, fake.closed);
         try std.testing.expectEqual(case.expected, agent.deferred_tool_mode);
-        if (case.statuses[case.statuses.len - 1] != 200) try std.testing.expectEqual(case.statuses[case.statuses.len - 1], result.failed.http_status.?);
+        if (case.statuses[case.statuses.len - 1] != 200) try std.testing.expectEqual(case.statuses[case.statuses.len - 1], @backingInt(result.failed.http_status.?));
         for (0..fake.calls) |i| {
             const native = case.initial == .native and i == 0;
             try std.testing.expectEqual(native, std.mem.find(u8, fake.headers[i], "anthropic-beta") != null);

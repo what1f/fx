@@ -10,14 +10,11 @@ const lexical = @import("../shared/lexical_relevance.zig");
 
 const Allocator = std.mem.Allocator;
 
-pub const max_tools: usize = 64;
-pub const max_catalog_tools: usize = 256;
 pub const max_name_bytes: usize = 64;
 pub const max_description_bytes: usize = 64 * 1024;
 pub const max_schema_bytes: usize = 64 * 1024;
 
 pub const ParseError = Allocator.Error || error{
-    TooManyHostTools,
     InvalidHostTool,
     InvalidHostToolName,
     DuplicateHostToolName,
@@ -49,7 +46,6 @@ pub const Runtime = struct {
     ) ParseError!Runtime {
         const tools_value = value orelse return .{};
         if (tools_value != .array) return error.InvalidHostTool;
-        if (tools_value.array.items.len > max_catalog_tools) return error.TooManyHostTools;
 
         var dynamic_count: usize = 0;
         for (tools_value.array.items) |entry| {
@@ -172,11 +168,6 @@ pub const Runtime = struct {
             };
         }
 
-        var direct_count: usize = 0;
-        for (deferred) |flag| if (!flag) {
-            direct_count += 1;
-        };
-        if (direct_count + @as(usize, if (std.mem.findScalar(bool, deferred, true) != null) 2 else 0) > max_tools) return error.TooManyHostTools;
         tools[tools.len - 2] = call_tool_tool;
         tools[tools.len - 1] = search_tool;
         tools[tools.len - 1].model_visible = std.mem.findScalar(bool, deferred, true) != null;
@@ -251,21 +242,13 @@ pub const Runtime = struct {
         defer parsed.deinit();
         if (parsed.value != .object) return error.InvalidHostState;
         const loaded = parsed.value.object.get("loaded") orelse return error.InvalidHostState;
-        if (loaded != .array or loaded.array.items.len > max_catalog_tools) return error.InvalidHostState;
+        if (loaded != .array) return error.InvalidHostState;
         for (loaded.array.items) |name| if (name != .string or !validName(name.string)) return error.InvalidHostState;
         for (loaded.array.items) |name| {
             for (self.descriptors, 0..) |descriptor, index| if (std.mem.eql(u8, name.string, descriptor.object.get("name").?.string)) {
                 self.loaded[index] = true;
             };
         }
-    }
-
-    pub fn validateActiveBudget(self: *const Runtime) !void {
-        var count: usize = if (self.search_enabled) 2 else 0;
-        for (self.deferred) |deferred| if (!deferred) {
-            count += 1;
-        };
-        if (count > max_tools) return error.TooManyHostTools;
     }
 
     /// Caller owns the flags. Only declarations in retained history count;
@@ -291,7 +274,6 @@ pub const Runtime = struct {
     }
 
     pub fn initialTools(self: *Runtime, alloc: Allocator) ![]const stream_provider.DynamicFunctionTool {
-        try self.validateActiveBudget();
         var result: std.ArrayList(stream_provider.DynamicFunctionTool) = .empty;
         try result.appendSlice(alloc, self.dynamic_tools);
         for (self.descriptors, 0..) |entry, index| {

@@ -10,7 +10,7 @@ const host = @import("core/hosts/host.zig");
 const host_attachments = @import("core/hosts/host_attachments.zig");
 const io_mod = @import("core/shared/io.zig");
 const fetch_state = @import("napi_fetch_state.zig");
-const streamable_http = @import("core/mcp/streamable_http.zig");
+const http_config = @import("core/mcp/http_config.zig");
 const host_stream_provider = @import("gateway/host_stream_provider.zig");
 const host_openai_codex = @import("gateway/host_openai_codex.zig");
 const host_xai_grok = @import("gateway/host_xai_grok.zig");
@@ -260,7 +260,7 @@ fn createRuntime(env: c.napi_env, options: c.napi_value) CreateError!*Runtime {
         else => return error.InvalidGatewayUrl,
     }) orelse (alloc.dupe(u8, builtin_gateway.default_chat_url) catch return error.OutOfMemory);
     errdefer alloc.free(gateway_chat_url);
-    streamable_http.validateEndpoint(gateway_chat_url) catch return error.InvalidGatewayUrl;
+    http_config.validateEndpoint(gateway_chat_url) catch return error.InvalidGatewayUrl;
     if (!std.mem.eql(u8, gateway_chat_url, builtin_gateway.default_chat_url)) {
         const uri = std.Uri.parse(gateway_chat_url) catch return error.InvalidGatewayUrl;
         if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.InvalidGatewayUrl;
@@ -582,10 +582,40 @@ fn startCoreFetchResponse(env: c.napi_env, info: c.napi_callback_info) callconv(
     const fetch_handle = fetch_handle_arg(env, argv[1]) orelse return null;
     const runtime = lockRuntime(env, runtime_handle) orelse return null;
     defer unlockRuntime(runtime_handle);
+    const status = fetch_status_arg(env, argv[2]) orelse return null;
+    return fetch_operation_value(env, runtime.fetch.startResponse(fetch_handle, status, -1));
+}
+
+/// Like `startCoreFetchResponse`, and also publishes the response's
+/// Retry-After in whole seconds, or -1 when it has none. A separate export so
+/// a loader can tell whether the addon takes it.
+fn startCoreFetchResponseWithRetryAfter(env: c.napi_env, info: c.napi_callback_info) callconv(.c) c.napi_value {
+    var argv: [4]c.napi_value = undefined;
+    const runtime_handle = runtimeHandleArg(env, info, &argv) orelse return null;
+    const fetch_handle = fetch_handle_arg(env, argv[1]) orelse return null;
+    const runtime = lockRuntime(env, runtime_handle) orelse return null;
+    defer unlockRuntime(runtime_handle);
+    const status = fetch_status_arg(env, argv[2]) orelse return null;
+    var seconds: f64 = 0;
+    if (c.napi_get_value_double(env, argv[3], &seconds) != c.napi_ok or
+        !std.math.isFinite(seconds) or
+        seconds < -1 or
+        seconds > @as(f64, @floatFromInt(std.math.maxInt(i32))) or
+        @floor(seconds) != seconds)
+    {
+        _ = c.napi_throw_type_error(env, "LIBFX_INVALID_ARGUMENT", "fetch Retry-After must be -1 or a non-negative int32");
+        return null;
+    }
+    return fetch_operation_value(env, runtime.fetch.startResponse(fetch_handle, status, @intFromFloat(seconds)));
+}
+
+fn fetch_status_arg(env: c.napi_env, value: c.napi_value) ?u16 {
     var status: u32 = 0;
-    if (c.napi_get_value_uint32(env, argv[2], &status) != c.napi_ok or status > std.math.maxInt(u16))
-        return throw(env, "LIBFX_INVALID_ARGUMENT", "fetch response status must be a uint16");
-    return fetch_operation_value(env, runtime.fetch.startResponse(fetch_handle, @intCast(status)));
+    if (c.napi_get_value_uint32(env, value, &status) != c.napi_ok or status > std.math.maxInt(u16)) {
+        _ = throw(env, "LIBFX_INVALID_ARGUMENT", "fetch response status must be a uint16");
+        return null;
+    }
+    return @intCast(status);
 }
 
 fn pushCoreFetchResponse(env: c.napi_env, info: c.napi_callback_info) callconv(.c) c.napi_value {
@@ -697,6 +727,7 @@ export fn napi_register_module_v1(env: c.napi_env, exports: c.napi_value) callco
     if (!exportFunction(env, exports, "coreFetchActive", coreFetchActive)) return null;
     if (!exportFunction(env, exports, "coreFetchDisposition", coreFetchDisposition)) return null;
     if (!exportFunction(env, exports, "startCoreFetchResponse", startCoreFetchResponse)) return null;
+    if (!exportFunction(env, exports, "startCoreFetchResponseWithRetryAfter", startCoreFetchResponseWithRetryAfter)) return null;
     if (!exportFunction(env, exports, "pushCoreFetchResponse", pushCoreFetchResponse)) return null;
     if (!exportFunction(env, exports, "finishCoreFetch", finishCoreFetch)) return null;
     if (!exportFunction(env, exports, "failCoreFetch", failCoreFetch)) return null;

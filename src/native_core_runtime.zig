@@ -381,6 +381,8 @@ const FetchBridge = struct {
     last_consumed_handle: ?fetch_state.Handle = null,
     next_handle: fetch_state.Handle = 1,
     status: u16 = 0,
+    /// The response's Retry-After in whole seconds, or -1 when it has none.
+    retry_after_seconds: i32 = -1,
     ready: ?*ReadyNotifier = null,
 
     pub fn clearPendingRequest(self: *FetchBridge) void {
@@ -470,6 +472,20 @@ const FetchBridge = struct {
         };
     }
 
+    /// Read only after `statusFn` reports the response, so the value the host
+    /// published with the status is already in place.
+    pub fn retryAfterFn(raw: ?*anyopaque, handle: i32) i32 {
+        const self: *FetchBridge = @ptrCast(@alignCast(raw.?));
+        const io = io_mod.getIo();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return switch (self.phase) {
+            .streaming => |active| if (active == handle) self.retry_after_seconds else -1,
+            .terminal => |terminal| if (terminal.handle == handle and terminal.kind == .success) self.retry_after_seconds else -1,
+            else => -1,
+        };
+    }
+
     pub fn next(raw: ?*anyopaque, handle: i32, out: []u8) i32 {
         const self: *FetchBridge = @ptrCast(@alignCast(raw.?));
         const io = io_mod.getIo();
@@ -518,6 +534,7 @@ const FetchBridge = struct {
         self.clearPendingRequest();
         self.phase = decision.phase;
         self.status = 0;
+        self.retry_after_seconds = -1;
         self.response.clearRetainingCapacity();
         self.response_offset = 0;
         self.wake.broadcast(io);
@@ -542,13 +559,14 @@ const FetchBridge = struct {
         return fetch_state.disposition(self.phase, self.last_consumed_handle, handle);
     }
 
-    pub fn startResponse(self: *FetchBridge, handle: fetch_state.Handle, status: u16) FetchOperationResult {
+    pub fn startResponse(self: *FetchBridge, handle: fetch_state.Handle, status: u16, retry_after_seconds: i32) FetchOperationResult {
         const io = io_mod.getIo();
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         const decision = fetch_state.decide(self.phase, .{ .start = handle });
         if (decision.action == .stale) return .stale;
         self.status = status;
+        self.retry_after_seconds = retry_after_seconds;
         self.phase = decision.phase;
         self.wake.broadcast(io);
         return .applied;
@@ -878,6 +896,7 @@ pub fn createOwned(alloc: Allocator, options: Options) !*Runtime {
         .next_fn = FetchBridge.next,
         .close_fn = FetchBridge.close,
         .consumed_fn = FetchBridge.markConsumed,
+        .retry_after_fn = FetchBridge.retryAfterFn,
     });
     runtime.codex_context = .{ .transport = runtime.stream_context.transport };
     runtime.grok_context = .{ .transport = runtime.stream_context.transport };

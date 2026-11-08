@@ -6,7 +6,7 @@ const compactor = @import("core/compactor/compactor.zig");
 const io_mod = @import("core/shared/io.zig");
 const model_provider = @import("core/config/model_provider.zig");
 const configured_provider = @import("core/config/configured_provider.zig");
-const streamable_http = @import("core/mcp/streamable_http.zig");
+const http_config = @import("core/mcp/http_config.zig");
 const gateway = @import("builtins/gateway.zig");
 const fetch_state = @import("napi_fetch_state.zig");
 const Core = native.Runtime;
@@ -81,7 +81,7 @@ fn create(data: []const u8) !*Core {
     if (!std.Io.Dir.path.isAbsolute(home) or !std.Io.Dir.path.isAbsolute(workspace)) return error.InvalidPath;
     const url = (try string(value, "gatewayChatUrl", native.max_url_bytes, false)) orelse try alloc.dupe(u8, gateway.default_chat_url);
     errdefer alloc.free(url);
-    try streamable_http.validateEndpoint(url);
+    try http_config.validateEndpoint(url);
     if (!std.mem.eql(u8, url, gateway.default_chat_url)) {
         const uri = try std.Uri.parse(url);
         if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.InvalidGatewayUrl;
@@ -160,7 +160,7 @@ export fn fx_core_take_fetch(core: *Core, metadata: *Buffer, body: *Buffer) i32 
     return 1;
 }
 export fn fx_core_start_fetch(core: *Core, handle: i32, status: u16) i32 {
-    return @backingInt(core.fetch.startResponse(handle, status));
+    return @backingInt(core.fetch.startResponse(handle, status, -1));
 }
 export fn fx_core_push_fetch(core: *Core, handle: i32, data: ?[*]const u8, len: usize) i32 {
     if (data == null and len != 0) return -1;

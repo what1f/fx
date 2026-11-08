@@ -82,7 +82,7 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
             if case .array(let parts) = message["content"] { return parts.compactMap { $0["text"]?.string }.joined(separator: "\n") }
             return ""
         }.joined(separator: "\n")
-        let summary = text.contains("Write the compaction notes") || text.contains("Your notes on the turns above")
+        let summary = text.contains("Write the compaction notes") || text.contains("Your notes on the turns above") || text.contains("Your notes left out")
         let delta: JSONValue
         var reason = "stop"
         if summary {
@@ -99,6 +99,7 @@ private actor RuntimeProbeHTTP: FxHTTPClient {
             let headings = text.split(separator: "\n").filter { $0.hasPrefix("Turn ") && $0.contains(" (") }
             let notes = headings.map { "\($0)\nIn between: catalog probe used the action." }.joined(separator: "\n\n")
                 + "\n\nFacts:\nnone\nRules:\nnone\nDecisions:\nnone\nStatus:\nnone\nOpen:\nnone"
+                + (text.contains("Earlier:\n") ? "\n\nEarlier:\nThe catalog probe called the action in the compacted turns." : "")
             delta = .object(["role": .string("assistant"), "content": .string(notes)])
         } else {
             if summaries > 0 {

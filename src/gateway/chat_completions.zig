@@ -156,25 +156,23 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
     defer alloc.free(url);
     const authorization = if (token) |value| try alloc.print("Bearer {s}", .{value}) else null;
     defer if (authorization) |value| secret.zeroAndFree(alloc, value);
-    var client: std.http.Client = .{ .allocator = alloc, .io = io.getIo() };
-    defer client.deinit();
     var uri = try std.Uri.parse(url);
     uri.scheme = if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) "https" else if (std.ascii.eqlIgnoreCase(uri.scheme, "http")) "http" else return error.UnsupportedUriScheme;
-    var operation = client_mod.PostOperation{
-        .client = &client,
+    const anthropic_headers = [_]std.http.Header{
+        .{ .name = "x-api-key", .value = token orelse "" },
+        anthropic.headers[1],
+        anthropic.headers[2],
+        anthropic.headers[3],
+    };
+    const anthropic_header_count: usize = if (request.deferred_tool_mode == .native) 4 else 3;
+    try request.admission.admit();
+    var opened = try client_mod.openBoundedPost(request.cancel_flag, phase_deadline(30_000, request.deadline), .{
         .uri = uri,
         .authorization = if (definition.protocol == .@"anthropic-messages") null else authorization,
-        .extra_headers = if (definition.protocol == .@"anthropic-messages") (&[_]std.http.Header{
-            .{ .name = "x-api-key", .value = token orelse "" },
-            anthropic.headers[1],
-            anthropic.headers[2],
-            anthropic.headers[3],
-        })[0..(if (request.deferred_tool_mode == .native) @as(usize, 4) else 3)] else &.{.{ .name = "accept", .value = "text/event-stream" }},
-    };
-    try request.admission.admit();
-    var opened = try client_mod.openBoundedPost(alloc, request.cancel_flag, phase_deadline(30_000, request.deadline), &operation);
-    defer opened.deinit(alloc);
-    const http = &opened.request.?;
+        .extra_headers = if (definition.protocol == .@"anthropic-messages") anthropic_headers[0..anthropic_header_count] else &.{.{ .name = "accept", .value = "text/event-stream" }},
+    });
+    defer opened.deinit();
+    const http = &opened.request;
     var watch: client_mod.ConnectionWatch = .init(.{
         .timeout_ms = 120_000,
         .stall_timeout_ms = client_mod.ConnectionWatch.bodyStallTimeoutMs(request.deadline),
@@ -219,7 +217,7 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
             detail = redacted;
         }
 
-        return .{ .failed = .{ .http_status = @intCast(@backingInt(response.head.status)), .kind = failure_kind(response.head.status), .detail = detail, .retry_after_seconds = retry_after, .ownership = .owned } };
+        return .{ .failed = .{ .kind = client_mod.httpFailureKind(alloc, .fromHttpStatus(response.head.status), detail), .http_status = response.head.status, .detail = detail, .retry_after_seconds = retry_after, .ownership = .owned } };
     }
     var result = (if (definition.protocol == .@"anthropic-messages") anthropic.consume(alloc, reader, request, watch.progress()) else if (definition.protocol == .@"openai-responses") responses.consume(alloc, request, reader, watch.progress()) else consume(alloc, reader, request, watch.progress())) catch |err| return watch.failure(err);
     if (watch.finish()) |err| {
@@ -227,21 +225,6 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
         return err;
     }
     return result;
-}
-
-pub fn failure_kind(status: std.http.Status) streams.FailureKind {
-    return switch (status) {
-        .bad_request => .invalid_request,
-        .unauthorized => .unauthorized,
-        .forbidden => .forbidden,
-        .payload_too_large => .request_too_large,
-        .too_many_requests => .rate_limited,
-        .internal_server_error => .server_error,
-        .bad_gateway => .bad_gateway,
-        .service_unavailable => .unavailable,
-        .gateway_timeout => .gateway_timeout,
-        else => .provider_error,
-    };
 }
 
 /// Parses a successful streamed reply from `reader`, telling `progress` about
@@ -314,7 +297,7 @@ test "configured capability lookup matches catalog projection and preserves unkn
     defer catalog.freeModelCatalog(alloc, &fetched.catalog);
     for (fetched.catalog.items) |entry| {
         const actual = provider.lookupCapabilities(entry.id).?;
-        try std.testing.expectEqualDeep(model_capabilities.mergeCapabilities(.{}, model_catalog_metadata.fromCatalogEntry(entry)), actual);
+        try model_capabilities.expectCapabilitiesEqualForTest(model_capabilities.mergeCapabilities(.{}, model_catalog_metadata.fromCatalogEntry(entry)), actual);
         const declared_vision = std.mem.eql(u8, entry.id, "small");
         try std.testing.expectEqual(declared_vision, actual.supports_vision);
         try std.testing.expectEqual(
@@ -391,7 +374,10 @@ fn send_review(raw: *anyopaque, alloc: Allocator, model: []const u8, payload: []
         else => return .permanent_failure,
     };
     errdefer result.deinit(alloc);
-    if (result == .failed) {
+    // A review the output limit cut off holds no decision, and the same
+    // review would be cut off again, so it stays unavailable.
+    const cut_off = result == .completed and result.completed.completion.finish_reason == .length;
+    if (result == .failed or cut_off) {
         result.deinit(alloc);
         return .permanent_failure;
     }
