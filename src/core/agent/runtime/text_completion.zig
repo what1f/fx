@@ -229,6 +229,18 @@ fn onEvent(raw: *anyopaque, event: agent_stream_provider.Event) void {
 /// provider routing and prompt caching but gets only the reasoning asked for
 /// and its own output limit. A request after the conversation keeps the
 /// conversation's options except Ultrafast, which is reserved for agent turns.
+/// A summary request may fill the usable input, which keeps only
+/// `compaction_output_reserve` of the window free, so it asks for no more.
+fn summaryOutputTokens(limit: ?u32) ?u32 {
+    return if (limit) |tokens| @min(tokens, model_capabilities.compaction_output_reserve) else null;
+}
+
+test "summary requests ask for no more output than compaction keeps free" {
+    try std.testing.expectEqual(@as(?u32, null), summaryOutputTokens(null));
+    try std.testing.expectEqual(@as(?u32, 4_096), summaryOutputTokens(4_096));
+    try std.testing.expectEqual(@as(?u32, 20_000), summaryOutputTokens(128_000));
+}
+
 pub const CompactorCaller = struct {
     negotiated_deferred_tool_mode: ?*@import("../deferred_tool_mode.zig").Mode = null,
     deferred_tool_mode_commit: ?@import("../deferred_tool_mode.zig").Commit = null,
@@ -312,7 +324,7 @@ pub const CompactorCaller = struct {
             .retry_count = self.retry_count,
             .cancel_flag = call.cancel_flag,
             .provider_options = options,
-            .max_output_tokens = if (own) self.max_output_tokens else model_capabilities.requestOutputTokens(self.capabilities_fn(self.capabilities_context, call.model)),
+            .max_output_tokens = summaryOutputTokens(if (own) self.max_output_tokens else model_capabilities.requestOutputTokens(self.capabilities_fn(self.capabilities_context, call.model))),
             .max_bytes = call.max_bytes,
             .trace_ctx = call.trace_ctx,
             .system = call.system,
