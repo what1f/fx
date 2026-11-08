@@ -621,6 +621,7 @@ const AskContext = struct {
     agent_step_limit: usize = 0,
     max_tool_result_bytes: usize = 64 * 1024,
     auto_compact_percent: u8 = compactor.default_percent,
+    auto_compact_tokens: ?usize = null,
     context_limits: config_runtime.context_limits.Values = .{},
     fast_mode: bool = false,
     /// Profile preference used only when creating a new durable session.
@@ -1075,6 +1076,7 @@ const AskContext = struct {
             .max_command_output_bytes = self.cfg.max_command_output_bytes,
             .max_tool_result_bytes = self.max_tool_result_bytes,
             .auto_compact_percent = self.auto_compact_percent,
+            .auto_compact_tokens = self.auto_compact_tokens,
             .api_key = self.api_key,
             .agent_stream_provider = self.agentStreamProvider(),
             .gateway_team = self.gateway_team,
@@ -1661,6 +1663,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
     ctx.agent_step_limit = startup.agent_step_limit;
     ctx.max_tool_result_bytes = startup.max_tool_result_bytes;
     ctx.auto_compact_percent = startup.auto_compact_percent;
+    ctx.auto_compact_tokens = startup.auto_compact_tokens;
     ctx.context_limits = startup.context_limits;
     ctx.context_limits.applyCommandLine(cfg.context_limit_overrides);
     ctx.fast_mode = startup.fast_mode;
@@ -1904,6 +1907,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         .agent_step_limit = startup.agent_step_limit,
         .max_tool_result_bytes = startup.max_tool_result_bytes,
         .auto_compact_percent = startup.auto_compact_percent,
+        .auto_compact_tokens = startup.auto_compact_tokens,
         .cancel_flag = ctx.cancelFlag(),
         .fast_mode = ctx.fast_mode,
         .ultrafast_mode = ctx.ultrafast_mode,

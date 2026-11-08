@@ -59,9 +59,9 @@ pub const Size = struct {
 
     /// The sizes for a model, compacting automatically at `percent` of its
     /// usable input.
-    pub fn of(capabilities: model_capabilities.Capabilities, percent: u8) Size {
+    pub fn of(capabilities: model_capabilities.Capabilities, trigger: settings.Trigger) Size {
         return .{
-            .compact_at_tokens = compactAtTokens(capabilities, percent),
+            .compact_at_tokens = compactAtTrigger(capabilities, trigger),
             .usable_tokens = usableInputTokens(capabilities),
         };
     }
@@ -137,6 +137,17 @@ pub const Size = struct {
         return self.overflow or request > (self.usable_tokens orelse std.math.maxInt(usize));
     }
 };
+
+/// Request size, in tokens, at which automatic compaction starts. A token
+/// count is capped by the usable input, not by `max_percent`: the host that
+/// names the point keeps its own room below the window. Without a known
+/// window the count still applies.
+fn compactAtTrigger(capabilities: model_capabilities.Capabilities, trigger: settings.Trigger) ?usize {
+    return switch (trigger) {
+        .percent => |percent| compactAtTokens(capabilities, percent),
+        .tokens => |tokens| if (usableInputTokens(capabilities)) |usable| @min(tokens, usable) else tokens,
+    };
+}
 
 /// Request size, in tokens, at which automatic compaction starts: `percent`
 /// of the model's usable input.
@@ -600,4 +611,19 @@ test "a request after the conversation gets what the conversation leaves" {
     try testing.expectEqual(@as(?usize, null), (Size{ .compact_at_tokens = 96_000, .usable_tokens = 120_000 }).roomAfterConversation());
     try testing.expectEqual(@as(?usize, null), (Size{ .compact_at_tokens = 96_000, .usable_tokens = 120_000, .request_tokens = 120_000 }).roomAfterConversation());
     try testing.expectEqual(@as(?usize, null), (Size{ .compact_at_tokens = 96_000, .usable_tokens = 120_000, .request_tokens = 100_000, .overflow = true }).roomAfterConversation());
+}
+
+test "token trigger stays within the usable input and works without a known window" {
+    const capabilities = model_capabilities.Capabilities{ .context_window = 8192, .max_output_tokens = 1024 };
+    try testing.expectEqual(@as(?usize, 3000), compactAtTrigger(capabilities, .{ .tokens = 3000 }));
+    try testing.expectEqual(@as(?usize, 7000), compactAtTrigger(capabilities, .{ .tokens = 7000 }));
+    try testing.expectEqual(@as(?usize, 7168), compactAtTrigger(capabilities, .{ .tokens = 9000 }));
+    try testing.expectEqual(@as(?usize, 131_072), compactAtTrigger(.{}, .{ .tokens = 131_072 }));
+    try testing.expectEqual(compactAtTokens(capabilities, 80), compactAtTrigger(capabilities, .{ .percent = 80 }));
+    var size = Size.of(capabilities, .{ .tokens = 3000 });
+    size.request_tokens = 2999;
+    try testing.expect(!size.due());
+    size.request_tokens = 3000;
+    try testing.expect(size.due());
+    try testing.expectEqual(@as(?usize, 7168), size.usable_tokens);
 }

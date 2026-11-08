@@ -226,6 +226,7 @@ pub const StartupState = struct {
     agent_step_limit: usize,
     max_tool_result_bytes: usize = tool_result_limits.default_max_tool_result_bytes,
     auto_compact_percent: u8 = compactor.default_percent,
+    auto_compact_tokens: ?usize = null,
     context_limits: config_runtime.context_limits.Values = .{},
     context_enabled: bool = true,
     fast_mode: bool = false,
@@ -892,6 +893,7 @@ pub fn resolveSettings(alloc: Allocator, state: *StartupState, detailed: *const 
     state.agent_step_limit = loadAgentStepLimit(state.agent_step_limit, settings.max_agent_steps);
     state.max_tool_result_bytes = tool_result_limits.resolveMaxToolResultBytes(settings.max_tool_result_bytes, tool_result_limits.default_max_tool_result_bytes);
     state.auto_compact_percent = compactor.resolvePercent(settings.auto_compact_percent, io_mod.getenv("FX_AUTO_COMPACT_PERCENT"));
+    state.auto_compact_tokens = compactor.parseTokens(io_mod.getenv("FX_AUTO_COMPACT_TOKENS"));
     state.context_limits = config_runtime.resolveContextLimits(settings, &.{});
     state.context_enabled = settings.context orelse true;
     const fast_mode = resolveStartupFastMode(

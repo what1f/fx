@@ -9,6 +9,10 @@
       "job": "setting-override",
       "stability": "stable"
     },
+    "FX_AUTO_COMPACT_TOKENS": {
+      "job": "integration",
+      "stability": "experimental"
+    },
     "FX_AUTO_UPGRADE": {
       "job": "setting-override",
       "stability": "stable"
