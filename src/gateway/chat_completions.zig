@@ -25,6 +25,7 @@ pub fn bundle(definition: *const definitions.Definition) provider_set.Bundle {
     return .{
         .agent_stream = .{ .context = context, .stream_fn = stream, .build_request_fn = build, .project_replay_fn = project_replay },
         .model_catalog = model_catalog_provider(definition),
+        .fallback_model_capabilities_fn = fallbackCapabilities,
         .cli_model_catalog = .{ .context = context, .fetch_fn = fetch_cli_catalog },
         .permission_reviewer = .{ .context = context, .review_fn = review },
     };
@@ -232,9 +233,15 @@ fn metadata_entry(metadata: definitions.ModelMetadata) catalog.ModelCatalogEntry
     };
 }
 
+/// Capabilities of a model the definition does not describe. Effort goes to
+/// the endpoint as given; see `Capabilities.accepts_any_reasoning_effort`.
+pub fn fallbackCapabilities(_: []const u8) model_capabilities.Capabilities {
+    return .{ .accepts_any_reasoning_effort = true };
+}
+
 fn lookup_capabilities(raw: ?*anyopaque, model: []const u8) model_capabilities.Capabilities {
-    const metadata = definition_at(raw).model(model) orelse return .{};
-    return model_capabilities.mergeCapabilities(.{}, model_catalog_metadata.fromCatalogEntry(metadata_entry(metadata.*)));
+    const metadata = definition_at(raw).model(model) orelse return fallbackCapabilities(model);
+    return model_capabilities.mergeCapabilities(fallbackCapabilities(model), model_catalog_metadata.fromCatalogEntry(metadata_entry(metadata.*)));
 }
 
 fn fetch_catalog(raw: ?*anyopaque, alloc: Allocator, input: catalog.FetchInput) Allocator.Error!catalog.ProviderResult {
@@ -264,7 +271,8 @@ test "configured capability lookup matches catalog projection and preserves unkn
     defer catalog.freeModelCatalog(alloc, &fetched.catalog);
     for (fetched.catalog.items) |entry| {
         const actual = provider.lookupCapabilities(entry.id).?;
-        try model_capabilities.expectCapabilitiesEqualForTest(model_capabilities.mergeCapabilities(.{}, model_catalog_metadata.fromCatalogEntry(entry)), actual);
+        try model_capabilities.expectCapabilitiesEqualForTest(model_capabilities.mergeCapabilities(fallbackCapabilities(entry.id), model_catalog_metadata.fromCatalogEntry(entry)), actual);
+        try std.testing.expect(model_capabilities.reasoningEffortSupported(actual, types.ReasoningEffort.literal("low")));
         const declared_vision = std.mem.eql(u8, entry.id, "small");
         try std.testing.expectEqual(declared_vision, actual.supports_vision);
         try std.testing.expectEqual(
@@ -276,7 +284,7 @@ test "configured capability lookup matches catalog projection and preserves unkn
     try std.testing.expectEqual(@as(?u32, 1024), provider.lookupCapabilities("large").?.max_output_tokens);
     try std.testing.expect(provider.lookupCapabilities("partial").?.context_window == null);
     try std.testing.expect(provider.lookupCapabilities("unknown").?.max_output_tokens == null);
-    try model_capabilities.expectCapabilitiesEqualForTest(.{}, provider.lookupCapabilities("missing-fast").?);
+    try model_capabilities.expectCapabilitiesEqualForTest(fallbackCapabilities("missing-fast"), provider.lookupCapabilities("missing-fast").?);
 }
 
 fn fetch_cli_catalog(raw: ?*anyopaque, alloc: Allocator, input: gateway_provider.CliModelCatalogInput) gateway_provider.CliModelCatalogResult {

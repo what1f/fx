@@ -69,6 +69,12 @@ pub const GatewayMetadata = struct {
 pub const Capabilities = struct {
     supports_reasoning: bool = false,
     reasoning_efforts: ReasoningEffortOptions = .{},
+    /// The endpoint checks effort itself, so any effort the user names is
+    /// sent even when `reasoning_efforts` lists none. Configured Chat
+    /// Completions providers set it: their metadata declares no levels, and
+    /// the host that wrote the definition knows which ones the model takes.
+    /// Pickers still offer only `reasoning_efforts`.
+    accepts_any_reasoning_effort: bool = false,
     supports_fast_mode: bool = false,
     supports_ultrafast_mode: bool = false,
     intrinsic_fast: bool = false,
@@ -248,7 +254,7 @@ test "request output limit bounds full-window catalog limits" {
 }
 
 pub fn reasoningEffortSupported(capabilities: Capabilities, effort: types.ReasoningEffort) bool {
-    if (effort.isDefault()) return true;
+    if (effort.isDefault() or capabilities.accepts_any_reasoning_effort) return true;
     for (capabilities.reasoning_efforts.slice()) |option| {
         if (option.eql(effort)) return true;
     }
@@ -437,6 +443,8 @@ test "request controls form a total fail-closed state machine" {
         .{ .capabilities = .{ .reasoning_efforts = .fromSlice(&declared_efforts) }, .effort = selected, .fast_mode = false, .expected_effort = "future-tier", .expected_fast = false },
         .{ .capabilities = .{ .reasoning_efforts = .fromSlice(&declared_efforts) }, .effort = stale, .fast_mode = false, .expected_effort = null, .expected_fast = false },
         .{ .capabilities = .{ .supports_fast_mode = true }, .effort = .auto, .fast_mode = true, .expected_effort = null, .expected_fast = true },
+        .{ .capabilities = .{ .accepts_any_reasoning_effort = true }, .effort = .auto, .fast_mode = false, .expected_effort = null, .expected_fast = false },
+        .{ .capabilities = .{ .accepts_any_reasoning_effort = true }, .effort = stale, .fast_mode = false, .expected_effort = "stale", .expected_fast = false },
         .{ .capabilities = .{ .reasoning_efforts = .fromSlice(&declared_efforts), .supports_fast_mode = true }, .effort = selected, .fast_mode = true, .expected_effort = "future-tier", .expected_fast = true },
     };
 
