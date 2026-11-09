@@ -291,6 +291,11 @@ public actor FxEngine {
         try await setConfigurationOption("effort", value: effort ?? "default")
     }
 
+    /// Turns the model's priority lane on or off while idle. The native core rejects models without one.
+    public func setFast(_ fast: Bool) async throws {
+        try await setConfigurationOption("fast", value: fast ? "true" : "false")
+    }
+
     private func setConfigurationOption(_ name: String, value: String) async throws {
         await joinFinishedToolTasks()
         try checkCatalogUpdate()

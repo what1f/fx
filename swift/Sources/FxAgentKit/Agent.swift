@@ -65,6 +65,11 @@ public actor Agent {
         try await engine.setReasoningEffort(effort)
     }
 
+    public func setFast(_ fast: Bool) async throws {
+        guard closingTask == nil else { throw FxError.closed }
+        try await engine.setFast(fast)
+    }
+
     /// Adds or replaces deferred definitions while the conversation is idle.
     public func upsertTools(_ tools: [FxTool]) async throws {
         guard closingTask == nil else { throw FxError.closed }
