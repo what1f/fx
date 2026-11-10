@@ -10,6 +10,7 @@ const model_provider = @import("../config/model_provider.zig");
 const mode_registry = @import("../modes/mode_registry.zig");
 const prompt_policy = @import("../config/prompt_policy.zig");
 const context_contract = @import("../workspace/context_contract.zig");
+const types = @import("../shared/types.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -39,6 +40,7 @@ pub const Config = struct {
     /// Raw reasoning-effort override using the kernel's ReasoningEffort.parse
     /// vocabulary. Borrowed; must outlive the server run.
     effort_override: ?[]const u8 = null,
+    auto_compact: ?@import("../compactor/compactor.zig").Trigger = null,
     /// Fast-lane override matching --fast/--no-fast. Null leaves the startup
     /// and session defaults untouched.
     fast_override: ?bool = null,
@@ -48,6 +50,10 @@ pub const Config = struct {
     /// Provider for every session this server runs, like model_override. Null
     /// keeps the startup provider and each saved session's own provider.
     provider_override: ?model_provider.ProviderId = null,
+    /// The permission mode every new session starts in, as `FX_PERMISSION_MODE`
+    /// sets it, without saving it. A client can still switch modes. Null
+    /// starts in the saved mode.
+    permission_override: ?types.PermissionMode = null,
     /// `.host_managed` sends requests to every provider but Gateway (Codex,
     /// Grok and a configured provider) without a credential; the host adds one
     /// at its fetch edge. Gateway keeps `auth_mode`.

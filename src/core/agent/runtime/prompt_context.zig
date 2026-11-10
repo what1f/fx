@@ -4,6 +4,7 @@ const token_estimate = @import("../../shared/token_estimate.zig");
 const types = @import("../../shared/types.zig");
 const stream_provider = @import("../stream_provider.zig");
 const text_utils = @import("../../shared/text_utils.zig");
+const json_decode = @import("../../shared/json_decode.zig");
 
 const Allocator = std.mem.Allocator;
 const ChatMessage = types.ChatMessage;
@@ -41,12 +42,19 @@ const ImageUrl = struct {
 
     pub fn jsonParse(alloc: Allocator, source: anytype, options: std.json.ParseOptions) !ImageUrl {
         if (try source.peekNextTokenType() == .string) {
-            return .{ .url = try std.json.innerParse([]const u8, alloc, source, options) };
+            return .{ .url = try json_decode.innerParse([]const u8, alloc, source, options) };
         }
         const Wrapped = struct { url: []const u8 };
-        const wrapped = try std.json.innerParse(Wrapped, alloc, source, options);
+        const wrapped = try json_decode.innerParse(Wrapped, alloc, source, options);
         return .{ .url = wrapped.url };
     }
+};
+
+/// Anthropic `image` blocks carry the payload in `source`.
+const ImageSource = struct {
+    type: []const u8 = "",
+    media_type: ?[]const u8 = null,
+    data: ?[]const u8 = null,
 };
 
 const ImagePart = struct {
@@ -55,6 +63,9 @@ const ImagePart = struct {
     detail: ?[]const u8 = null,
     data: ?ImagePartData = null,
     image_url: ?ImageUrl = null,
+    source: ?ImageSource = null,
+    /// Anthropic `tool_result` blocks nest retained tool images here.
+    content: MessageContent = .{},
 };
 
 const MessageContent = struct {
@@ -62,7 +73,7 @@ const MessageContent = struct {
 
     pub fn jsonParse(alloc: Allocator, source: anytype, options: std.json.ParseOptions) !MessageContent {
         if (try source.peekNextTokenType() == .array_begin) {
-            return .{ .parts = try std.json.innerParse([]const ImagePart, alloc, source, options) };
+            return .{ .parts = try json_decode.innerParse([]const ImagePart, alloc, source, options) };
         }
         try source.skipValue();
         return .{};
@@ -104,7 +115,7 @@ pub fn measureProviderRequest(alloc: Allocator, body: []const u8, request: strea
     }
 
     // Typed parsing borrows unescaped payload strings. Value parsing copies them.
-    const parsed = std.json.parseFromSlice(CostRequest, alloc, body, .{
+    const parsed = json_decode.parseFromSlice(CostRequest, alloc, body, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_if_needed,
     }) catch |err| return switch (err) {
@@ -122,10 +133,7 @@ pub fn measureProviderRequest(alloc: Allocator, body: []const u8, request: strea
         const tokens = textTokens(body);
         return .{ .serialized_bytes = body.len, .text_tokens = tokens, .estimated_input_tokens = tokens };
     };
-    var estimator = token_estimate.StreamingEstimator{};
-    var identity = std.crypto.hash.sha2.Sha256.init(.{});
-    var cursor: usize = 0;
-    var found_image = false;
+    var scan: ImageScan = .{ .body = body, .envelope = if (parsed.value.input != null) .input else if (parsed.value.messages != null) .messages else .prompt };
     for (messages) |message| {
         // Retained tool images never land in user-message content on
         // input-style bodies: the responses protocol writes them as
@@ -133,44 +141,76 @@ pub fn measureProviderRequest(alloc: Allocator, body: []const u8, request: strea
         // role. Scan both carriers.
         const parts = if (std.mem.eql(u8, message.role, "user"))
             message.content.parts
-        else if (parsed.value.input != null and std.mem.eql(u8, message.type, "function_call_output"))
+        else if (scan.envelope == .input and std.mem.eql(u8, message.type, "function_call_output"))
             message.output.parts
         else
             continue;
-        for (parts) |part| {
-            const payload = if (parsed.value.input != null and std.mem.eql(u8, part.type, "input_image"))
-                (part.image_url orelse return error.InvalidRequestMeasurement).url
-            else if (parsed.value.messages != null and std.mem.eql(u8, part.type, "image_url"))
-                (part.image_url orelse return error.InvalidRequestMeasurement).url
-            else if (parsed.value.prompt != null and std.mem.eql(u8, part.type, "file") and
-                std.mem.startsWith(u8, part.mediaType orelse "", "image/"))
-            payload: {
-                const data = part.data orelse return error.InvalidRequestMeasurement;
-                if (!std.mem.eql(u8, data.type, "data")) return error.InvalidRequestMeasurement;
-                break :payload data.data orelse return error.InvalidRequestMeasurement;
-            } else continue;
-            const address = @intFromPtr(payload.ptr);
-            if (address < @intFromPtr(body.ptr)) return error.InvalidRequestMeasurement;
-            const offset = address - @intFromPtr(body.ptr);
-            if (offset < cursor or offset > body.len or payload.len > body.len - offset) return error.InvalidRequestMeasurement;
-            estimator.consume(body[cursor..offset]);
-            cursor = offset + payload.len;
-            for ([_][]const u8{ part.type, part.mediaType orelse "", part.detail orelse "", payload }) |value| {
-                identity.update(std.mem.asBytes(&value.len));
-                identity.update(value);
-            }
-            found_image = true;
-        }
+        try scan.parts(parts, true);
     }
-    estimator.consume(body[cursor..]);
-    const tokens: usize = @intCast(@min(estimator.estimate(), std.math.maxInt(usize)));
+    scan.estimator.consume(body[scan.cursor..]);
+    const tokens: usize = @intCast(@min(scan.estimator.estimate(), std.math.maxInt(usize)));
     return .{
         .serialized_bytes = body.len,
         .text_tokens = tokens,
-        .image_identity = if (found_image) identity.finalResult() else null,
+        .image_identity = if (scan.found_image) scan.identity.finalResult() else null,
         .estimated_input_tokens = tokens,
     };
 }
+
+/// Walks image parts in body order, pricing the text between payloads and
+/// hashing each payload into the request's image identity.
+const ImageScan = struct {
+    body: []const u8,
+    envelope: enum { prompt, input, messages },
+    estimator: token_estimate.StreamingEstimator = .{},
+    identity: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{}),
+    cursor: usize = 0,
+    found_image: bool = false,
+
+    fn parts(self: *ImageScan, items: []const ImagePart, top_level: bool) MeasurementError!void {
+        for (items) |part| {
+            // Anthropic bodies keep retained tool images inside the
+            // tool_result block of the following user message.
+            if (top_level and self.envelope == .messages and std.mem.eql(u8, part.type, "tool_result")) {
+                try self.parts(part.content.parts, false);
+                continue;
+            }
+            const image: struct { payload: []const u8, media_type: []const u8 = "" } = switch (self.envelope) {
+                .input => if (std.mem.eql(u8, part.type, "input_image"))
+                    .{ .payload = (part.image_url orelse return error.InvalidRequestMeasurement).url }
+                else
+                    continue,
+                .messages => if (std.mem.eql(u8, part.type, "image_url"))
+                    .{ .payload = (part.image_url orelse return error.InvalidRequestMeasurement).url }
+                else if (std.mem.eql(u8, part.type, "image")) anthropic: {
+                    const source = part.source orelse return error.InvalidRequestMeasurement;
+                    if (!std.mem.eql(u8, source.type, "base64")) return error.InvalidRequestMeasurement;
+                    break :anthropic .{
+                        .payload = source.data orelse return error.InvalidRequestMeasurement,
+                        .media_type = source.media_type orelse "",
+                    };
+                } else continue,
+                .prompt => if (std.mem.eql(u8, part.type, "file") and std.mem.startsWith(u8, part.mediaType orelse "", "image/")) prompt: {
+                    const data = part.data orelse return error.InvalidRequestMeasurement;
+                    if (!std.mem.eql(u8, data.type, "data")) return error.InvalidRequestMeasurement;
+                    break :prompt .{ .payload = data.data orelse return error.InvalidRequestMeasurement };
+                } else continue,
+            };
+            const payload = image.payload;
+            const address = @intFromPtr(payload.ptr);
+            if (address < @intFromPtr(self.body.ptr)) return error.InvalidRequestMeasurement;
+            const offset = address - @intFromPtr(self.body.ptr);
+            if (offset < self.cursor or offset > self.body.len or payload.len > self.body.len - offset) return error.InvalidRequestMeasurement;
+            self.estimator.consume(self.body[self.cursor..offset]);
+            self.cursor = offset + payload.len;
+            for ([_][]const u8{ part.type, part.mediaType orelse image.media_type, part.detail orelse "", payload }) |value| {
+                self.identity.update(std.mem.asBytes(&value.len));
+                self.identity.update(value);
+            }
+            self.found_image = true;
+        }
+    }
+};
 
 pub fn calibrateProviderRequest(
     cost: RequestCost,
@@ -538,6 +578,20 @@ test "provider request measurement excludes chat-completions image payloads" {
     try std.testing.expect(measured.image_identity != null);
     const without_image_payload =
         \\{"model":"fixture/model","messages":[{"role":"tool","tool_call_id":"call_1","content":"capture"},{"role":"user","content":[{"type":"text","text":"The tool \"read_file\" returned 1 image(s)."},{"type":"image_url","image_url":{"url":""}}]}]}
+    ;
+    try std.testing.expectEqual(textTokens(without_image_payload), measured.text_tokens);
+}
+
+test "provider request measurement excludes anthropic image payloads" {
+    // Anthropic bodies carry user images as image blocks and retained tool
+    // images inside tool_result content, both with base64 `source.data`.
+    const body =
+        \\{"model":"fixture/model","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"capture"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAABBBBCCCCDDDD"}}]},{"type":"tool_result","tool_use_id":"call_2","content":"plain"},{"type":"text","text":"look"},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"EEEEFFFFGGGGHHHH"}}]}]}
+    ;
+    const measured = try measureProviderRequest(std.testing.allocator, body, measurement_test_request(true));
+    try std.testing.expect(measured.image_identity != null);
+    const without_image_payload =
+        \\{"model":"fixture/model","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"capture"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":""}}]},{"type":"tool_result","tool_use_id":"call_2","content":"plain"},{"type":"text","text":"look"},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":""}}]}]}
     ;
     try std.testing.expectEqual(textTokens(without_image_payload), measured.text_tokens);
 }

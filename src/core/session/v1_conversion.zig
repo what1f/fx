@@ -26,6 +26,8 @@ const relationship_index_codec = @import("session_relationship_index_codec.zig")
 const result_store = @import("result_store.zig");
 const session_permission_state = @import("../permissions/session_permission_state.zig");
 const child_state = @import("../subagent/child_state.zig");
+const json_decode = @import("../shared/json_decode.zig");
+const sort_utils = @import("../shared/sort_utils.zig");
 
 const Allocator = std.mem.Allocator;
 const Event = session_event.ConversationEvent;
@@ -80,7 +82,7 @@ pub fn kindOf(store: *session_store.Store, alloc: Allocator, id: []const u8) !Ki
         .bytes => |bytes| blk: {
             defer alloc.free(bytes);
             const Probe = struct { subagent_child: ?bool = null };
-            const parsed = std.json.parseFromSlice(Probe, alloc, bytes, .{ .ignore_unknown_fields = true }) catch break :blk null;
+            const parsed = json_decode.parseFromSlice(Probe, alloc, bytes, .{ .ignore_unknown_fields = true }) catch break :blk null;
             defer parsed.deinit();
             break :blk parsed.value.subagent_child;
         },
@@ -224,7 +226,7 @@ fn parentOf(store: *session_store.Store, alloc: Allocator, id: []const u8) !?[]u
     for ([_][]const u8{ "owner.json", "control.json" }) |name| {
         const bytes = (try readFileIfPresent(a, &subagent, name, child_state.max_state_bytes + 1)) orelse continue;
         const Named = struct { parent_id: ?[]const u8 = null };
-        const named = std.json.parseFromSliceLeaky(Named, a, bytes, .{ .ignore_unknown_fields = true }) catch continue;
+        const named = json_decode.parseFromSliceLeaky(Named, a, bytes, .{ .ignore_unknown_fields = true }) catch continue;
         if (named.parent_id) |parent| return try alloc.dupe(u8, parent);
     }
     return null;
@@ -316,7 +318,7 @@ fn openMemberDir(store: *session_store.Store, id: []const u8) !?io_mod.VerifiedD
 /// not be checked (`tests/tla/session_manager/V1Conversion.tla` NoShadow).
 pub fn hasFolder(home: []const u8, id: []const u8) !bool {
     var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.mem.print(&buffer, "{s}/{s}/{s}/{s}", .{ home, profile_paths.root_dir_name, profile_paths.sessions_dir_name, id });
+    const path = try std.mem.print(&buffer, "{s}/{s}/{s}/{s}", .{ profile_paths.rootParent(home), profile_paths.rootName(), profile_paths.sessions_dir_name, id });
     _ = std.Io.Dir.cwd().statFile(io_mod.getIo(), path, .{ .follow_symlinks = false }) catch |err| return switch (err) {
         error.FileNotFound => false,
         else => err,
@@ -662,7 +664,7 @@ fn readMetadata(alloc: Allocator, dir: *io_mod.VerifiedDir) !Metadata {
 
 fn isConversationMetadata(a: Allocator, bytes: []const u8) bool {
     const Probe = struct { schema_version: u64 = 0 };
-    const probe = std.json.parseFromSliceLeaky(Probe, a, bytes, .{ .ignore_unknown_fields = true }) catch return false;
+    const probe = json_decode.parseFromSliceLeaky(Probe, a, bytes, .{ .ignore_unknown_fields = true }) catch return false;
     return probe.schema_version == session_codec.session_metadata_schema_version;
 }
 
@@ -835,6 +837,9 @@ const FrameReader = struct {
                 try reader.builder.appendSteering(value.text);
                 try reader.keep(event, seq);
             },
+            // v1 logs never hold a context note or runtime context; only a v2
+            // session saves them (D93, D94).
+            .context_note, .runtime_context, .model_call => return error.InvalidConversationFrame,
             // The builder only checks the turn; its copy lives in the arena.
             .turn_completed => |value| {
                 try reader.requireOpen();
@@ -1018,7 +1023,7 @@ fn fromState(a: Allocator, locked: *Locked, state: *session_codec.DurableSession
                 entry.user.images = try withImages(a, &locked.dir, locked.id, entry.user.images, problem);
                 try storeInline(a, &entry.execution, &stored);
             },
-            .compacted_summary => {},
+            .compacted_summary, .host_context => {},
         }
         try requireKeepable(a, turn.*, history_file, number, problem);
         last_ts = @max(last_ts, turnTime(turn.*));
@@ -1030,7 +1035,7 @@ fn fromState(a: Allocator, locked: *Locked, state: *session_codec.DurableSession
                 .keep_from = null,
                 .ts_ms = last_ts,
             } },
-            .assistant, .interrupted => .{ .whole = .{ .turn = turn.*, .ts_ms = last_ts } },
+            .assistant, .interrupted, .host_context => .{ .whole = .{ .turn = turn.*, .ts_ms = last_ts } },
         });
     }
     member.steps = steps.items;
@@ -1045,7 +1050,7 @@ fn requireKeepable(a: Allocator, turn: types.HistoryTurn, file: []const u8, numb
     const user = switch (turn) {
         .assistant => |entry| entry.user,
         .interrupted => |entry| entry.user,
-        .compacted_summary => return,
+        .compacted_summary, .host_context => return,
     };
     if (!std.unicode.utf8ValidateSlice(user.text))
         return problem.set("{s} turn {d} has a prompt that is not valid UTF-8, which the current format can't keep", .{ file, number });
@@ -1080,7 +1085,7 @@ fn turnTime(turn: types.HistoryTurn) u64 {
     const summary = switch (turn) {
         .assistant => |entry| entry.execution.turn_summary,
         .interrupted => |entry| entry.execution.turn_summary,
-        .compacted_summary => null,
+        .compacted_summary, .host_context => null,
     } orelse return 0;
     return @intCast(@max(summary.completed_at_ms, 0));
 }
@@ -1177,7 +1182,7 @@ pub fn fingerprintOf(a: Allocator, dir: *io_mod.VerifiedDir) ![64]u8 {
         } else false;
         if (!skip) try names.append(a, try a.dupe(u8, entry.name));
     }
-    std.mem.sort([]const u8, names.items, {}, lessThan);
+    sort_utils.sort([]const u8, names.items, {}, lessThan);
     for ([_][]const u8{ "subagent/children.json", "client/system-prompt.txt", "client/mcp-tool-identities.json" }) |name| try names.append(a, name);
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     var buffer: [64 * 1024]u8 = undefined;

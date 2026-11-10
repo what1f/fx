@@ -1,0 +1,5 @@
+module CFx {
+    header "include/fx.h"
+    link "fx_core"
+    export *
+}

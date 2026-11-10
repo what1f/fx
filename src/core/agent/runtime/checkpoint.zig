@@ -17,6 +17,10 @@ const version: u16 = 2;
 /// that reads only version 2 reports a newer checkpoint instead of an
 /// invalid one.
 const naming_version: u16 = 3;
+/// Version 4 has version 3's layout, and its history holds a turn with
+/// context notes or a saved runtime context (D93, D94), so an fx that reads
+/// only up to version 3 reports a newer checkpoint instead of an invalid one.
+const notes_version: u16 = 4;
 /// Version 1 embedded inline image bytes as base64 inside a JSON-only payload.
 const json_only_version: u16 = 1;
 const header_bytes: usize = 4 + 2 + 2 + 4 + Sha256.digest_length;
@@ -37,12 +41,13 @@ pub const Error = Allocator.Error || error{
 /// empty when it gave none. Older checkpoints carry none, and readers that
 /// predate it ignore it.
 pub const Meta = struct {
+    deferred_tool_mode: @import("../deferred_tool_mode.zig").Mode = .native,
     libfx_version: []const u8 = "",
     tool_schema_hash: []const u8 = "",
     model: []const u8 = "",
 
     pub fn isEmpty(self: Meta) bool {
-        return self.libfx_version.len == 0 and self.tool_schema_hash.len == 0 and self.model.len == 0;
+        return self.deferred_tool_mode == .native and self.libfx_version.len == 0 and self.tool_schema_hash.len == 0 and self.model.len == 0;
     }
 
     pub fn fits(self: Meta) bool {
@@ -57,7 +62,7 @@ pub const Meta = struct {
         errdefer alloc.free(libfx_version);
         const tool_schema_hash = try alloc.dupe(u8, self.tool_schema_hash);
         errdefer alloc.free(tool_schema_hash);
-        return .{ .libfx_version = libfx_version, .tool_schema_hash = tool_schema_hash, .model = try alloc.dupe(u8, self.model) };
+        return .{ .deferred_tool_mode = self.deferred_tool_mode, .libfx_version = libfx_version, .tool_schema_hash = tool_schema_hash, .model = try alloc.dupe(u8, self.model) };
     }
 
     /// Frees a `Meta` that `dupe` or `decode` returned.
@@ -75,6 +80,8 @@ pub const Meta = struct {
         try std.json.Stringify.value(self.tool_schema_hash, .{}, writer);
         try writer.writeAll(",\"model\":");
         try std.json.Stringify.value(self.model, .{}, writer);
+        try writer.writeAll(",\"deferredToolMode\":");
+        try std.json.Stringify.value(@tagName(self.deferred_tool_mode), .{}, writer);
         try writer.writeByte('}');
     }
 };
@@ -134,12 +141,14 @@ fn encodeWith(
     const image_blobs: session_codec.ImageBlobs = .{ .alloc = alloc, .items = &blobs };
     var blob_section_bytes: usize = 0;
     var names_images = false;
+    var uses_notes = false;
 
     json.writer.writeAll("{\"history\":[") catch return error.OutOfMemory;
     for (history, 0..) |turn, index| {
         if (index > 0) json.writer.writeByte(',') catch return error.OutOfMemory;
         const first_new_blob = blobs.items.len;
         names_images = names_images or session_codec.turnNamesImages(turn, stored);
+        uses_notes = uses_notes or session_codec.turnUsesNotesSchema(turn);
         const written = if (stored) |names|
             session_codec.writeHistoryTurnNamingImages(&json.writer, turn, .{ .stored = names, .blobs = image_blobs })
         else
@@ -172,7 +181,7 @@ fn encodeWith(
     std.debug.assert(cursor == out.len);
 
     @memcpy(out[0..magic.len], magic);
-    std.mem.writeInt(u16, out[4..6], if (names_images) naming_version else version, .little);
+    std.mem.writeInt(u16, out[4..6], if (uses_notes) notes_version else if (names_images) naming_version else version, .little);
     std.mem.writeInt(u16, out[6..8], 0, .little);
     std.mem.writeInt(u32, out[8..12], @intCast(payload_len), .little);
     Sha256.hash(out[header_bytes..], out[12..header_bytes], .{});
@@ -207,7 +216,9 @@ pub fn decodeWithImages(alloc: Allocator, bytes: []const u8, names: ?*session_co
     }
     if (!std.mem.eql(u8, bytes[0..magic.len], magic)) return error.CorruptCheckpoint;
     const checkpoint_version = std.mem.readInt(u16, bytes[4..6], .little);
-    if (checkpoint_version != version and checkpoint_version != json_only_version and checkpoint_version != naming_version) {
+    if (checkpoint_version != version and checkpoint_version != json_only_version and
+        checkpoint_version != naming_version and checkpoint_version != notes_version)
+    {
         return error.UnsupportedCheckpointVersion;
     }
     if (std.mem.readInt(u16, bytes[6..8], .little) != 0) {
@@ -233,10 +244,10 @@ pub fn decodeWithImages(alloc: Allocator, bytes: []const u8, names: ?*session_co
     for (blobs) |*blob| blob.* = reader.section() orelse return error.CorruptCheckpoint;
     if (reader.remaining() != 0) return error.CorruptCheckpoint;
     var blob_reader: session_codec.ImageBlobReader = .{ .blobs = blobs };
-    // Only a version 3 checkpoint names images.
+    // Only a version 3 or 4 checkpoint names images.
     return decodeJson(alloc, json, .{
         .blobs = &blob_reader,
-        .names = if (checkpoint_version == naming_version) names else null,
+        .names = if (checkpoint_version == naming_version or checkpoint_version == notes_version) names else null,
     });
 }
 
@@ -319,6 +330,10 @@ pub fn metaFromJson(value: std.json.Value) error{InvalidMeta}!Meta {
             if (text != .string) return error.InvalidMeta;
             @field(meta, field[1]) = text.string;
         }
+    }
+    if (value.object.get("deferredToolMode")) |mode| {
+        if (mode != .string) return error.InvalidMeta;
+        meta.deferred_tool_mode = std.meta.stringToEnum(@import("../deferred_tool_mode.zig").Mode, mode.string) orelse return error.InvalidMeta;
     }
     if (!meta.fits()) return error.InvalidMeta;
     return meta;
@@ -470,7 +485,7 @@ test "kernel checkpoint rejects corruption and unsupported versions" {
 
     const unsupported = try alloc.dupe(u8, bytes);
     defer alloc.free(unsupported);
-    std.mem.writeInt(u16, unsupported[4..6], naming_version + 1, .little);
+    std.mem.writeInt(u16, unsupported[4..6], notes_version + 1, .little);
     try std.testing.expectError(
         error.UnsupportedCheckpointVersion,
         decode(alloc, unsupported),

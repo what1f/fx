@@ -25,7 +25,7 @@ for await (const event of turn) {
 await agent.close();
 ```
 
-Set `AI_GATEWAY_API_KEY` and run it with Node.js 20 or newer. Model calls go through [AI Gateway](https://vercel.com/docs/ai-gateway), so any model it lists works, and on Vercel libfx uses the deployment's OIDC token instead of a key. libfx can also run on a user's own ChatGPT or Grok plan, or on another server through the OpenAI Chat Completions API. See [Providers](#providers).
+Set `AI_GATEWAY_API_KEY` and run it with Node.js 20.19, 22.12, or newer. Model calls go through [AI Gateway](https://vercel.com/docs/ai-gateway), so any model it lists works, and on Vercel libfx uses the deployment's OIDC token instead of a key. libfx can also run on a user's own ChatGPT or Grok plan, or on another server through the OpenAI Chat Completions API. See [Providers](#providers).
 
 Importing libfx and calling `createFxAgent()` touch no network, files or processes. The engine loads when a session runs its first turn.
 
@@ -439,7 +439,7 @@ const agent = createFxAgent({
 
 `wait.start` and `wait.end` describe actual input requests separately from permission evaluation. Their `kind` is `approval`, `question`, `mcp_form`, or `mcp_url`; request IDs pair outcomes, including denial, cancellation, and failure. Native delegation events carry the child session and durable work ID. Child events retain that work ID, their own session/turn/execution identity, and the root and parent session IDs, so the host can join them even if delivery interleaves.
 
-MCP events include the configured server, original remote tool name, and owning fx call ID. `mcp.request.data.requestIdKind` distinguishes a native JSON-RPC ID, an MCP-v2 engine handle, and an explicitly propagated host correlation token. Hooks don't change remote MCP requests by default: the host adapter emits `mcp.start` and `mcp.end` without adding metadata or emitting a request ID. Opt in with `createMcpAdapter(client, { propagateCorrelation: true })` to send an opaque UUID as `_meta["libfx/correlationId"]` and record it in `mcp.request`. It contains no internal execution/call IDs and doesn't request progress notifications. Give the adapter a `serverName` for a stable local identity; otherwise it uses the client's reported server name when available. Native resource/prompt operations also report their server and action.
+MCP events include the configured server, original remote tool name, and owning fx call ID. `mcp.request.data.requestIdKind` distinguishes a native JSON-RPC ID, an MCP engine handle, and an explicitly propagated host correlation token. Hooks don't change remote MCP requests by default: the host adapter emits `mcp.start` and `mcp.end` without adding metadata or emitting a request ID. Opt in with `createMcpAdapter(client, { propagateCorrelation: true })` to send an opaque UUID as `_meta["libfx/correlationId"]` and record it in `mcp.request`. It contains no internal execution/call IDs and doesn't request progress notifications. Give the adapter a `serverName` for a stable local identity; otherwise it uses the client's reported server name when available. Native resource/prompt operations also report their server and action.
 
 `mcp.end.status` uses `success`, `failure`, `cancelled`, `input_required`, `unavailable`, or `unknown`. Native tool/protocol failures map to `failure`; `unavailable` means no operation result was available, and `unknown` means observation couldn't classify a returned host result.
 
@@ -513,14 +513,20 @@ A journal or `checkpoint` from a newer libfx fails with `FxJournalVersionError`.
 
 | Runtime | Backend |
 | --- | --- |
-| Node.js 20+ on macOS or Linux, x64 or arm64 | Native addon. Linux needs glibc 2.34 or newer. |
+| Node.js 20.19, 22.12, or newer on macOS or Linux, x64 or arm64 | Native addon. Linux needs glibc 2.34 or newer. |
 | Node.js elsewhere | WebAssembly with JSPI. Some Node versions need `--experimental-wasm-jspi`. |
 | Browsers | WebAssembly with JSPI, from `libfx/browser` |
 | Bun | The same as Node.js. For WebAssembly, use Bun 1.4.2 or newer. |
 
 The default `backend: "auto"` tries the native addon first. Pass `"native"` or `"wasm"` to require one, and call `getBackendInfo()` to see what would load without creating anything.
 
+Each platform's addon is its own package, such as `@libfx/libfx-linux-x64-gnu`, and npm installs only the one for your machine as an optional dependency of libfx. When it is missing, for example because optional dependencies were omitted or the lockfile came from another platform, `getBackendInfo()` names the package and `"auto"` uses WebAssembly instead. Node.js loads the WebAssembly backend only for that fallback.
+
 Next.js works in Node.js route handlers, with webpack or Turbopack, and doesn't need `serverExternalPackages`. CommonJS apps can `require("libfx")`. With TypeScript's `moduleResolution: "bundler"`, add `"node"` to `customConditions` to get the Node.js types.
+
+In a browser build, `createFxAgent` and `createFxEngine` load `fx-core.wasm`, and `createFxTerminal` loads `fx-term.wasm`. Importing `libfx/browser` does no work, so a client component that a server renders can import it. Next.js copies only the files an app's client code uses into the build. Vite 8 copies both unless you set `build.rolldownOptions.experimental.lazyBarrel` to `true`, though a browser still downloads only the file the app uses. esbuild copies neither, so serve the file yourself and pass its URL as `wasm`.
+
+If a CDN serves the `.wasm` files, for example through Next.js's `assetPrefix`, it must send `Content-Type: application/wasm` so the browser can compile while it downloads. Otherwise libfx downloads the whole file before compiling it. When the files come from a different origin than the page, the response also needs CORS headers, such as `Access-Control-Allow-Origin`, or the browser blocks the request.
 
 ## The fx terminal in a browser
 
@@ -580,3 +586,16 @@ libfx is developed in the [fx repository](https://github.com/vercel-labs/fx), un
 ## License
 
 [Apache-2.0](https://github.com/vercel-labs/fx/blob/main/LICENSE)
+
+### Native Swift model configuration
+
+The Swift engine and FxAgentKit expose idle `setModel` and `setReasoningEffort` calls through ACP. Configured endpoints support the standard effort fields for Chat Completions, Responses, and Messages. The host persists its selection and supplies it when reopening native history. See [libfx Swift](../swift/README.md).
+
+### Native Swift deferred tools
+
+The native Swift package supports deferred host tool catalogs and idle catalog updates. See [Update deferred host tools](../swift/README.md#update-deferred-host-tools) for activation, schema validation, persistence, and capacity limits. Registered deferred tools can be called before discovery; invalid arguments return field errors and the current definition. Direct calls leave the top-level tool list unchanged. Repeated discovery does not duplicate native declarations. Native requests retain the first saved declaration of each name. Catalog changes append current definitions as context; use the fixed `call_tool` function for updated arguments. Removed tools cannot execute. Repeated searches do not add native declarations, and request serialization filters duplicates already present in saved histories without rewriting storage. Compaction starts a new declaration baseline. The JavaScript SDK does not expose catalog mutation methods.
+
+Deferred host actions no longer enter the top-level tool list when selected.
+Chat Completions uses `tool_search` and `call_tool`; Responses returns definitions
+in conversation output items. The Swift engine also supports persisted, appended
+context reminders. Anthropic Messages uses inline tool additions and supports text and tools.

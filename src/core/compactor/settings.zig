@@ -3,6 +3,13 @@
 
 const std = @import("std");
 
+/// One automatic compaction trigger: a share of the usable input window, or
+/// a token count, which never passes the usable input itself.
+pub const Trigger = union(enum) {
+    percent: u8,
+    tokens: usize,
+};
+
 /// Automatic compaction starts once a request reaches this share of the
 /// model's usable input window.
 pub const default_percent: u8 = 80;
@@ -14,7 +21,7 @@ pub fn isValidPercent(value: u64) bool {
 }
 
 /// Parses a process override. Invalid or out-of-range values are ignored.
-fn parsePercent(raw: ?[]const u8) ?u8 {
+pub fn parsePercent(raw: ?[]const u8) ?u8 {
     const trimmed = std.mem.trim(u8, raw orelse return null, " \t\r\n");
     if (trimmed.len == 0) return null;
     const value = std.fmt.parseUnsigned(u8, trimmed, 10) catch return null;

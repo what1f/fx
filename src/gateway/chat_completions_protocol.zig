@@ -7,6 +7,7 @@ const tool_result_errors = @import("../core/tooling/tool_result_errors.zig");
 const image_attachments = @import("../core/images/image_attachments.zig");
 const tool_call_ids = @import("tool_call_ids.zig");
 const sse = @import("sse.zig");
+const json_depth = @import("json_depth.zig");
 const configured_provider = @import("../core/config/configured_provider.zig");
 const model_provider = @import("../core/config/model_provider.zig");
 const io_mod = @import("../core/shared/io.zig");
@@ -43,13 +44,13 @@ pub const Error = error{
     RequiredToolMissing,
     UnexpectedToolCall,
     InvalidChunk,
+    MalformedChatCompletionsChunk,
     ConflictingIdentity,
     InvalidFinishReason,
     InconsistentFinishReason,
     IncompleteStream,
     StreamClosed,
     ProviderError,
-    OutputTruncated,
     ContentFiltered,
     Refused,
     EventTooLarge,
@@ -67,7 +68,7 @@ pub const Error = error{
 const max_selected_tools = 256;
 const max_name_bytes = 128;
 const max_history_arguments_bytes = 1024 * 1024;
-const max_json_depth = 64;
+const max_json_depth = json_depth.max_depth;
 
 const Function = struct {
     name: []const u8,
@@ -124,6 +125,7 @@ fn select_functions(alloc: Allocator, tools: stream_provider.ToolSelection, choi
     }
     var schema_budget: SchemaBudget = .{};
     for (tools.selected_dynamic) |function| {
+        if (function.deferred) continue;
         if (contains_name(tools.advertised_names, function.name)) continue;
         if (function.input_schema != .object) return error.InvalidToolSchema;
         try validate_dynamic_schema(function.input_schema, 0, &schema_budget);
@@ -167,7 +169,7 @@ fn validate_request(request: stream_provider.RequestData) Error!void {
     try request.validatePrompt();
     configured_provider.validate_model_id(request.model) catch return error.InvalidModel;
     const options = request.provider_options;
-    if (options.reasoning != null or options.fast or options.prompt_caching) return error.UnsupportedProviderOption;
+    if (options.fast or options.prompt_caching) return error.UnsupportedProviderOption;
     if (options.provider_order.len != 0) return error.UnsupportedProviderOption;
     if (request.response_format != null) return error.UnsupportedResponseFormat;
     // The vision tool runs through a separate provider request; inline image
@@ -188,28 +190,7 @@ fn validate_request(request: stream_provider.RequestData) Error!void {
 }
 
 fn check_json_depth(text: []const u8) Error!void {
-    var depth: usize = 0;
-    var quoted = false;
-    var escaped = false;
-    for (text) |byte| {
-        if (quoted) {
-            if (escaped) {
-                escaped = false;
-            } else if (byte == '\\') {
-                escaped = true;
-            } else if (byte == '"') quoted = false;
-        } else switch (byte) {
-            '"' => quoted = true,
-            '{', '[' => {
-                if (depth == max_json_depth) return error.JsonTooDeep;
-                depth += 1;
-            },
-            '}', ']' => if (depth > 0) {
-                depth -= 1;
-            },
-            else => {},
-        }
-    }
+    if (json_depth.exceeds(text)) return error.JsonTooDeep;
 }
 
 /// Caller owns the bounded diagnostic. Normalize JSON before masking so later
@@ -422,7 +403,7 @@ pub fn build_request(alloc: Allocator, input: stream_provider.RequestData, optio
     return out.toOwnedSlice();
 }
 
-fn toolResultDenied(message: types.ChatMessage) bool {
+pub fn toolResultDenied(message: types.ChatMessage) bool {
     const failed = if (message.tool_result_status) |status|
         status == .failure
     else
@@ -541,7 +522,14 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
             if (message.role == .user and message.images.len != 0) {
                 try write_user_content_parts(writer, alloc, message);
             } else {
-                try std.json.Stringify.value(message.content, .{}, writer);
+                const definitions = if (message.role == .tool and message.tool_result_memory != null) message.tool_result_memory.?.loaded_tools_json else null;
+                if (definitions) |saved| {
+                    const current = try @import("deferred_definitions.zig").snapshot(alloc, saved);
+                    defer alloc.free(current);
+                    try std.json.Stringify.value(if (std.mem.eql(u8, current, "[]")) message.content orelse current else current, .{}, writer);
+                } else {
+                    try std.json.Stringify.value(message.content, .{}, writer);
+                }
             }
             try write_replay(writer, alloc, message);
             if (message.role == .tool) {
@@ -601,6 +589,10 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
             try writer.writeAll(",\"parallel_tool_calls\":");
             try std.json.Stringify.value(parallel, .{}, writer);
         }
+    }
+    if (request.provider_options.reasoning) |effort| {
+        try writer.writeAll(",\"reasoning_effort\":");
+        try std.json.Stringify.value(effort.label(), .{}, writer);
     }
     if (request.max_output_tokens) |limit| try writer.print(",\"max_tokens\":{d}", .{limit});
     try writer.writeByte('}');
@@ -703,7 +695,10 @@ pub const Reducer = struct {
         try check_json_depth(data);
         var parsed = std.json.parseFromSlice(std.json.Value, self.alloc, data, .{ .duplicate_field_behavior = .@"error", .parse_numbers = false }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidChunk,
+            // Valid JSON that fx refuses ends the turn. Text that is not JSON
+            // at all was damaged on the way, so the request is resent.
+            error.DuplicateField => return error.InvalidChunk,
+            else => return error.MalformedChatCompletionsChunk,
         };
         defer parsed.deinit();
         const root = try object(parsed.value);
@@ -885,6 +880,9 @@ pub const Reducer = struct {
         const usage = types.Usage{
             .input_tokens = incoming.input_tokens orelse self.usage.input_tokens,
             .output_tokens = incoming.output_tokens orelse self.usage.output_tokens,
+            .cache_read_tokens = (try nested_token_count(fields, "prompt_tokens_details", "cached_tokens")) orelse (try token_count(fields, "prompt_cache_hit_tokens")) orelse self.usage.cache_read_tokens,
+            .cache_write_tokens = (try nested_token_count(fields, "prompt_tokens_details", "cache_write_tokens")) orelse self.usage.cache_write_tokens,
+            .reasoning_tokens = (try nested_token_count(fields, "completion_tokens_details", "reasoning_tokens")) orelse self.usage.reasoning_tokens,
         };
         const total = incoming_total orelse self.usage_total;
         var final_fields = self.usage_final_fields;
@@ -915,8 +913,10 @@ pub const Reducer = struct {
         self.usage_final_fields = final_fields;
     }
 
-    /// Requires finish_reason followed by [DONE]. Length/filter/refusal are
-    /// explicit errors, never executable partial calls or successful tool turns.
+    /// Requires finish_reason followed by [DONE]. Filter and refusal are
+    /// explicit errors. A reply the output limit cut off returns with the
+    /// `length` reason, as the Gateway and Responses providers return it, so
+    /// the agent loop can resend it; it never runs that reply's partial calls.
     /// Results use stream_provider.Result.deinit with this reducer's allocator.
     pub fn finish(self: *Reducer, cancelled: bool) Error!stream_provider.Result {
         errdefer self.phase = .closed;
@@ -925,14 +925,17 @@ pub const Reducer = struct {
         if (self.phase != .done) return error.IncompleteStream;
         const reason = self.finish_reason.?;
         switch (reason) {
-            .length => return error.OutputTruncated,
             .content_filter => return error.ContentFiltered,
-            .stop, .tool_calls => {},
+            .stop, .tool_calls, .length => {},
             else => return error.InvalidFinishReason,
         }
         if (self.refusal_seen) return error.Refused;
-        if ((reason == .tool_calls) != (self.tools.items.len != 0)) return error.InconsistentFinishReason;
-        if (self.choice == .required and self.tools.items.len == 0) return error.RequiredToolMissing;
+        // A cut-off reply may stop anywhere, so only a finished one has to
+        // agree with its tool calls.
+        if (reason != .length) {
+            if ((reason == .tool_calls) != (self.tools.items.len != 0)) return error.InconsistentFinishReason;
+            if (self.choice == .required and self.tools.items.len == 0) return error.RequiredToolMissing;
+        }
         // Unadvertised names and invalid arguments are returned as sent. The tool
         // loop decides whether such a call runs and answers the rest, and the
         // permission reviewer retries a malformed decision.
@@ -1006,6 +1009,11 @@ fn integer(value: std.json.Value) Error!i64 {
 
 fn index_value(value: std.json.Value) Error!usize {
     return std.math.cast(usize, try integer(value)) orelse error.InvalidChunk;
+}
+
+fn nested_token_count(fields: std.json.ObjectMap, parent: []const u8, key: []const u8) Error!?u64 {
+    const value = non_null(fields, parent) orelse return null;
+    return token_count(try object(value), key);
 }
 
 fn token_count(fields: std.json.ObjectMap, key: []const u8) Error!?u64 {
@@ -2006,8 +2014,6 @@ test "chat completions serializes user message images as content parts" {
 test "chat completions rejects unsupported requests and ambiguous selection" {
     const alloc = std.testing.allocator;
     var request = test_request();
-    request.provider_options.reasoning = .auto;
-    try std.testing.expectError(error.UnsupportedProviderOption, build_request(alloc, request, .{}));
     request.provider_options = .{ .fast = true };
     try std.testing.expectError(error.UnsupportedProviderOption, build_request(alloc, request, .{}));
     request.provider_options = .{ .prompt_caching = true };
@@ -2215,8 +2221,19 @@ test "chat completions terminal evidence and finish reasons are strict" {
         try test_accept(&reducer, test_stop);
         try std.testing.expectError(error.IncompleteStream, reducer.finish(false));
     }
+    // A cut-off reply returns as such, with or without the call it cut off,
+    // for the agent loop to resend; the loop never runs its calls.
+    const test_length = "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}";
+    for ([_]?[]const u8{ test_call, null }) |call| {
+        var reducer = try Reducer.init(alloc, test_tool_request(), .{});
+        defer reducer.deinit();
+        if (call) |chunk| try test_accept(&reducer, chunk);
+        var result = try test_finish(&reducer, test_length);
+        defer result.deinit(alloc);
+        try std.testing.expectEqual(types.ProviderFinishReason.length, result.completed.completion.finish_reason.?);
+        try std.testing.expectEqual(@as(usize, if (call != null) 1 else 0), result.completed.completion.tool_calls.len);
+    }
     for ([_]struct { reason: []const u8, failure: Error }{
-        .{ .reason = "length", .failure = error.OutputTruncated },
         .{ .reason = "content_filter", .failure = error.ContentFiltered },
         .{ .reason = "stop", .failure = error.InconsistentFinishReason },
     }) |case| {
@@ -2244,7 +2261,7 @@ test "chat completions terminal evidence and finish reasons are strict" {
 test "chat completions rejects malformed chunks contradictory identities and extra choices" {
     const alloc = std.testing.allocator;
     const cases = [_]struct { first: ?[]const u8 = null, chunk: []const u8, failure: Error }{
-        .{ .chunk = "not JSON", .failure = error.InvalidChunk },
+        .{ .chunk = "not JSON", .failure = error.MalformedChatCompletionsChunk },
         .{ .chunk = "{\"choices\":[],\"choices\":[]}", .failure = error.InvalidChunk },
         .{ .chunk = "{\"error\":{\"message\":\"bad request\"}}", .failure = error.ProviderError },
         .{ .chunk = "{\"choices\":[{\"index\":1,\"delta\":{}}]}", .failure = error.InvalidChunk },
@@ -2335,6 +2352,67 @@ test "chat completions stream framing handles chunks trailers truncation and wir
     source.end = wire.len;
     var result = try consume_stream(alloc, &source, test_request(), .{}, null, &cancelled, null);
     defer result.deinit(alloc);
+}
+
+const stream_fuzz = @import("stream_fuzz_testing.zig");
+
+fn fuzzChunkedStream(_: void, smith: *std.testing.Smith) !void {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var reasoning: stream_fuzz.Text = .{};
+    try reasoning.generate(arena, smith, "", "", false);
+    var content: stream_fuzz.Text = .{};
+    try content.generate(arena, smith, "", "", false);
+    const with_tool = smith.boolWeighted(1, 1);
+    var arguments: stream_fuzz.Text = .{};
+    try arguments.generate(arena, smith, "{\"path\":\"", "\"}", true);
+
+    var wire_buffer: std.Io.Writer.Allocating = .init(arena);
+    const wire = &wire_buffer.writer;
+    if (reasoning.text.items.len > 0) {
+        for (try reasoning.pieces(arena)) |piece| {
+            try stream_fuzz.appendEvent(wire, smith, "{{\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning\":{f}}}}}]}}", piece);
+        }
+    }
+    for (try content.pieces(arena), 0..) |piece, index| {
+        if (index == 0) {
+            try stream_fuzz.appendEvent(wire, smith, "{{\"id\":\"chat-1\",\"model\":\"resolved-model\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":{f}}},\"finish_reason\":null}}]}}", piece);
+        } else {
+            try stream_fuzz.appendEvent(wire, smith, "{{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{f}}}}}]}}", piece);
+        }
+    }
+    if (with_tool) {
+        for (try arguments.pieces(arena), 0..) |piece, index| {
+            if (index == 0) {
+                try stream_fuzz.appendEvent(wire, smith, "{{\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{{\"name\":\"read_file\",\"arguments\":{f}}}}}]}}}}]}}", piece);
+            } else {
+                try stream_fuzz.appendEvent(wire, smith, "{{\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"function\":{{\"arguments\":{f}}}}}]}}}}]}}", piece);
+            }
+        }
+    }
+    try wire.print("data: {s}\n\ndata: [DONE]\n\n", .{if (with_tool) test_tools_finish else test_stop});
+
+    const read_buffer = try stream_fuzz.readBuffer(arena, smith);
+    var fixed = std.Io.Reader.fixed(wire_buffer.written());
+    var source = fixed.limited(.unlimited, read_buffer);
+    var deltas: stream_fuzz.Deltas = .{ .alloc = arena };
+    const cancelled = std.atomic.Value(bool).init(false);
+    var result = try consume_stream(std.testing.allocator, &source.interface, test_tool_request(), .{}, deltas.sink(), &cancelled, null);
+    defer result.deinit(std.testing.allocator);
+
+    if (result != .completed) return error.TestStreamFailed;
+    const completion = result.completed.completion;
+    try std.testing.expectEqualStrings(content.text.items, completion.content orelse "");
+    try deltas.expectEqual(content.text.items, reasoning.text.items);
+    try stream_fuzz.expectToolCall(completion.tool_calls, with_tool, "call-1", arguments.text.items);
+}
+
+test "chat completions streams give the same result however they are cut into events and reads" {
+    try std.testing.fuzz({}, fuzzChunkedStream, .{
+        .corpus = &(.{""} ++ @import("fuzz_corpus").chat_completions_stream.*),
+    });
 }
 
 test "chat completions reducer caps events content identities arguments tools and nesting" {
@@ -2580,4 +2658,78 @@ test "chat completions prose resembling a call stays prose and cancellation afte
     try test_accept(&cancelled, test_stop);
     try test_accept(&cancelled, "[DONE]");
     try std.testing.expectError(error.Cancelled, cancelled.finish(true));
+}
+
+test "deferred tools preserve Chat Completions request bytes" {
+    const alloc = std.testing.allocator;
+    var request = test_tool_request();
+    const before = try build_request(alloc, request, .{});
+    defer alloc.free(before);
+    const schema: std.json.ObjectMap = .empty;
+    const definition: stream_provider.DynamicFunctionTool = .{ .name = "plugin.action", .description = "changed", .input_schema = .{ .object = schema }, .deferred = true };
+    request.tools.selected_dynamic = &.{definition};
+    const after = try build_request(alloc, request, .{});
+    defer alloc.free(after);
+    try std.testing.expectEqualStrings(before, after);
+    request.tools.selected_dynamic = &.{};
+    const removed = try build_request(alloc, request, .{});
+    defer alloc.free(removed);
+    try std.testing.expectEqualStrings(before, removed);
+}
+
+test "deferred definitions survive ordinary tool output truncation" {
+    const alloc = std.testing.allocator;
+    var request = test_request();
+    request.messages = &.{
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "search", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "search", .tool_name = "tool_search", .content = "truncated preview", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"full_definition\"}]" } },
+    };
+    request.tools.selected_dynamic = &.{.{ .name = "full_definition", .description = "Full definition", .input_schema = .{ .object = .empty }, .deferred = true }};
+    const body = try build_request(alloc, request, .{});
+    defer alloc.free(body);
+    try std.testing.expect(std.mem.find(u8, body, "full_definition") != null);
+    try std.testing.expect(std.mem.find(u8, body, "truncated preview") == null);
+}
+
+test "chat completions preserves cache and reasoning usage across final trailers" {
+    const alloc = std.testing.allocator;
+    var reducer = try Reducer.init(alloc, test_request(), .{});
+    defer reducer.deinit();
+    try test_accept(&reducer, "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":128,\"prompt_tokens_details\":{\"cached_tokens\":64,\"cache_write_tokens\":16}}}");
+    try test_accept(&reducer, "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":8,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}");
+    _ = try reducer.accept("[DONE]", false);
+    var result = try reducer.finish(false);
+    defer result.deinit(alloc);
+    try std.testing.expectEqual(@as(?u64, 64), result.completed.completion.usage.cache_read_tokens);
+    try std.testing.expectEqual(@as(?u64, 16), result.completed.completion.usage.cache_write_tokens);
+    try std.testing.expectEqual(@as(?u64, 4), result.completed.completion.usage.reasoning_tokens);
+}
+
+test "deferred Chat Completions replay keeps saved schema text after catalog replacement and removal" {
+    const alloc = std.testing.allocator;
+    var request = test_request();
+    request.instructions = &.{};
+    request.messages = &.{
+        .{ .role = .assistant, .tool_calls = &.{.{ .id = "search", .name = "tool_search", .arguments_json = "{}" }} },
+        .{ .role = .tool, .tool_call_id = "search", .tool_name = "tool_search", .content = "Search results", .tool_result_memory = .{ .loaded_tools_json = "[{\"name\":\"action\",\"description\":\"old\"},{\"name\":\"removed\"},{\"name\":\"action\"}]" } },
+    };
+    const schema = try std.json.parseFromSlice(std.json.Value, alloc, "{\"type\":\"object\",\"required\":[\"updated\"]}", .{});
+    defer schema.deinit();
+    request.tools.selected_dynamic = &.{.{ .name = "action", .description = "current", .input_schema = schema.value, .deferred = true }};
+    const body = try build_request(alloc, request, .{});
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const content = parsed.value.object.get("messages").?.array.items[1].object.get("content").?.string;
+    const definitions = try std.json.parseFromSlice(std.json.Value, alloc, content, .{});
+    defer definitions.deinit();
+    try std.testing.expectEqual(@as(usize, 3), definitions.value.array.items.len);
+    try std.testing.expect(std.mem.find(u8, content, "updated") == null);
+    try std.testing.expect(std.mem.find(u8, content, "old") != null);
+    request.tools.selected_dynamic = &.{};
+    const removed = try build_request(alloc, request, .{});
+    defer alloc.free(removed);
+    const removed_parsed = try std.json.parseFromSlice(std.json.Value, alloc, removed, .{});
+    defer removed_parsed.deinit();
+    try std.testing.expectEqualStrings(content, removed_parsed.value.object.get("messages").?.array.items[1].object.get("content").?.string);
 }

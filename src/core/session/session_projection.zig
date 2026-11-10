@@ -202,7 +202,7 @@ fn durablePreferencesEqual(
     left: session_codec.DurableSessionPreferences,
     right: session_codec.DurableSessionPreferences,
 ) bool {
-    return std.mem.eql(u8, left.model, right.model) and
+    return left.deferred_tool_mode == right.deferred_tool_mode and std.mem.eql(u8, left.model, right.model) and
         left.provider.same_authority(right.provider) and
         left.effort.eql(right.effort) and
         left.fast_mode == right.fast_mode and

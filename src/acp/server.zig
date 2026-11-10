@@ -24,7 +24,6 @@ const gateway_provider = @import("../core/gateway/gateway_provider.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
 const model_capabilities = @import("../core/config/model_capabilities.zig");
 const hooks = @import("../core/hooks/hooks.zig");
-const mcp_runtime = @import("../core/mcp/mcp_runtime.zig");
 const mcp_host = @import("../core/mcp_host/host.zig");
 const mode_registry = @import("../core/modes/mode_registry.zig");
 const skill_runtime = @import("../core/skills/skill_runtime.zig");
@@ -37,6 +36,7 @@ const session_title_generation = @import("../core/session/session_title_generati
 const worker_runtime = @import("../core/agent/worker_runtime.zig");
 const terminal_client_runtime = @import("../core/terminal/client.zig");
 const subagent_tool_host = @import("../core/subagent/tool_host.zig");
+const subagent_reports = @import("../core/subagent/reports.zig");
 const subagent_child_state = @import("../core/subagent/child_state.zig");
 const subagent_authority = @import("../core/subagent/authority.zig");
 const types = @import("../core/shared/types.zig");
@@ -87,6 +87,8 @@ const AcpMethod = enum {
     libfx_handoff,
     libfx_follow_up,
     libfx_snapshot,
+    libfx_catalog,
+    libfx_context,
     libfx_journal_open,
     libfx_journal_images,
     mcp_message,
@@ -112,6 +114,8 @@ const AcpMethod = enum {
         if (std.mem.eql(u8, method, "libfx/withdraw")) return .libfx_withdraw;
         if (std.mem.eql(u8, method, "libfx/handoff")) return .libfx_handoff;
         if (std.mem.eql(u8, method, "libfx/follow_up")) return .libfx_follow_up;
+        if (std.mem.eql(u8, method, "libfx/context")) return .libfx_context;
+        if (std.mem.eql(u8, method, "libfx/catalog")) return .libfx_catalog;
         if (std.mem.eql(u8, method, "libfx/snapshot")) return .libfx_snapshot;
         if (std.mem.eql(u8, method, "libfx/journal_open")) return .libfx_journal_open;
         if (std.mem.eql(u8, method, "libfx/journal_images")) return .libfx_journal_images;
@@ -142,6 +146,8 @@ const AcpMethod = enum {
             .libfx_checkpoint,
             .libfx_restore,
             .libfx_snapshot,
+            .libfx_catalog,
+            .libfx_context,
             .libfx_journal_open,
             .libfx_journal_images,
             .mcp_message,
@@ -152,7 +158,7 @@ const AcpMethod = enum {
 
     fn isLibfx(self: AcpMethod) bool {
         return switch (self) {
-            .libfx_checkpoint, .libfx_restore, .libfx_new, .libfx_steer, .libfx_withdraw, .libfx_handoff, .libfx_follow_up, .libfx_snapshot, .libfx_journal_open, .libfx_journal_images => true,
+            .libfx_checkpoint, .libfx_restore, .libfx_new, .libfx_steer, .libfx_withdraw, .libfx_handoff, .libfx_follow_up, .libfx_snapshot, .libfx_context, .libfx_catalog, .libfx_journal_open, .libfx_journal_images => true,
             else => false,
         };
     }
@@ -256,8 +262,7 @@ pub const ActiveSessionState = struct {
     session_grants: []types.PermissionGrant = &.{},
     session_rt: session_runtime.SessionRuntime,
     title_task: ?*session_title_generation.Task = null,
-    mcp: ?*mcp_runtime.McpRuntime = null,
-    /// MCP-v2's host when FX_MCP_ENGINE=v2 selects it; `mcp` then stays null.
+    /// The session's MCP servers; null when it has none.
     mcp_host: ?*mcp_host.Host = null,
     /// Session-scoped client system prompt, appended after fx's instructions.
     /// Owned by the server allocator; empty when the client supplied none.
@@ -342,6 +347,7 @@ pub const ServerState = struct {
     agent_step_limit: usize = 0,
     max_tool_result_bytes: usize = 64 * 1024,
     auto_compact_percent: u8 = compactor.default_percent,
+    auto_compact: ?compactor.Trigger = null,
     context_limits: config_runtime.context_limits.Values = .{},
     fast_mode: bool = false,
     ultrafast_mode: bool = false,
@@ -351,12 +357,19 @@ pub const ServerState = struct {
     first_call_tool_choice: types.ToolChoice = .auto,
     context_enabled: bool = true,
     session_titles: bool = true,
+    cache_warming: bool = true,
     active_session: ?ActiveSessionState = null,
     active_prompt: ?*ActivePrompt = null,
     subagent_authority_mutex: std.Io.Mutex = .init,
     skills: skill_runtime.Runtime = .{},
     context_snapshot: context_contract.GatheredContextSnapshot = .{},
     worker: worker_runtime.WorkerRuntime = .{},
+    /// What each report queued in `worker` answers, oldest first, so the
+    /// prompt can show it on the subagent call that sent the work (decision
+    /// 26). Guarded by `report_mutex`, which also covers posting the report,
+    /// so both stay in the same order.
+    report_calls: std.ArrayList(ReportCall) = .empty,
+    report_mutex: std.Io.Mutex = .init,
     terminal_client: terminal_client_runtime.Runtime = .{},
     managed_executions: managed_execution.Runtime = managed_execution.Runtime.init(std.heap.c_allocator),
     /// A v2 session's children (D22), borrowed by `subagent_host`.
@@ -376,8 +389,6 @@ pub const ServerState = struct {
     outbound_mutex: std.Io.Mutex = .init,
     outbound_cond: std.Io.Condition = .init,
     next_outbound_request_id: u64 = 1,
-    /// Source of fresh logical MCP request IDs for MCP over ACP.
-    next_mcp_message_id: std.atomic.Value(u64) = .init(1),
     pending_outbound: std.AutoHashMapUnmanaged(u64, PendingOutbound) = .empty,
     legacy_url_mutex: std.Io.Mutex = .init,
     pending_legacy_urls: std.ArrayList(PendingLegacyUrl) = .empty,
@@ -396,6 +407,9 @@ pub const ServerState = struct {
                 .{@errorName(err)},
             );
         };
+        // A host `session/load` replaced may still be stopping its servers;
+        // they end before this process does.
+        if (comptime !host_target.is_wasm) mcp_host.waitRetired();
         if (self.sessions_v2) |*store| store.deinit(self.alloc);
         self.workspace_access.deinit(self.alloc);
         if (self.workspace_root.len > 0) self.alloc.free(self.workspace_root);
@@ -408,6 +422,8 @@ pub const ServerState = struct {
         self.skills.deinit(self.alloc);
         self.context_snapshot.deinit(self.alloc);
         self.worker.deinit(std.heap.c_allocator);
+        for (self.report_calls.items) |*call| call.deinit(std.heap.c_allocator);
+        self.report_calls.deinit(std.heap.c_allocator);
         self.web_fetch_runtime.deinit(self.alloc);
         self.web_search_runtime.deinit();
         self.lifecycle_runtime.deinit();
@@ -754,11 +770,6 @@ fn destroyActiveSession(state: *ServerState) void {
     active.staged_images.deinit(state.alloc);
     types.freePermissionGrantSlice(state.alloc, active.session_grants);
     if (comptime !host_target.is_wasm) {
-        if (active.mcp) |runtime| {
-            runtime.retireAndWait();
-            runtime.deinit();
-            state.alloc.destroy(runtime);
-        }
         if (active.mcp_host) |h| h.destroy();
     }
     active.session_rt.deinit(state.alloc);
@@ -794,7 +805,100 @@ fn enableSubagentHostV2(state: *ServerState, active: *ActiveSessionState, v2: *s
         state.alloc.destroy(children);
         return;
     };
+    state.subagent_host.?.report_sink = .{ .context = state, .post_fn = postAcpReport };
     state.subagent_v2_children = children;
+    // What a restart left owed reaches the session as its next turns.
+    state.subagent_host.?.resumeReports(v2);
+}
+
+/// The host's report sink: queues the report or message for the prompt,
+/// which runs it as the session's next turn once its own turn ends.
+fn postAcpReport(
+    raw: ?*anyopaque,
+    _: *subagent_tool_host.Runtime,
+    delivery: subagent_tool_host.Delivery,
+) subagent_tool_host.PostReportError!void {
+    const state: *ServerState = @ptrCast(@alignCast(raw.?));
+    const alloc = std.heap.c_allocator;
+    const text = switch (delivery) {
+        .report => |report| try subagent_reports.message(alloc, report, state.max_tool_result_bytes),
+        .message => |message| try subagent_reports.messageText(alloc, message.agent, message.child_id, message.text, state.max_tool_result_bytes, null),
+    };
+    var owns_text = true;
+    defer if (owns_text) alloc.free(text);
+    var call = try ReportCall.init(alloc, delivery);
+    var owns_call = true;
+    defer if (owns_call) call.deinit(alloc);
+    state.report_mutex.lockUncancelable(io_mod.getIo());
+    defer state.report_mutex.unlock(io_mod.getIo());
+    try state.report_calls.append(alloc, call);
+    owns_call = false;
+    state.worker.postMail(alloc, .{
+        .prompt = text,
+        .images = &.{},
+        .model = &.{},
+        .api_key = &.{},
+        .permission_mode = .ask,
+        .history = &.{},
+        .grants = &.{},
+        .author = .child,
+        .mail = if (delivery == .report) .report else .message,
+    }) catch |err| {
+        var dropped = state.report_calls.pop().?;
+        dropped.deinit(alloc);
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.QueueFull => error.QueueFull,
+            else => error.AgentGone,
+        };
+    };
+    owns_text = false;
+}
+
+/// What a queued report answers. All strings are owned (`std.heap.c_allocator`).
+pub const ReportCall = struct {
+    /// The subagent call that sent the work; empty for a message a child sent.
+    call_id: []u8,
+    child_id: []u8,
+    work_id: []u8,
+    /// How the work ended; null for a message.
+    outcome: ?subagent_child_state.Outcome,
+
+    fn init(alloc: Allocator, delivery: subagent_tool_host.Delivery) !ReportCall {
+        const call_id = try alloc.dupe(u8, switch (delivery) {
+            .report => |report| report.call_id,
+            .message => "",
+        });
+        errdefer alloc.free(call_id);
+        const child_id = try alloc.dupe(u8, switch (delivery) {
+            .report => |report| report.child_id,
+            .message => |message| message.child_id,
+        });
+        errdefer alloc.free(child_id);
+        const work_id = try alloc.dupe(u8, switch (delivery) {
+            .report => |report| report.work_id,
+            .message => "",
+        });
+        return .{ .call_id = call_id, .child_id = child_id, .work_id = work_id, .outcome = switch (delivery) {
+            .report => |report| report.outcome,
+            .message => null,
+        } };
+    }
+
+    pub fn deinit(self: *ReportCall, alloc: Allocator) void {
+        alloc.free(self.call_id);
+        alloc.free(self.child_id);
+        alloc.free(self.work_id);
+    }
+};
+
+/// What the oldest queued report answers, owned by the caller. Null when
+/// the queue holds none.
+pub fn takeReportCall(state: *ServerState) ?ReportCall {
+    state.report_mutex.lockUncancelable(io_mod.getIo());
+    defer state.report_mutex.unlock(io_mod.getIo());
+    if (state.report_calls.items.len == 0) return null;
+    return state.report_calls.orderedRemove(0);
 }
 
 fn resolveSubagentAuthority(
@@ -811,8 +915,6 @@ fn resolveSubagentAuthority(
     defer state.subagent_authority_mutex.unlock(io_mod.getIo());
     const integrations = if (active.mcp_host) |h|
         h.catalog.snapshotToolNames(alloc, active.permission_rules)
-    else if (active.mcp) |mcp|
-        mcp.snapshotToolNames(alloc, active.permission_rules)
     else
         alloc.alloc([]u8, 0);
     const owned_integrations = integrations catch return error.OutOfMemory;
@@ -821,16 +923,7 @@ fn resolveSubagentAuthority(
         alloc.free(owned_integrations);
     }
     var mcp_view = if (active.mcp_host) |h|
-        try h.catalog.snapshotAccessView(alloc, root_id, root_id, active.permission_rules, false)
-    else if (active.mcp) |mcp|
-        try mcp.snapshotAccessView(
-            alloc,
-            root_id,
-            root_id,
-            active.permission_rules,
-            state.cfg.mode_registry.toolAllowed(builtin_tools.advertisement_set, active.mode, "mcp_features") and
-                !permissions.rulesDenyAllTargetsForTool(active.permission_rules, "mcp_features"),
-        )
+        try h.catalog.snapshotAccessView(alloc, root_id, root_id, active.permission_rules)
     else
         null;
     defer if (mcp_view) |*view| view.deinit(alloc);
@@ -1443,6 +1536,8 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
             .libfx_handoff => handleKernelHandoff(state, alloc, msg),
             .libfx_follow_up => handleKernelFollowUp(state, alloc, msg),
             .libfx_snapshot => handleKernelSnapshot(state, alloc, msg),
+            .libfx_catalog => handleKernelCatalog(state, alloc, msg),
+            .libfx_context => handleKernelContext(state, alloc, msg),
             .libfx_journal_open => handleKernelJournalOpen(state, alloc, msg),
             .libfx_journal_images => handleKernelJournalImages(state, alloc, msg),
             else => state.writer.writeError(alloc, msg.id, .{
@@ -1469,6 +1564,8 @@ fn dispatch(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void 
         .libfx_handoff => handleKernelHandoff(state, alloc, msg),
         .libfx_follow_up => handleKernelFollowUp(state, alloc, msg),
         .libfx_snapshot => handleKernelSnapshot(state, alloc, msg),
+        .libfx_catalog => handleKernelCatalog(state, alloc, msg),
+        .libfx_context => handleKernelContext(state, alloc, msg),
         .libfx_journal_open => handleKernelJournalOpen(state, alloc, msg),
         .libfx_journal_images => handleKernelJournalImages(state, alloc, msg),
         .initialize,
@@ -1726,6 +1823,158 @@ const invalid_checkpoint_meta: jsonrpc.RpcError = .{
     .code = ErrorCode.invalid_params,
     .message = "Invalid libfx checkpoint meta",
 };
+
+pub fn appendHostContext(state: *ServerState, active: *ActiveSessionState, text: []const u8) !void {
+    try appendHostContexts(state, active, &.{.{ .text = @constCast(text) }});
+}
+
+/// Commit a batch atomically through the canonical journal. Names are metadata,
+/// so updates never need to inspect or repair rendered provider messages.
+fn appendHostContexts(state: *ServerState, active: *ActiveSessionState, entries: []const types.HostContext) !void {
+    var prepared: std.ArrayList(types.HistoryTurn) = .empty;
+    var committed = false;
+    defer {
+        if (!committed) for (prepared.items) |entry| types.freeHistoryTurn(state.alloc, entry);
+        prepared.deinit(state.alloc);
+    }
+    for (entries) |entry| {
+        if (entry.name) |name| {
+            var same = false;
+            var index = active.session_rt.agent.history.items.len;
+            while (index > 0) {
+                index -= 1;
+                const turn = active.session_rt.agent.history.items[index];
+                if (turn == .host_context) if (turn.host_context.name) |prior| {
+                    if (std.mem.eql(u8, name, prior)) {
+                        same = std.mem.eql(u8, entry.text, turn.host_context.text);
+                        break;
+                    }
+                };
+            }
+            if (same) continue;
+        }
+        const owned = try active.session_rt.prepareHistoryEntry(state.alloc, .{ .host_context = entry });
+        prepared.append(state.alloc, owned) catch |err| {
+            types.freeHistoryTurn(state.alloc, owned);
+            return err;
+        };
+    }
+    if (prepared.items.len == 0) return;
+    try active.session_rt.agent.history.ensureUnusedCapacity(state.alloc, prepared.items.len);
+    if (active.journal) |*journal| {
+        var snapshot: std.ArrayList(types.HistoryTurn) = .empty;
+        defer snapshot.deinit(state.alloc);
+        try snapshot.appendSlice(state.alloc, active.session_rt.agent.history.items);
+        try snapshot.appendSlice(state.alloc, prepared.items);
+        try journal.appendMarked(state.alloc, active.session_id, .{ .history_replaced = snapshot.items }, true);
+    }
+    for (prepared.items) |entry| active.session_rt.commitPreparedHistoryEntry(state.alloc, entry);
+    committed = true;
+    for (prepared.items) |entry| try notifyHostContext(state, active.session_id, entry.host_context);
+}
+
+/// Sent only after the canonical history accepts the context, including reinjection after compaction.
+pub fn notifyHostContext(state: *ServerState, session_id: []const u8, entry: types.HostContext) !void {
+    const params = try std.json.Stringify.valueAlloc(state.alloc, .{ .sessionId = session_id, .name = entry.name, .text = entry.text }, .{});
+    defer state.alloc.free(params);
+    try state.writer.writeNotification(state.alloc, "libfx/context_appended", params);
+}
+
+pub fn ensureCatalogReminder(state: *ServerState, active: *ActiveSessionState) !void {
+    if (!state.host_tools.search_enabled) return;
+    const text = try state.host_tools.reminder(state.alloc);
+    defer state.alloc.free(text);
+    try appendHostContexts(state, active, &.{.{ .name = @constCast("tool_catalog"), .text = text }});
+}
+
+fn handleKernelContext(state: *ServerState, alloc: Allocator, msg: *const jsonrpc.Message) !void {
+    const invalid: jsonrpc.RpcError = .{ .code = ErrorCode.invalid_params, .message = "Invalid context update" };
+    var parsed = libfxSessionId(alloc, msg) catch return state.writer.writeError(alloc, msg.id, invalid);
+    defer parsed.deinit();
+    const active = activeLibfxSession(state, parsed.value) orelse return state.writer.writeError(alloc, msg.id, invalid);
+    if (active.journal) |*journal| if (journal.progress_open or journal.pending_resume != null or journal.follow_ups_waiting != 0) return writePromptInProgress(state, alloc, msg.id);
+    const text = parsed.value.object.get("text") orelse return state.writer.writeError(alloc, msg.id, invalid);
+    if (text != .string or text.string.len == 0 or text.string.len > 65536) return state.writer.writeError(alloc, msg.id, invalid);
+    const reminder = try alloc.print("<system-reminder>\n{s}\n</system-reminder>", .{text.string});
+    defer alloc.free(reminder);
+    const name_value = parsed.value.object.get("name");
+    var name: ?[]u8 = null;
+    if (name_value) |value| {
+        if (value != .string or value.string.len == 0 or value.string.len > 128) return state.writer.writeError(alloc, msg.id, invalid);
+        name = @constCast(value.string);
+    }
+    try appendHostContexts(state, active, &.{.{ .name = name, .text = reminder }});
+    try state.writer.writeResponse(alloc, msg.id, "null");
+}
+
+fn handleKernelCatalog(state: *ServerState, alloc: Allocator, msg: *const jsonrpc.Message) !void {
+    const invalid: jsonrpc.RpcError = .{ .code = ErrorCode.invalid_params, .message = "Invalid tool catalog" };
+    var parsed = libfxSessionId(alloc, msg) catch return state.writer.writeError(alloc, msg.id, invalid);
+    defer parsed.deinit();
+    const active = activeLibfxSession(state, parsed.value) orelse return state.writer.writeError(alloc, msg.id, invalid);
+    if (active.journal) |*journal| if (journal.progress_open or journal.pending_resume != null or journal.follow_ups_waiting != 0) return writePromptInProgress(state, alloc, msg.id);
+    const value = parsed.value.object.get("tools") orelse return state.writer.writeError(alloc, msg.id, invalid);
+    var candidate = host_tool_runtime.Runtime.initWithProviderRegistry(state.alloc, value, libfx_provider_tool_registry) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return state.writer.writeError(alloc, msg.id, invalid),
+    };
+    var candidate_owned = true;
+    defer if (candidate_owned) candidate.deinit();
+    if (!state.host_tools.search_enabled) return state.writer.writeError(alloc, msg.id, invalid);
+    // Only the deferred catalog may change. Resident definitions own the cached prefix.
+    var candidate_index: usize = 0;
+    for (state.host_tools.descriptors, 0..) |descriptor, index| {
+        if (state.host_tools.deferred[index]) continue;
+        while (candidate_index < candidate.descriptors.len and candidate.deferred[candidate_index]) candidate_index += 1;
+        if (candidate_index == candidate.descriptors.len) return state.writer.writeError(alloc, msg.id, invalid);
+        const original = try std.json.Stringify.valueAlloc(alloc, descriptor, .{});
+        defer alloc.free(original);
+        const encoded = try std.json.Stringify.valueAlloc(alloc, candidate.descriptors[candidate_index], .{});
+        defer alloc.free(encoded);
+        if (!std.mem.eql(u8, original, encoded)) return state.writer.writeError(alloc, msg.id, invalid);
+        candidate_index += 1;
+    }
+    while (candidate_index < candidate.descriptors.len) : (candidate_index += 1) {
+        if (!candidate.deferred[candidate_index]) return state.writer.writeError(alloc, msg.id, invalid);
+    }
+    candidate.enableSearch();
+    for (candidate.descriptors, 0..) |entry, index| {
+        for (state.host_tools.descriptors, 0..) |prior, prior_index| {
+            if (std.mem.eql(u8, entry.object.get("name").?.string, prior.object.get("name").?.string)) candidate.loaded[index] = state.host_tools.loaded[prior_index];
+        }
+    }
+    const reminder = try candidate.reminder(alloc);
+    defer alloc.free(reminder);
+    var update_arena = std.heap.ArenaAllocator.init(alloc);
+    defer update_arena.deinit();
+    const update_alloc = update_arena.allocator();
+    var updates: std.ArrayList(types.HostContext) = .empty;
+    defer updates.deinit(update_alloc);
+    try updates.append(update_alloc, .{ .name = @constCast("tool_catalog"), .text = reminder });
+    for (state.host_tools.descriptors, 0..) |prior, index| {
+        if (!state.host_tools.deferred[index] or !state.host_tools.loaded[index]) continue;
+        const name = prior.object.get("name").?.string;
+        var replacement: ?std.json.Value = null;
+        for (candidate.descriptors) |entry| {
+            if (std.mem.eql(u8, name, entry.object.get("name").?.string)) {
+                replacement = entry;
+                break;
+            }
+        }
+        const old = try std.json.Stringify.valueAlloc(update_alloc, prior, .{});
+        const current = if (replacement) |entry| try std.json.Stringify.valueAlloc(update_alloc, entry, .{}) else "unavailable";
+        if (std.mem.eql(u8, old, current)) continue;
+        try updates.append(update_alloc, .{
+            .name = try update_alloc.print("tool.{s}", .{name}),
+            .text = try update_alloc.print("<system-reminder>\nActive tool {s} changed. Current definition: {s}\nUse call_tool with the current arguments for changed definitions. Earlier native declarations are historical snapshots.\n</system-reminder>", .{ name, current }),
+        });
+    }
+    try appendHostContexts(state, active, updates.items);
+    state.host_tools.deinit();
+    state.host_tools = candidate;
+    candidate_owned = false;
+    try state.writer.writeResponse(alloc, msg.id, "null");
+}
 
 fn handleKernelCheckpoint(
     state: *ServerState,
@@ -2182,7 +2431,9 @@ fn handleKernelSnapshot(
             open_turn_names_images = session_codec.checkpointNamesImages(journal.pending_resume.?, null, null);
         }
     }
-    const snapshot_bytes = if (open_turn_names_images)
+    const snapshot_bytes = if (yielded and session_codec.executionUsesNotesSchema(journal.pending_resume.?.execution))
+        journal_events.encodeSnapshotWithNotes(alloc, at_seq, journal.cursor.turn, journal.last_turn_id.slice(), open_turn.written(), checkpoint)
+    else if (open_turn_names_images)
         journal_events.encodeSnapshotNamingImages(alloc, at_seq, journal.cursor.turn, journal.last_turn_id.slice(), open_turn.written(), checkpoint)
     else
         journal_events.encodeSnapshot(alloc, at_seq, journal.cursor.turn, journal.last_turn_id.slice(), if (yielded) open_turn.written() else null, checkpoint);
@@ -2649,9 +2900,10 @@ fn parseInitializeRequest(
         }
     }
     if (capabilities.object.get("session")) |session| {
-        // Omitted and null both mean no.
+        // ACP v1 advertises notices with an object, `{}`. Omitted, null,
+        // and any value v1 doesn't define, such as `false`, all mean no.
         if (session == .object) if (session.object.get("notices")) |notices| {
-            request.client_notices = notices != .null;
+            request.client_notices = notices == .object;
         };
     }
     if (capabilities.object.get("terminal")) |value| {
@@ -2667,6 +2919,10 @@ fn parseInitializeRequest(
                 libfx_provider_tool_registry,
             );
             errdefer request.host_tools.deinit();
+            if (libfx.object.get("toolSearch")) |flag| {
+                if (flag != .bool) return error.InvalidInitializeParams;
+                if (flag.bool) request.host_tools.enableSearch();
+            }
             if (libfx.object.get("instructions")) |instructions| {
                 if (instructions != .string or instructions.string.len > 64 * 1024) {
                     return error.InvalidInitializeParams;
@@ -2755,6 +3011,7 @@ fn loadConfiguredStartupState(state: *const ServerState, alloc: Allocator) !app_
         state.cfg.default_model,
         state.cfg.default_agent_step_limit,
         state.cfg.auth_mode,
+        null,
         state.cfg.model_override,
     );
 }
@@ -2912,6 +3169,7 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
     state.agent_step_limit = startup.agent_step_limit;
     state.max_tool_result_bytes = startup.max_tool_result_bytes;
     state.auto_compact_percent = startup.auto_compact_percent;
+    state.auto_compact = state.cfg.auto_compact;
     state.context_limits = startup.context_limits;
     state.context_limits.applyCommandLine(state.cfg.context_limit_overrides);
     state.fast_mode = startup.fast_mode and
@@ -2921,6 +3179,7 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
     state.first_call_tool_choice = startup.first_call_tool_choice;
     state.context_enabled = startup.context_enabled;
     state.session_titles = startup.session_title_generation;
+    state.cache_warming = startup.cache_warming;
 
     if (comptime !host_target.is_wasm) {
         if (!state.cfg.minimal_kernel) {
@@ -2933,31 +3192,12 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
     }
 
     if (!state.cfg.minimal_kernel) {
-        var catalog_cancel_flag = std.atomic.Value(bool).init(false);
         const startup_catalog = catalogProviderFor(state, state.provider) orelse
             return state.writer.writeError(alloc, msg.id, .{
                 .code = ErrorCode.invalid_request,
                 .message = "Selected provider is unavailable in this host",
             });
-        _ = try state.capability_resolver.resolve(
-            state.alloc,
-            startup_catalog,
-            .{
-                .access = if (state.cfg.auth_mode == .host_managed)
-                    .host_managed
-                else
-                    credentials.catalogAccessForCredentialAndAccount(
-                        state.credential_source,
-                        state.api_key,
-                        state.gateway_team,
-                        state.account_id,
-                    ),
-                .endpoint = state.cfg.gateway_models_path,
-                .cancel_flag = &catalog_cancel_flag,
-            },
-            state.selected_model,
-            state.cfg.provider_set.select(state.provider).fallbackModelCapabilities(state.selected_model),
-        );
+        _ = try resolveSelectedModelCapabilities(state, startup_catalog);
     }
 
     if (state.cfg.effort_override) |raw| {
@@ -2999,12 +3239,44 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
         .mcp_servers = state.cfg.allow_acp_mcp,
         .steering = !host_target.is_wasm and !state.cfg.minimal_kernel,
         .system_prompt = !host_target.is_wasm and !state.cfg.minimal_kernel,
-        // MCP-v2 takes only what ACP v1 defines and it speaks: stdio and
+        // fx takes only what ACP v1 defines and fx's MCP engine speaks: stdio and
         // HTTP.
-        .mcp_over_acp = state.cfg.allow_acp_mcp and !host_target.is_wasm and !mcp_host.selected(),
-        .mcp_sse = !mcp_host.selected(),
+        .mcp_over_acp = false,
+        .mcp_sse = false,
     });
     try state.writer.writeResponse(alloc, msg.id, out.writer.buffered());
+}
+
+/// The selected model's capabilities from `provider`'s catalog, loading it
+/// first if needed. A first load whose request cannot connect gives up after
+/// `gateway_provider.catalog_connect_wait_ms`, as `fx ask`'s does, so a
+/// dead network doesn't hold up the reply for the 20 to 30 seconds its DNS
+/// lookup or connect takes to fail (`CapabilityResolver.resolveWithin`).
+fn resolveSelectedModelCapabilities(
+    state: *ServerState,
+    provider: model_catalog.Provider,
+) model_capabilities.ResolveError!model_capabilities.Capabilities {
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    return state.capability_resolver.resolveWithin(
+        state.alloc,
+        provider,
+        .{
+            .access = if (state.cfg.auth_mode == .host_managed)
+                .host_managed
+            else
+                credentials.catalogAccessForCredentialAndAccount(
+                    state.credential_source,
+                    state.api_key,
+                    state.gateway_team,
+                    state.account_id,
+                ),
+            .endpoint = state.cfg.gateway_models_path,
+            .cancel_flag = &cancel_flag,
+        },
+        state.selected_model,
+        state.cfg.provider_set.select(state.provider).fallbackModelCapabilities(state.selected_model),
+        gateway_provider.catalog_connect_wait_ms,
+    );
 }
 
 /// Applies a host-supplied reasoning effort override to sessions created after
@@ -3023,20 +3295,7 @@ fn applyEffortOverride(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Mess
         // libfx cores skip the startup catalog resolve; explicit effort and
         // fast overrides are the creation-time consumers that need it.
         const catalog_provider = catalogProviderFor(state, state.provider) orelse return true;
-        var catalog_cancel_flag = std.atomic.Value(bool).init(false);
-        capabilities = try state.capability_resolver.resolve(alloc, catalog_provider, .{
-            .access = if (state.cfg.auth_mode == .host_managed)
-                .host_managed
-            else
-                credentials.catalogAccessForCredentialAndAccount(
-                    state.credential_source,
-                    state.api_key,
-                    state.gateway_team,
-                    state.account_id,
-                ),
-            .endpoint = state.cfg.gateway_models_path,
-            .cancel_flag = &catalog_cancel_flag,
-        }, state.selected_model, fallback);
+        capabilities = try resolveSelectedModelCapabilities(state, catalog_provider);
     } else {
         capabilities = state.capability_resolver.available(state.selected_model, fallback);
     }
@@ -3142,20 +3401,7 @@ fn applyFastOverride(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Messag
         // Shares the effort override's one-shot catalog resolve: creation is
         // the only point that can reject before any turn runs.
         const catalog_provider = catalogProviderFor(state, state.provider) orelse return true;
-        var catalog_cancel_flag = std.atomic.Value(bool).init(false);
-        capabilities = try state.capability_resolver.resolve(alloc, catalog_provider, .{
-            .access = if (state.cfg.auth_mode == .host_managed)
-                .host_managed
-            else
-                credentials.catalogAccessForCredentialAndAccount(
-                    state.credential_source,
-                    state.api_key,
-                    state.gateway_team,
-                    state.account_id,
-                ),
-            .endpoint = state.cfg.gateway_models_path,
-            .cancel_flag = &catalog_cancel_flag,
-        }, state.selected_model, fallback);
+        capabilities = try resolveSelectedModelCapabilities(state, catalog_provider);
     } else {
         capabilities = state.capability_resolver.available(state.selected_model, fallback);
     }
@@ -3225,21 +3471,7 @@ fn applyUltrafastOverride(state: *ServerState, alloc: Allocator, msg: *jsonrpc.M
     }
     const catalog_provider = catalogProviderFor(state, state.provider) orelse
         return writeUltrafastOverrideFailure(state, alloc, msg, "Ultrafast mode is unavailable for the selected provider");
-    var catalog_cancel_flag = std.atomic.Value(bool).init(false);
-    const bundle = state.cfg.provider_set.select(state.provider);
-    const capabilities = try state.capability_resolver.resolve(alloc, catalog_provider, .{
-        .access = if (state.cfg.auth_mode == .host_managed)
-            .host_managed
-        else
-            credentials.catalogAccessForCredentialAndAccount(
-                state.credential_source,
-                state.api_key,
-                state.gateway_team,
-                state.account_id,
-            ),
-        .endpoint = state.cfg.gateway_models_path,
-        .cancel_flag = &catalog_cancel_flag,
-    }, state.selected_model, bundle.fallbackModelCapabilities(state.selected_model));
+    const capabilities = try resolveSelectedModelCapabilities(state, catalog_provider);
     if (state.capability_resolver.state == .failed) {
         return writeUltrafastOverrideFailure(state, alloc, msg, "Ultrafast mode requires a verified Gateway model catalog");
     }
@@ -3287,10 +3519,140 @@ test "ultrafastOverrideRejection accepts only Gateway models with the catalog ca
     defer alloc.free(unavailable);
 }
 
+test "ACP answers an ultrafast override without waiting out a model catalog that cannot connect" {
+    // A Gateway catalog on a dead network: its request never connects, and
+    // it fails only when cancelled or once a stalled DNS lookup would give up.
+    const UnconnectableCatalog = struct {
+        give_up_ms: i64 = 6_000,
+
+        fn fetch(raw: ?*anyopaque, _: Allocator, input: model_catalog.FetchInput) Allocator.Error!model_catalog.ProviderResult {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            const started_ms = model_catalog.clockMs();
+            while (model_catalog.clockMs() - started_ms < self.give_up_ms) {
+                if (input.cancel_flag) |flag| if (flag.load(.seq_cst)) {
+                    return .{ .failure = .{ .category = .cancellation } };
+                };
+                io_mod.sleep(std.time.ns_per_ms);
+            }
+            return .{ .failure = .{ .category = .transport } };
+        }
+    };
+    const Capture = struct {
+        saw_catalog_failure: bool = false,
+
+        fn write(raw: ?*anyopaque, frame: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (std.mem.find(u8, frame, "requires a verified Gateway model catalog") != null) {
+                self.saw_catalog_failure = true;
+            }
+        }
+    };
+    var catalog = UnconnectableCatalog{};
+    var capture = Capture{};
+    var model = "openai/gpt-5.5".*;
+    var state = ServerState{
+        .alloc = std.testing.allocator,
+        .cfg = undefined,
+        .writer = jsonrpc.Writer.initCallback(&capture, Capture.write),
+        .selected_model = &model,
+    };
+    defer state.capability_resolver.deinit(state.alloc);
+    state.cfg.auth_mode = .host_managed;
+    state.cfg.gateway_models_path = "/v1/models";
+    state.cfg.provider_set = @import("../core/gateway/provider_set.zig").gateway_only(.{
+        .model_catalog = .{ .context = &catalog, .fetch_fn = UnconnectableCatalog.fetch, .reports_connection = true },
+    });
+    var msg = jsonrpc.Message{ .id = .{ .integer = 1 }, .method = "initialize" };
+
+    const started_ms = model_catalog.clockMs();
+    try std.testing.expect(!try applyUltrafastOverride(&state, std.testing.allocator, &msg, true));
+    const elapsed_ms = model_catalog.clockMs() - started_ms;
+
+    // The override fails as on any catalog outage, after the first load's wait
+    // rather than after the lookup gives up.
+    try std.testing.expect(elapsed_ms < 5_000);
+    try std.testing.expect(capture.saw_catalog_failure);
+    try std.testing.expect(!state.ultrafast_mode);
+}
+
+test "ACP keeps its model catalog when a due refresh cannot connect" {
+    // A Gateway catalog that answers, then goes behind a dead network: its
+    // request never connects, and it fails only when cancelled or once a
+    // stalled DNS lookup would give up.
+    const RefreshingCatalog = struct {
+        answers: std.atomic.Value(bool) = .init(true),
+        give_up_ms: i64 = 6_000,
+
+        fn fetch(raw: ?*anyopaque, alloc: Allocator, input: model_catalog.FetchInput) Allocator.Error!model_catalog.ProviderResult {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (self.answers.load(.seq_cst)) {
+                if (input.connected) |connected| connected.store(true, .release);
+                var entries: std.ArrayList(model_catalog.ModelCatalogEntry) = .empty;
+                errdefer model_catalog.freeModelCatalog(alloc, &entries);
+                const id = try alloc.dupe(u8, "openai/gpt-5.5");
+                errdefer alloc.free(id);
+                const model_type = try alloc.dupe(u8, "language");
+                errdefer alloc.free(model_type);
+                try entries.append(alloc, .{ .id = id, .model_type = model_type });
+                return .{ .catalog = entries };
+            }
+            const started_ms = model_catalog.clockMs();
+            while (model_catalog.clockMs() - started_ms < self.give_up_ms) {
+                if (input.cancel_flag) |flag| if (flag.load(.seq_cst)) {
+                    return .{ .failure = .{ .category = .cancellation } };
+                };
+                io_mod.sleep(std.time.ns_per_ms);
+            }
+            return .{ .failure = .{ .category = .transport } };
+        }
+    };
+    var catalog = RefreshingCatalog{};
+    var model = "openai/gpt-5.5".*;
+    var state = ServerState{
+        .alloc = std.testing.allocator,
+        .cfg = undefined,
+        .writer = jsonrpc.Writer.init(),
+        .selected_model = &model,
+    };
+    defer state.capability_resolver.deinit(state.alloc);
+    state.cfg.minimal_kernel = false;
+    state.cfg.auth_mode = .host_managed;
+    state.cfg.gateway_models_path = "/v1/models";
+    state.cfg.provider_set = @import("../core/gateway/provider_set.zig").gateway_only(.{
+        .model_catalog = .{
+            .context = &catalog,
+            .fetch_fn = RefreshingCatalog.fetch,
+            .reports_connection = true,
+            .refresh_interval_ms = 60_000,
+        },
+    });
+    var active: ActiveSessionState = undefined;
+    active.provider = .gateway;
+    state.active_session = active;
+
+    try refreshModelCatalogForOptions(&state);
+    try std.testing.expectEqual(@as(usize, 1), state.capability_resolver.catalogEntries().?.len);
+
+    // The refresh interval passes while the network is down.
+    state.capability_resolver.last_attempt_ms -= 60_000;
+    catalog.answers.store(false, .seq_cst);
+    const started_ms = model_catalog.clockMs();
+    try refreshModelCatalogForOptions(&state);
+    const elapsed_ms = model_catalog.clockMs() - started_ms;
+
+    // The refresh fails as on any catalog outage, after the wait for its
+    // connection rather than after the lookup gives up, and the models the
+    // catalog already listed stay in use.
+    try std.testing.expect(elapsed_ms < 5_000);
+    try std.testing.expectEqualStrings("openai/gpt-5.5", state.capability_resolver.catalogEntries().?[0].id);
+}
+
 fn handleCancel(state: *ServerState, notify_client: bool) void {
     if (state.active_session) |*session| {
         debug_trace.eventf("interrupt", "cancel_requested", .{}, "source=acp active_tool_known=false", .{});
         session.cancel_flag.store(true, .seq_cst);
+        // A prompt waiting for its subagents' reports stops waiting.
+        state.worker.nudgeWaiter();
         // A libfx turn keeps its queued steering until it ends, which hands
         // back what never reached the model.
         if (state.cfg.minimal_kernel) session.steering.cancelForUser(&session.cancel_flag);
@@ -3690,6 +4052,12 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
     try state.writer.writeResponse(alloc, msg.id, out.writer.buffered());
 }
 
+/// Loads the catalog when it is due, before a reply that lists its models. A
+/// due load whose request cannot connect gives up after
+/// `gateway_provider.catalog_connect_wait_ms` and keeps the catalog fx
+/// already has (`CapabilityResolver.refreshWithin`), so a dead network does
+/// not hold up the reply, or the prompt sent after it, for the 20 to 30
+/// seconds its DNS lookup or connect takes to fail.
 pub fn refreshModelCatalogForOptions(state: *ServerState) !void {
     if (comptime host_target.is_wasm) return;
     if (state.cfg.minimal_kernel) return;
@@ -3698,7 +4066,7 @@ pub fn refreshModelCatalogForOptions(state: *ServerState) !void {
     std.debug.assert(state.active_prompt == null);
     // Restoring the same session can leave its previous cancellation flag set.
     var cancel_flag = std.atomic.Value(bool).init(false);
-    try state.capability_resolver.refreshIfDue(state.alloc, provider, .{
+    try state.capability_resolver.refreshWithin(state.alloc, provider, .{
         .access = if (state.cfg.auth_mode == .host_managed)
             .host_managed
         else
@@ -3710,7 +4078,7 @@ pub fn refreshModelCatalogForOptions(state: *ServerState) !void {
             ),
         .endpoint = state.cfg.gateway_models_path,
         .cancel_flag = &cancel_flag,
-    });
+    }, gateway_provider.catalog_connect_wait_ms);
 }
 
 fn commitActiveSessionProvider(
@@ -3765,7 +4133,11 @@ fn commitActiveSessionModel(
         session.model = staged_model;
         return;
     }
-    return error.SessionPersistenceUnavailable;
+    // libfx/new sessions keep history in the host journal. The host supplies
+    // the selected model and effort when opening that history again.
+    const staged_model = try alloc.dupe(u8, value);
+    alloc.free(session.model);
+    session.model = staged_model;
 }
 
 fn commitActiveSessionEffort(
@@ -3784,8 +4156,7 @@ fn commitActiveSessionEffort(
     }
     session.session_write_mutex.lockUncancelable(io_mod.getIo());
     defer session.session_write_mutex.unlock(io_mod.getIo());
-    const v2 = session.v2 orelse return error.SessionPersistenceUnavailable;
-    try setV2Preferences(v2, session, session.provider, session.model, effort);
+    if (session.v2) |v2| try setV2Preferences(v2, session, session.provider, session.model, effort);
     session.effort = effort;
 }
 
@@ -4133,6 +4504,8 @@ pub fn loadStartingMode(state: *ServerState, alloc: Allocator) StartingMode {
             }
         }
     }
+    // `fx acp --permission-mode` beats the saved mode, as FX_PERMISSION_MODE does.
+    if (state.cfg.permission_override) |mode| state.permission_mode = mode;
     return .{
         .id = state.cfg.mode_registry.startingModeId(state.permission_mode),
         .permission_mode = state.permission_mode,
@@ -4273,6 +4646,31 @@ test "ACP initialize request validation requires a uint16 protocol version" {
             case.expected,
             parseInitializeRequest(alloc, case.params, false),
         );
+    }
+}
+
+test "ACP initialize reads session.notices as advertised only for an object" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { capabilities: []const u8, advertised: bool }{
+        .{ .capabilities = "{\"session\":{\"notices\":{}}}", .advertised = true },
+        .{ .capabilities = "{\"session\":{\"notices\":{\"_meta\":{}}}}", .advertised = true },
+        .{ .capabilities = "{}", .advertised = false },
+        .{ .capabilities = "{\"session\":null}", .advertised = false },
+        .{ .capabilities = "{\"session\":{}}", .advertised = false },
+        .{ .capabilities = "{\"session\":{\"notices\":null}}", .advertised = false },
+        .{ .capabilities = "{\"session\":{\"notices\":false}}", .advertised = false },
+        .{ .capabilities = "{\"session\":{\"notices\":true}}", .advertised = false },
+        .{ .capabilities = "{\"session\":{\"notices\":\"yes\"}}", .advertised = false },
+        .{ .capabilities = "{\"session\":{\"notices\":[]}}", .advertised = false },
+    };
+    for (cases) |case| {
+        const params = try alloc.print("{{\"protocolVersion\":1,\"clientCapabilities\":{s}}}", .{case.capabilities});
+        defer alloc.free(params);
+        const request = try parseInitializeRequest(alloc, params, false);
+        std.testing.expectEqual(case.advertised, request.client_notices) catch |err| {
+            std.debug.print("capabilities: {s}\n", .{case.capabilities});
+            return err;
+        };
     }
 }
 
@@ -4619,6 +5017,7 @@ test "ACP model commits honor the active session write boundary" {
     const alloc = std.testing.allocator;
     var active: ActiveSessionState = undefined;
     active.v2 = null;
+    active.journal = null;
     active.session_write_mutex = .init;
     active.model = try alloc.dupe(u8, "old-model");
     defer alloc.free(active.model);
@@ -4656,10 +5055,8 @@ test "ACP model commits honor the active session write boundary" {
 
     try std.testing.expect(blocked_at_boundary);
     try std.testing.expect(worker.done.load(.seq_cst));
-    try std.testing.expectEqual(
-        error.SessionPersistenceUnavailable,
-        worker.failure.?,
-    );
+    try std.testing.expect(worker.failure == null);
+    try std.testing.expectEqualStrings("new-model", active.model);
 }
 
 test "ACP publishes an account-bound refreshed Codex token for later prompts" {

@@ -57,11 +57,10 @@ pub const Size = struct {
         return std.math.cast(usize, @as(u128, tokens) * correction.estimated / correction.measured) orelse std.math.maxInt(usize);
     }
 
-    /// The sizes for a model, compacting automatically at `percent` of its
-    /// usable input.
-    pub fn of(capabilities: model_capabilities.Capabilities, percent: u8) Size {
+    /// The sizes for a model with the selected automatic compaction trigger.
+    pub fn of(capabilities: model_capabilities.Capabilities, trigger: settings.Trigger) Size {
         return .{
-            .compact_at_tokens = compactAtTokens(capabilities, percent),
+            .compact_at_tokens = compactAtTrigger(capabilities, trigger),
             .usable_tokens = usableInputTokens(capabilities),
         };
     }
@@ -110,9 +109,11 @@ pub const Size = struct {
         return self.estimate(@max(after -| fixed, after / 4));
     }
 
-    /// Estimated tokens the compacted text may use so compaction still frees
-    /// at least half the room: half the compaction point less the fixed part
-    /// and `kept_used`, the turns kept unchanged. Past it, the conversation
+    /// Estimated tokens the compacted text may use: the room the compacted
+    /// conversation gets right after compaction less `kept_used`, the turns
+    /// kept unchanged. That room is a share of the model's window, so the
+    /// compacted text shrinks with the window. It never passes half the
+    /// compaction point less the fixed part, past which the conversation
     /// would compact again right away and soon not fit at all.
     pub fn compactedTokens(self: Size, kept_used: usize) usize {
         const point = self.compact_at_tokens orelse self.request_tokens orelse return std.math.maxInt(usize);
@@ -121,7 +122,8 @@ pub const Size = struct {
             most = @min(most, rejected / 2);
         };
         const fixed = self.fixed_tokens orelse most / 4;
-        return self.estimate(@max(most -| fixed, most / 4)) -| kept_used;
+        const frees_half = self.estimate(@max(most -| fixed, most / 4));
+        return @min(frees_half, self.conversationTokens()) -| kept_used;
     }
 
     /// The request has reached the automatic compaction point.
@@ -138,8 +140,17 @@ pub const Size = struct {
     }
 };
 
-/// Request size, in tokens, at which automatic compaction starts: `percent`
-/// of the model's usable input.
+/// Request size, in tokens, at which automatic compaction starts. A token
+/// count is used as given, capped only by the context window: the host that
+/// names the point keeps its own room below the window. Without a known
+/// window the count still applies.
+fn compactAtTrigger(capabilities: model_capabilities.Capabilities, trigger: settings.Trigger) ?usize {
+    return switch (trigger) {
+        .percent => |percent| compactAtTokens(capabilities, percent),
+        .tokens => |tokens| if (capabilities.context_window) |window| @min(tokens, @as(usize, window)) else tokens,
+    };
+}
+
 fn compactAtTokens(capabilities: model_capabilities.Capabilities, percent: u8) ?usize {
     const usable = usableInputTokens(capabilities) orelse return null;
     return percentOf(usable, @min(settings.max_percent, @max(settings.min_percent, percent)));
@@ -149,13 +160,17 @@ fn percentOf(tokens: usize, percent: usize) usize {
     return tokens / 100 * percent + tokens % 100 * percent / 100;
 }
 
-/// The model's input room: its context window less the room it keeps for
-/// output.
+/// The model's input room: its context window less the room compaction
+/// keeps for output. That room is the request's output limit, at most
+/// `compaction_output_reserve`, which a summary needs; a large limit such
+/// as 128k would otherwise leave little input. A reply that runs past the
+/// room left is cut short or rejected by the provider, as when the limit
+/// is unset.
 fn usableInputTokens(capabilities: model_capabilities.Capabilities) ?usize {
     const context_window = capabilities.context_window orelse return null;
     const context_tokens: usize = @intCast(context_window);
-    // Reserve exactly what the request asks for; that limit is always below the window.
-    const output_tokens: usize = model_capabilities.requestOutputTokens(capabilities) orelse return context_tokens;
+    // The reserve is never above the request's limit, which is always below the window.
+    const output_tokens: usize = model_capabilities.compactionOutputTokens(capabilities) orelse return context_tokens;
     return context_tokens - output_tokens;
 }
 
@@ -187,33 +202,39 @@ fn selectRecentContext(
         if (selected_any and turns_used >= max_turns) break;
         raw_count -= 1;
         const user = switch (turn) {
+            .host_context => |entry| entry.text,
             .assistant => |entry| entry.user.text,
             .interrupted => |entry| entry.user.text,
             .compacted_summary => unreachable,
         };
         const reply = switch (turn) {
+            .host_context => "",
             .assistant => |entry| entry.assistant,
             .interrupted => |entry| entry.assistant orelse "",
             .compacted_summary => unreachable,
         };
         const execution = switch (turn) {
+            .host_context => types.ExecutionMemory{},
             .assistant => |entry| entry.execution,
             .interrupted => |entry| entry.execution,
             .compacted_summary => unreachable,
         };
         const replay = switch (turn) {
+            .host_context => null,
             .assistant => |entry| entry.provider_replay,
             .interrupted => null,
             .compacted_summary => unreachable,
         };
         var base = textTokens(user) +| textTokens(reply) +| replay_tokens(replay, provider) +| 8;
         var steering_index = execution.steering.len;
+        var note_index = execution.context_notes.len;
         var step_index = execution.tool_steps.len;
         if (step_index == 0) {
             for (execution.steering) |entry| {
                 base +|= textTokens(entry.text);
                 if (entry.assistant_prefix) |prefix| base +|= textTokens(prefix);
             }
+            for (execution.context_notes) |note| base +|= textTokens(note.text);
             if (input_capacity) |capacity| {
                 if (!selected_any and base >= capacity) break :history_scan;
             }
@@ -233,6 +254,11 @@ fn selectRecentContext(
                 next_steering -= 1;
                 cost +|= textTokens(execution.steering[next_steering].text);
                 if (execution.steering[next_steering].assistant_prefix) |prefix| cost +|= textTokens(prefix);
+            }
+            // A cut here keeps the notes at and after this boundary (D93).
+            while (note_index > 0 and execution.context_notes[note_index - 1].after_tool_step_count >= step_index) {
+                note_index -= 1;
+                cost +|= textTokens(execution.context_notes[note_index].text);
             }
             if (!selected_any and cost > target) break :history_scan;
             if (input_capacity) |capacity| {
@@ -365,8 +391,10 @@ const testing = std.testing;
 const selection: model_provider.ProviderSelection = .{ .provider = .gateway, .model = "fixture-model" };
 
 test "compactor input budget follows normal model capacity" {
-    try testing.expectEqual(@as(?usize, 296_816), usableInputTokens(.{ .context_window = 500_000, .max_output_tokens = 203_184 }));
-    try testing.expectEqual(@as(?usize, 500_000 - 32_768), usableInputTokens(.{ .context_window = 500_000, .max_output_tokens = 500_000 }));
+    try testing.expectEqual(@as(?usize, 492_000), usableInputTokens(.{ .context_window = 500_000, .max_output_tokens = 8_000 }));
+    try testing.expectEqual(@as(?usize, 480_000), usableInputTokens(.{ .context_window = 500_000, .max_output_tokens = 203_184 }));
+    try testing.expectEqual(@as(?usize, 480_000), usableInputTokens(.{ .context_window = 500_000, .max_output_tokens = 500_000 }));
+    try testing.expectEqual(@as(?usize, 180_000), usableInputTokens(.{ .context_window = 200_000, .max_output_tokens = 128_000 }));
     try testing.expectEqual(@as(?usize, null), usableInputTokens(.{}));
 }
 
@@ -443,19 +471,24 @@ test "retained context keeps at most the requested number of turns" {
 
 test "automatic compaction starts at the configured share of usable input" {
     const capabilities = model_capabilities.Capabilities{ .context_window = 1_000_000, .max_output_tokens = 128_000 };
-    try testing.expectEqual(@as(?usize, 697_600), compactAtTokens(capabilities, 80));
-    try testing.expectEqual(@as(?usize, 87_200), compactAtTokens(capabilities, 10));
-    try testing.expectEqual(@as(?usize, 697_600), compactAtTokens(capabilities, 100));
-    try testing.expectEqual(@as(?usize, 87_200), compactAtTokens(capabilities, 1));
+    try testing.expectEqual(@as(?usize, 784_000), compactAtTokens(capabilities, 80));
+    try testing.expectEqual(@as(?usize, 98_000), compactAtTokens(capabilities, 10));
+    try testing.expectEqual(@as(?usize, 784_000), compactAtTokens(capabilities, 100));
+    try testing.expectEqual(@as(?usize, 98_000), compactAtTokens(capabilities, 1));
     try testing.expectEqual(@as(?usize, null), compactAtTokens(.{}, 80));
 }
 
-test "the compacted text may use half the compaction point, less the fixed part and the kept turns" {
+test "the compacted text fits the room after compaction, less the fixed part and the kept turns" {
+    // A fifth of the usable input less the fixed part, below half the compaction point.
     const size: Size = .{ .compact_at_tokens = 100_000, .usable_tokens = 125_000, .fixed_tokens = 10_000 };
-    try testing.expectEqual(@as(usize, 35_000), size.compactedTokens(5_000));
-    // A fixed part that fills the half leaves a quarter of it.
+    try testing.expectEqual(@as(usize, 10_000), size.compactedTokens(5_000));
+    // A 128k window: the room after compaction is a fifth of its usable input (window - 20k), not half the compaction point.
+    const window = Size.of(.{ .context_window = 131_072, .max_output_tokens = 32_768 }, .{ .percent = 80 });
+    const sized: Size = .{ .compact_at_tokens = window.compact_at_tokens, .usable_tokens = window.usable_tokens, .fixed_tokens = 3_000 };
+    try testing.expectEqual(@as(usize, 14_214), sized.compactedTokens(5_000));
+    // A fixed part that fills the room leaves a quarter of it.
     const crowded: Size = .{ .compact_at_tokens = 100_000, .usable_tokens = 125_000, .fixed_tokens = 60_000 };
-    try testing.expectEqual(@as(usize, 12_500), crowded.compactedTokens(0));
+    try testing.expectEqual(@as(usize, 6_250), crowded.compactedTokens(0));
     const unknown: Size = .{ .compact_at_tokens = null, .usable_tokens = null };
     try testing.expectEqual(std.math.maxInt(usize), unknown.compactedTokens(0));
 }
@@ -593,4 +626,24 @@ test "a request after the conversation gets what the conversation leaves" {
     try testing.expectEqual(@as(?usize, null), (Size{ .compact_at_tokens = 96_000, .usable_tokens = 120_000 }).roomAfterConversation());
     try testing.expectEqual(@as(?usize, null), (Size{ .compact_at_tokens = 96_000, .usable_tokens = 120_000, .request_tokens = 120_000 }).roomAfterConversation());
     try testing.expectEqual(@as(?usize, null), (Size{ .compact_at_tokens = 96_000, .usable_tokens = 120_000, .request_tokens = 100_000, .overflow = true }).roomAfterConversation());
+}
+
+test "token trigger is used as given within the window and works without a known window" {
+    const capabilities = model_capabilities.Capabilities{ .context_window = 8192, .max_output_tokens = 1024 };
+    try testing.expectEqual(@as(?usize, 3000), compactAtTrigger(capabilities, .{ .tokens = 3000 }));
+    try testing.expectEqual(@as(?usize, 7500), compactAtTrigger(capabilities, .{ .tokens = 7500 }));
+    try testing.expectEqual(@as(?usize, 8192), compactAtTrigger(capabilities, .{ .tokens = 9000 }));
+    const large_output = model_capabilities.Capabilities{ .context_window = 200_000, .max_output_tokens = 128_000 };
+    try testing.expectEqual(@as(?usize, 167_000), compactAtTrigger(large_output, .{ .tokens = 167_000 }));
+    try testing.expectEqual(@as(?usize, 131_072), compactAtTrigger(.{}, .{ .tokens = 131_072 }));
+    try testing.expectEqual(compactAtTokens(capabilities, 10), compactAtTrigger(capabilities, .{ .percent = 10 }));
+    try testing.expectEqual(compactAtTokens(capabilities, 80), compactAtTrigger(capabilities, .{ .percent = 80 }));
+    var size = Size.of(capabilities, .{ .tokens = 3000 });
+    size.request_tokens = 2999;
+    try testing.expect(!size.due());
+    size.request_tokens = 3000;
+    try testing.expect(size.due());
+    size.request_tokens = 3001;
+    try testing.expect(size.due());
+    try testing.expectEqual(@as(?usize, 7168), size.usable_tokens);
 }

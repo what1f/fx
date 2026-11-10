@@ -81,7 +81,7 @@ fn firstPromptCandidate(history: []const session.HistoryTurn) ?PromptCandidate {
         switch (turn) {
             .assistant => |entry| if (promptCandidateFromUser(entry.user)) |candidate| return candidate,
             .interrupted => |entry| if (promptCandidateFromUser(entry.user)) |candidate| return candidate,
-            .compacted_summary => {},
+            .compacted_summary, .host_context => {},
         }
     }
     return null;

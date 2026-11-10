@@ -1,0 +1,457 @@
+{
+  "responses": [
+    {
+      "request": 1,
+      "kind": "conversation",
+      "input_tokens": 489,
+      "input_tokens_details.cached_tokens": 256,
+      "output_tokens": 385,
+      "output_tokens_details.reasoning_tokens": 375,
+      "total_tokens": 874
+    },
+    {
+      "request": 2,
+      "kind": "conversation",
+      "input_tokens": 884,
+      "input_tokens_details.cached_tokens": 640,
+      "output_tokens": 7,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 891
+    },
+    {
+      "request": 3,
+      "kind": "conversation",
+      "input_tokens": 908,
+      "input_tokens_details.cached_tokens": 768,
+      "output_tokens": 56,
+      "output_tokens_details.reasoning_tokens": 15,
+      "total_tokens": 964
+    },
+    {
+      "request": 4,
+      "kind": "conversation",
+      "input_tokens": 1080,
+      "input_tokens_details.cached_tokens": 896,
+      "output_tokens": 22,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 1102
+    },
+    {
+      "request": 5,
+      "kind": "conversation",
+      "input_tokens": 1119,
+      "input_tokens_details.cached_tokens": 896,
+      "output_tokens": 11,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 1130
+    },
+    {
+      "request": 6,
+      "kind": "conversation",
+      "input_tokens": 1153,
+      "input_tokens_details.cached_tokens": 896,
+      "output_tokens": 42,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 1195
+    },
+    {
+      "request": 7,
+      "kind": "conversation",
+      "input_tokens": 1315,
+      "input_tokens_details.cached_tokens": 1152,
+      "output_tokens": 23,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 1338
+    },
+    {
+      "request": 8,
+      "kind": "conversation",
+      "input_tokens": 1352,
+      "input_tokens_details.cached_tokens": 1152,
+      "output_tokens": 15,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 1367
+    },
+    {
+      "request": 9,
+      "kind": "conversation",
+      "input_tokens": 1384,
+      "input_tokens_details.cached_tokens": 1152,
+      "output_tokens": 34,
+      "output_tokens_details.reasoning_tokens": 11,
+      "total_tokens": 1418
+    },
+    {
+      "request": 10,
+      "kind": "conversation",
+      "input_tokens": 1434,
+      "input_tokens_details.cached_tokens": 1280,
+      "output_tokens": 11,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 1445
+    },
+    {
+      "request": 11,
+      "kind": "conversation",
+      "input_tokens": 1595,
+      "input_tokens_details.cached_tokens": 1408,
+      "output_tokens": 41,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 1636
+    },
+    {
+      "request": 12,
+      "kind": "conversation",
+      "input_tokens": 1752,
+      "input_tokens_details.cached_tokens": 1536,
+      "output_tokens": 22,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 1774
+    },
+    {
+      "request": 13,
+      "kind": "conversation",
+      "input_tokens": 1790,
+      "input_tokens_details.cached_tokens": 1536,
+      "output_tokens": 10,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 1800
+    },
+    {
+      "request": 14,
+      "kind": "conversation",
+      "input_tokens": 1950,
+      "input_tokens_details.cached_tokens": 1792,
+      "output_tokens": 22,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 1972
+    },
+    {
+      "request": 15,
+      "kind": "conversation",
+      "input_tokens": 1989,
+      "input_tokens_details.cached_tokens": 1792,
+      "output_tokens": 18,
+      "output_tokens_details.reasoning_tokens": 6,
+      "total_tokens": 2007
+    },
+    {
+      "request": 16,
+      "kind": "conversation",
+      "input_tokens": 2140,
+      "input_tokens_details.cached_tokens": 1920,
+      "output_tokens": 87,
+      "output_tokens_details.reasoning_tokens": 46,
+      "total_tokens": 2227
+    },
+    {
+      "request": 17,
+      "kind": "conversation",
+      "input_tokens": 2240,
+      "input_tokens_details.cached_tokens": 2048,
+      "output_tokens": 26,
+      "output_tokens_details.reasoning_tokens": 9,
+      "total_tokens": 2266
+    },
+    {
+      "request": 18,
+      "kind": "conversation",
+      "input_tokens": 6519,
+      "input_tokens_details.cached_tokens": 2176,
+      "output_tokens": 35,
+      "output_tokens_details.reasoning_tokens": 32,
+      "total_tokens": 6554
+    },
+    {
+      "request": 19,
+      "kind": "conversation",
+      "input_tokens": 10775,
+      "input_tokens_details.cached_tokens": 6528,
+      "output_tokens": 3,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 10778
+    },
+    {
+      "request": 20,
+      "kind": "compaction",
+      "input_tokens": 16099,
+      "input_tokens_details.cached_tokens": 10752,
+      "output_tokens": 2089,
+      "output_tokens_details.reasoning_tokens": 669,
+      "total_tokens": 18188
+    },
+    {
+      "request": 21,
+      "kind": "compaction",
+      "input_tokens": 15498,
+      "input_tokens_details.cached_tokens": 14848,
+      "output_tokens": 4417,
+      "output_tokens_details.reasoning_tokens": 3389,
+      "total_tokens": 19915
+    },
+    {
+      "request": 22,
+      "kind": "conversation",
+      "input_tokens": 6902,
+      "input_tokens_details.cached_tokens": 256,
+      "output_tokens": 53,
+      "output_tokens_details.reasoning_tokens": 50,
+      "total_tokens": 6955
+    },
+    {
+      "request": 23,
+      "kind": "conversation",
+      "input_tokens": 6973,
+      "input_tokens_details.cached_tokens": 6784,
+      "output_tokens": 13,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 6986
+    },
+    {
+      "request": 24,
+      "kind": "conversation",
+      "input_tokens": 7001,
+      "input_tokens_details.cached_tokens": 6784,
+      "output_tokens": 65,
+      "output_tokens_details.reasoning_tokens": 24,
+      "total_tokens": 7066
+    },
+    {
+      "request": 25,
+      "kind": "conversation",
+      "input_tokens": 7182,
+      "input_tokens_details.cached_tokens": 7040,
+      "output_tokens": 22,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 7204
+    },
+    {
+      "request": 26,
+      "kind": "conversation",
+      "input_tokens": 7221,
+      "input_tokens_details.cached_tokens": 7040,
+      "output_tokens": 11,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 7232
+    },
+    {
+      "request": 27,
+      "kind": "conversation",
+      "input_tokens": 7243,
+      "input_tokens_details.cached_tokens": 7040,
+      "output_tokens": 6,
+      "output_tokens_details.reasoning_tokens": 0,
+      "total_tokens": 7249
+    }
+  ],
+  "messages": [
+    {
+      "request": 1,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 384,
+      "input_tokens": 168,
+      "output_tokens": 2
+    },
+    {
+      "request": 2,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 384,
+      "input_tokens": 180,
+      "output_tokens": 51
+    },
+    {
+      "request": 3,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 384,
+      "input_tokens": 248,
+      "output_tokens": 57
+    },
+    {
+      "request": 4,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 512,
+      "input_tokens": 248,
+      "output_tokens": 54
+    },
+    {
+      "request": 5,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 640,
+      "input_tokens": 191,
+      "output_tokens": 10
+    },
+    {
+      "request": 6,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 640,
+      "input_tokens": 224,
+      "output_tokens": 51
+    },
+    {
+      "request": 7,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 768,
+      "input_tokens": 213,
+      "output_tokens": 55
+    },
+    {
+      "request": 8,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 896,
+      "input_tokens": 154,
+      "output_tokens": 17
+    },
+    {
+      "request": 9,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 896,
+      "input_tokens": 188,
+      "output_tokens": 111
+    },
+    {
+      "request": 10,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 1024,
+      "input_tokens": 187,
+      "output_tokens": 10
+    },
+    {
+      "request": 11,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 1152,
+      "input_tokens": 219,
+      "output_tokens": 149
+    },
+    {
+      "request": 12,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 1408,
+      "input_tokens": 183,
+      "output_tokens": 54
+    },
+    {
+      "request": 13,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 1408,
+      "input_tokens": 253,
+      "output_tokens": 11
+    },
+    {
+      "request": 14,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 1664,
+      "input_tokens": 158,
+      "output_tokens": 72
+    },
+    {
+      "request": 15,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 1664,
+      "input_tokens": 247,
+      "output_tokens": 10
+    },
+    {
+      "request": 16,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 1920,
+      "input_tokens": 134,
+      "output_tokens": 41
+    },
+    {
+      "request": 17,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 1920,
+      "input_tokens": 188,
+      "output_tokens": 42
+    },
+    {
+      "request": 18,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 2048,
+      "input_tokens": 4355,
+      "output_tokens": 10
+    },
+    {
+      "request": 19,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 6400,
+      "input_tokens": 4234,
+      "output_tokens": 4
+    },
+    {
+      "request": 20,
+      "kind": "compaction",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 10624,
+      "input_tokens": 5345,
+      "output_tokens": 1917
+    },
+    {
+      "request": 21,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 384,
+      "input_tokens": 6684,
+      "output_tokens": 57
+    },
+    {
+      "request": 22,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 6912,
+      "input_tokens": 231,
+      "output_tokens": 15
+    },
+    {
+      "request": 23,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 6912,
+      "input_tokens": 261,
+      "output_tokens": 100
+    },
+    {
+      "request": 24,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 7168,
+      "input_tokens": 176,
+      "output_tokens": 54
+    },
+    {
+      "request": 25,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 7168,
+      "input_tokens": 247,
+      "output_tokens": 10
+    },
+    {
+      "request": 26,
+      "kind": "conversation",
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 7296,
+      "input_tokens": 140,
+      "output_tokens": 6
+    }
+  ]
+}

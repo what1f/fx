@@ -7,7 +7,6 @@ const command_replay_store = @import("../../session/command_replay_store.zig");
 const context_limits = @import("../../config/context_limits.zig");
 const compactor = @import("../../compactor/compactor.zig");
 const workspace_access = @import("../../workspace/workspace_access.zig");
-const model_response_recovery = @import("model_response_recovery.zig");
 const provider_set = @import("../../gateway/provider_set.zig");
 const model_tool_schema = @import("../../tooling/model_tool_schema.zig");
 const stream_provider = @import("../stream_provider.zig");
@@ -28,13 +27,11 @@ pub const Config = struct {
     skill_catalog: skill_invocation.Catalog = .{ .skills = &.{} },
     skill_bindings: []const skill_invocation.ExplicitBinding = &.{},
     gateway_retry_count: usize,
-    max_provider_attempts: usize = model_response_recovery.default_max_provider_attempts,
-    /// Interactive hosts may request a durable "try later" pause separately
-    /// from cancellation. Headless hosts leave this null.
-    recovery_pause_flag: ?*std.atomic.Value(bool) = null,
     gateway_chat_url: []const u8,
     advertised_tool_names: []const []const u8 = &.{},
     advertised_functions: []const model_tool_schema.FunctionSchema = &.{},
+    /// Current catalog reminder to append again after context compaction.
+    context_snapshots: []const types.HistoryTurn = &.{},
     initial_dynamic_tools: []const stream_provider.DynamicFunctionTool = &.{},
     provider_capabilities: provider_set.Bundle.Capabilities = .{
         .gateway_prompt_caching = true,
@@ -46,8 +43,13 @@ pub const Config = struct {
     max_tool_result_bytes: usize = tool_result_limits.default_max_tool_result_bytes,
     /// Share of the model's usable input at which automatic compaction starts.
     auto_compact_percent: u8 = compactor.default_percent,
+    auto_compact: ?compactor.Trigger = null,
     step_limit_notice: []const u8 = default_step_limit_notice,
     cancel_flag: *std.atomic.Value(bool),
+    /// Set by a host that can ask the user, which only the TUI does: a
+    /// request that needs the user then waits for this flag or the cancel
+    /// flag. Without it, such a request ends the turn.
+    recovery_continue_flag: ?*std.atomic.Value(bool) = null,
     review_enabled: bool = false,
     fast_mode: bool = false,
     ultrafast_mode: bool = false,

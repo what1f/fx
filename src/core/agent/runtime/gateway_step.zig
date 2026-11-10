@@ -142,7 +142,7 @@ fn recordProviderResultMetric(
     runtime_telemetry.recordGatewayCallMetricWithDiagnostics(
         model,
         started_at_ms,
-        if (failure) |value| failureMetricCode(value.kind) else 200,
+        if (failure) |value| if (value.http_status) |status| @backingInt(status) else failureMetricCode(value.kind) else 200,
         truncated_bytes,
         input_tokens,
         output_tokens,
@@ -154,6 +154,7 @@ fn recordProviderResultMetric(
         .{
             .schema = if (failure) |value| value.diagnostics.schema orelse "" else "",
             .request_shape = if (failure) |value| value.diagnostics.request_shape orelse "" else "",
+            .provider_stop_reason = completion.finish_reason_raw.slice(),
         },
     );
 }
@@ -240,7 +241,7 @@ fn failureMetricCode(kind: agent_stream_provider.FailureKind) u16 {
         .unauthorized => 401,
         .forbidden => 403,
         .request_too_large => 413,
-        .rate_limited => 429,
+        .rate_limited, .quota_exhausted => 429,
         .server_error => 500,
         .bad_gateway => 502,
         .unavailable => 503,
@@ -415,10 +416,11 @@ pub fn recordSelectedDynamicTool(alloc: Allocator, tools: *std.ArrayList(agent_s
             existing.description = description.string;
             existing.input_schema = input_schema;
             existing.mcp_binding = selected.mcp_binding;
+            existing.deferred = if (schema.object.get("deferred")) |v| v == .bool and v.bool else false;
             return;
         }
     }
-    try tools.append(alloc, .{ .name = name, .description = description.string, .input_schema = input_schema, .mcp_binding = selected.mcp_binding });
+    try tools.append(alloc, .{ .name = name, .description = description.string, .input_schema = input_schema, .mcp_binding = selected.mcp_binding, .deferred = if (schema.object.get("deferred")) |v| v == .bool and v.bool else false });
 }
 
 pub fn gatewayHttpErrorDetail(

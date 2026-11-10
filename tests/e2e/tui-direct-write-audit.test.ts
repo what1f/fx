@@ -92,6 +92,9 @@ describe("tui: direct-write audit", () => {
     expect(output).toContain("category=terminal_reset");
     expect(output).toContain("path=src/core/app/app_entry_runtime.zig");
     expect(output).toContain("function=writeRealStdout");
+    expect(output).toMatch(
+      /path=src\/gateway\/responses_diagnostics\.zig .*function=record .*category=noninteractive_output/,
+    );
   });
 
   test("accepts owned forms and rejects unowned acquisition or writes", () => {
@@ -292,7 +295,7 @@ describe("tui: direct-write audit", () => {
     ]);
 
     const main = sources.find(({ path }) => path === "src/main.zig")!.source;
-    expect(main.match(/RenderAppRuntime\.flushRequestedFrame\(self\)/g) ?? []).toHaveLength(1);
+    expect(main.match(/RenderAppRuntime\.flushRequestedFrame\(self, self\.screenAgent\(\)\)/g) ?? []).toHaveLength(1);
 
     const coordinator = sources.find(
       ({ path }) => path === "src/core/app/app_render_runtime.zig",
@@ -300,7 +303,7 @@ describe("tui: direct-write audit", () => {
     const productionCoordinator = coordinator.split('\ntest "')[0]!;
     expect(productionCoordinator.match(/flushRequestedFrame\(/g) ?? []).toHaveLength(1);
     expect(
-      productionCoordinator.match(/attemptRequestedFrame\(app, snapshot\)/g) ?? [],
+      productionCoordinator.match(/attemptRequestedFrame\(app, agent, snapshot\)/g) ?? [],
     ).toHaveLength(1);
   });
 });
